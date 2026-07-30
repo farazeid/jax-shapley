@@ -54,8 +54,8 @@ class Args:
     )
     panel_titles: tuple[str, ...] = (
         "Gridworld",
-        "Hypercube 2×2",
-        "Hypercube 6×5",
+        "Hypercube 2x2",
+        "Hypercube 6x5",
         "Mastermind-222",
     )
     backend_keys: tuple[str, ...] = ("gymnasium_cpu", "jax_cpu", "jax_gpu")
@@ -267,7 +267,7 @@ Component-level counts and every per-configuration result are retained in
 ## Throughput
 
 Rates below are median environment transitions per second over five samples. The
-Gridworld, Hypercube 2×2, and Mastermind rows use 2,048 environments. Hypercube 6×5
+Gridworld, Hypercube 2x2, and Mastermind rows use 2,048 environments. Hypercube 6x5
 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 {endpoint_table(args, summary)}
@@ -286,7 +286,7 @@ The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX uses `jit(vmap(ste
 inside `lax.scan`, synchronizing with `block_until_ready()`. Identical deterministic
 action schedules are used. The original implementation has no GPU path.
 
-For Hypercube 6×5, the unmodified source owns a large transition dictionary per worker.
+For Hypercube 6x5, the unmodified source owns a large transition dictionary per worker.
 The safe-source probe reported: `{cap_note}`. Original points above 16 are retained as
 `memory_infeasible`; JAX CPU and GPU include the complete curve through 2,048.
 
@@ -391,7 +391,7 @@ def endpoint_table(args: Args, summary: pd.DataFrame) -> str:
         gpu_speedup = gpu / original if gpu is not None and original is not None else np.nan
         lines.append(
             f"| {title} | {workers:,} | {format_rate(original)} | {format_rate(cpu)} | "
-            f"{format_rate(gpu)} | {cpu_speedup:,.1f}× | {gpu_speedup:,.1f}× |"
+            f"{format_rate(gpu)} | {cpu_speedup:,.1f}x | {gpu_speedup:,.1f}x |"
         )
     return "\n".join(lines)
 

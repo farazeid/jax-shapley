@@ -19,15 +19,15 @@ Component-level counts and every per-configuration result are retained in
 ## Throughput
 
 Rates below are median environment transitions per second over five samples. The
-Gridworld, Hypercube 2×2, and Mastermind rows use 2,048 environments. Hypercube 6×5
+Gridworld, Hypercube 2x2, and Mastermind rows use 2,048 environments. Hypercube 6x5
 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 | Environment | Workers | Gymnasium CPU | JAX CPU | JAX GPU | CPU speedup | GPU speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Gridworld | 2,048 | 216,062 | 8,935,941 | 196,861,104 | 41.4× | 911.1× |
-| Hypercube 2×2 | 2,048 | 222,354 | 27,859,808 | 207,388,886 | 125.3× | 932.7× |
-| Hypercube 6×5 | 16 | 211,298 | 8,201,712 | 1,948,432 | 38.8× | 9.2× |
-| Mastermind-222 | 2,048 | 66,845 | 6,597,059 | 176,219,751 | 98.7× | 2,636.2× |
+| Gridworld | 2,048 | 216,062 | 8,935,941 | 196,861,104 | 41.4x | 911.1x |
+| Hypercube 2x2 | 2,048 | 222,354 | 27,859,808 | 207,388,886 | 125.3x | 932.7x |
+| Hypercube 6x5 | 16 | 211,298 | 8,201,712 | 1,948,432 | 38.8x | 9.2x |
+| Mastermind-222 | 2,048 | 66,845 | 6,597,059 | 176,219,751 | 98.7x | 2,636.2x |
 
 ![Environment throughput](figures/envs-port--throughput.svg)
 
@@ -43,7 +43,7 @@ The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX uses `jit(vmap(ste
 inside `lax.scan`, synchronizing with `block_until_ready()`. Identical deterministic
 action schedules are used. The original implementation has no GPU path.
 
-For Hypercube 6×5, the unmodified source owns a large transition dictionary per worker.
+For Hypercube 6x5, the unmodified source owns a large transition dictionary per worker.
 The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s construction; safe cap 16`. Original points above 16 are retained as
 `memory_infeasible`; JAX CPU and GPU include the complete curve through 2,048.
 
