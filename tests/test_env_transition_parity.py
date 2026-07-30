@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,34 +24,48 @@ from jax_shapley.envs import (
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "fastsverl_transitions.npz"
 
 
-def _difference_mask(actual: np.ndarray, expected: np.ndarray) -> np.ndarray:
-    actual = np.asarray(actual)
-    expected = np.asarray(expected)
-    if actual.ndim <= 1:
-        return actual != expected
-    axes = tuple(range(1, actual.ndim))
-    return np.any(actual != expected, axis=axes)
+@pytest.mark.slow
+def test_exhaustive_transition_parity(request: pytest.FixtureRequest) -> None:
+    output = request.config.getoption("--parity-output")
+    assert_zero_mismatches(measure_parity(output))
 
 
-def _result_row(tested: int, **components: np.ndarray) -> dict[str, int]:
-    masks = {name: np.asarray(mask, dtype=np.bool_) for name, mask in components.items()}
-    record_mask = np.logical_or.reduce(tuple(masks.values()))
-    return {
-        "tested": tested,
-        "mismatched": int(np.count_nonzero(record_mask)),
-        **{name: int(np.count_nonzero(mask)) for name, mask in masks.items()},
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_gpu_exhaustive_transition_parity(request: pytest.FixtureRequest) -> None:
+    try:
+        gpu_devices = jax.devices("gpu")
+    except RuntimeError:
+        gpu_devices = []
+    if not gpu_devices:
+        if os.environ.get("JAX_PLATFORMS") in {"cuda", "gpu"}:
+            pytest.fail("a GPU JAX platform was requested but no GPU backend is available")
+        pytest.skip("CUDA-enabled JAX is not installed")
+    assert jax.default_backend() == "gpu"
+    output = request.config.getoption("--parity-output")
+    assert_zero_mismatches(measure_parity(output))
+
+
+def measure_parity(output: Path | None) -> dict[str, dict[str, int]]:
+    results = transition_parity_counts(FIXTURE_PATH)
+    if output is not None:
+        write_parity_csv(output, parity_rows(jax.default_backend(), results))
+    return results
+
+
+def assert_zero_mismatches(results: dict[str, dict[str, int]]) -> None:
+    assert sum(row["tested"] for row in results.values()) == 143_136
+    failures = {
+        name: {field: value for field, value in row.items() if field != "tested" and value}
+        for name, row in results.items()
     }
+    failures = {name: row for name, row in failures.items() if row}
+    assert not failures, failures
 
 
-def _batched_raw_step(
-    step: Callable, keys: jax.Array, state: object, actions: jax.Array, params: object
-) -> tuple:
-    return jax.jit(jax.vmap(step, in_axes=(0, 0, 0, None)))(keys, state, actions, params)
-
-
-def parity_counts() -> dict[str, dict[str, int]]:
-    """Return component-level mismatch counts for all captured transitions."""
-    fixture = np.load(FIXTURE_PATH)
+def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
+    """Return component-level mismatch counts for captured reference transitions."""
+    fixture = np.load(fixture_path)
     results: dict[str, dict[str, int]] = {}
 
     env = Gridworld()
@@ -142,29 +158,80 @@ def parity_counts() -> dict[str, dict[str, int]]:
     return results
 
 
-def _assert_zero_mismatches(results: dict[str, dict[str, int]]) -> None:
-    assert sum(row["tested"] for row in results.values()) == 143_136
-    failures = {
-        name: {field: value for field, value in row.items() if field != "tested" and value}
-        for name, row in results.items()
+def _batched_raw_step(
+    step: Callable, keys: jax.Array, state: object, actions: jax.Array, params: object
+) -> tuple:
+    return jax.jit(jax.vmap(step, in_axes=(0, 0, 0, None)))(keys, state, actions, params)
+
+
+def _result_row(tested: int, **components: np.ndarray) -> dict[str, int]:
+    masks = {name: np.asarray(mask, dtype=np.bool_) for name, mask in components.items()}
+    record_mask = np.logical_or.reduce(tuple(masks.values()))
+    return {
+        "tested": tested,
+        "mismatched": int(np.count_nonzero(record_mask)),
+        **{name: int(np.count_nonzero(mask)) for name, mask in masks.items()},
     }
-    failures = {name: row for name, row in failures.items() if row}
-    assert not failures, failures
 
 
-@pytest.mark.slow
-def test_exhaustive_transition_parity() -> None:
-    _assert_zero_mismatches(parity_counts())
+def _difference_mask(actual: np.ndarray, expected: np.ndarray) -> np.ndarray:
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    if actual.ndim <= 1:
+        return actual != expected
+    axes = tuple(range(1, actual.ndim))
+    return np.any(actual != expected, axis=axes)
 
 
-@pytest.mark.gpu
-@pytest.mark.slow
-def test_gpu_exhaustive_transition_parity() -> None:
-    try:
-        gpu_devices = jax.devices("gpu")
-    except RuntimeError:
-        gpu_devices = []
-    if not gpu_devices:
-        pytest.skip("CUDA-enabled JAX is not installed")
-    assert jax.default_backend() == "gpu"
-    _assert_zero_mismatches(parity_counts())
+def parity_rows(
+    backend: str,
+    results: dict[str, dict[str, int]],
+) -> list[dict[str, object]]:
+    rows = [
+        {
+            "backend": backend,
+            "environment": environment,
+            **counts,
+            "mismatch_proportion": counts["mismatched"] / counts["tested"],
+        }
+        for environment, counts in results.items()
+    ]
+    count_fields = (
+        "tested",
+        "mismatched",
+        "observation",
+        "state",
+        "reward",
+        "terminated",
+        "truncated",
+    )
+    aggregate = {key: sum(row[key] for row in results.values()) for key in count_fields}
+    rows.append(
+        {
+            "backend": backend,
+            "environment": "aggregate",
+            **aggregate,
+            "mismatch_proportion": aggregate["mismatched"] / aggregate["tested"],
+        }
+    )
+    return rows
+
+
+def write_parity_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "backend",
+        "environment",
+        "tested",
+        "mismatched",
+        "mismatch_proportion",
+        "observation",
+        "state",
+        "reward",
+        "terminated",
+        "truncated",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
