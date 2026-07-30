@@ -1,5 +1,7 @@
 """JAX port of FastSVERL's deterministic 2 x 4 Gridworld."""
 
+from typing import overload
+
 import jax
 import jax.numpy as jnp
 from flax import struct
@@ -78,13 +80,25 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    @overload
+    def get_obs(self, state: GridworldState) -> jax.Array: ...
+
+    @overload
+    def get_obs(self, state: GridworldState, params: GridworldParams) -> jax.Array: ...
+
+    @overload
+    def get_obs(
+        self, state: GridworldState, key: jax.Array, params: GridworldParams
+    ) -> jax.Array: ...
+
     def get_obs(
         self,
         state: GridworldState,
+        *args: GridworldParams | jax.Array,
         params: GridworldParams | None = None,
         key: jax.Array | None = None,
     ) -> jax.Array:
-        del params, key
+        del args, params, key
         return state.position
 
     def is_terminal(self, state: GridworldState, params: GridworldParams) -> jax.Array:

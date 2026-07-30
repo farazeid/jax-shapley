@@ -1,5 +1,7 @@
 """JAX port of FastSVERL's obstacle-free Hypercube environment."""
 
+from typing import overload
+
 import jax
 import jax.numpy as jnp
 from flax import struct
@@ -80,13 +82,25 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    @overload
+    def get_obs(self, state: HypercubeState) -> jax.Array: ...
+
+    @overload
+    def get_obs(self, state: HypercubeState, params: HypercubeParams) -> jax.Array: ...
+
+    @overload
+    def get_obs(
+        self, state: HypercubeState, key: jax.Array, params: HypercubeParams
+    ) -> jax.Array: ...
+
     def get_obs(
         self,
         state: HypercubeState,
+        *args: HypercubeParams | jax.Array,
         params: HypercubeParams | None = None,
         key: jax.Array | None = None,
     ) -> jax.Array:
-        del params, key
+        del args, params, key
         return state.position
 
     def is_terminal(self, state: HypercubeState, params: HypercubeParams) -> jax.Array:

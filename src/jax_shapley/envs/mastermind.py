@@ -1,5 +1,7 @@
 """JAX port of FastSVERL's Mastermind-222 environment."""
 
+from typing import overload
+
 import jax
 import jax.numpy as jnp
 from flax import struct
@@ -100,13 +102,25 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    @overload
+    def get_obs(self, state: Mastermind222State) -> jax.Array: ...
+
+    @overload
+    def get_obs(self, state: Mastermind222State, params: Mastermind222Params) -> jax.Array: ...
+
+    @overload
+    def get_obs(
+        self, state: Mastermind222State, key: jax.Array, params: Mastermind222Params
+    ) -> jax.Array: ...
+
     def get_obs(
         self,
         state: Mastermind222State,
+        *args: Mastermind222Params | jax.Array,
         params: Mastermind222Params | None = None,
         key: jax.Array | None = None,
     ) -> jax.Array:
-        del params, key
+        del args, params, key
         return state.board.reshape(-1)
 
     def is_terminal(self, state: Mastermind222State, params: Mastermind222Params) -> jax.Array:
