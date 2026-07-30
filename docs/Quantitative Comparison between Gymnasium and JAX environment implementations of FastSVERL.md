@@ -7,7 +7,7 @@ GPU. Throughput depends strongly on batch size: GPU has overhead at small batche
 then reaches hundreds of millions of transitions per second at 2,048 environments.
 
 | JAX backend | Transitions tested | Mismatched | Proportion |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | CPU | 143,136 | 0 | 0.000000000000 |
 | GPU | 143,136 | 0 | 0.000000000000 |
 
@@ -23,7 +23,7 @@ Gridworld, Hypercube 2×2, and Mastermind rows use 2,048 environments. Hypercube
 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 | Environment | Workers | Gymnasium CPU | JAX CPU | JAX GPU | CPU speedup | GPU speedup |
-|---|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Gridworld | 2,048 | 216,062 | 8,935,941 | 196,861,104 | 41.4× | 911.1× |
 | Hypercube 2×2 | 2,048 | 222,354 | 27,859,808 | 207,388,886 | 125.3× | 932.7× |
 | Hypercube 6×5 | 16 | 211,298 | 8,201,712 | 1,948,432 | 38.8× | 9.2× |
