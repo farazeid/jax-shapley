@@ -64,6 +64,15 @@ The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s 
 
 ## Reproduction
 
+Run the complete pipeline from the repository root. It temporarily clones the pinned
+FastSVERL commit and removes the checkout on exit:
+
+```bash
+bash scripts/envs_port/run.sh
+```
+
+The equivalent individual stages are:
+
 ```bash
 uv sync --all-groups --extra cuda
 
