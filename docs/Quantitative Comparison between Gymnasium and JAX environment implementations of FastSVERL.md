@@ -59,7 +59,7 @@ The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s 
 - JAX/JAXLIB: 0.11.0 / 0.11.0
 - Gymnax: 0.0.9 (locked)
 - Gymnasium: 0.29.1
-- uv lock SHA-256: `ba3f74e0648eab6e2c632a9d4e742efbcf7eb8c68071e0bf8415ed91d1a1dbdc`
+- uv lock SHA-256: `2e6c6e14767944c9f2eae8ae1bf51b01ad59a92292eef9ed76176570f02f58dc`
 - FastSVERL source commit: `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`
 
 ## Reproduction
@@ -71,21 +71,27 @@ uv sync --all-groups --extra cuda
 JAX_PLATFORMS=cpu uv run --extra cuda pytest
 uv run --extra cuda pytest -m gpu
 
-# Parity CSVs
-PYTHONPATH=. JAX_PLATFORMS=cpu uv run --extra cuda python scripts/report_parity.py --output docs/data/envs-port--parity--cpu.csv
-PYTHONPATH=. uv run --extra cuda python scripts/report_parity.py --output docs/data/envs-port--parity--gpu.csv
+# Reference transitions; SOURCE_ROOT is a local checkout at the pinned commit
+uv run scripts/envs_port/collect_fastsverl_transitions.py --source-root "$SOURCE_ROOT"
 
-# Throughput; SOURCE_ROOT is a temporary checkout at the pinned commit
-uv run --group benchmark python scripts/benchmark_envs.py --backend original --source-root "$SOURCE_ROOT" --output docs/data/envs-port--throughput--gymnasium-cpu.csv
-JAX_PLATFORMS=cpu uv run --all-groups --extra cuda python scripts/benchmark_envs.py --backend jax --output docs/data/envs-port--throughput--jax-cpu.csv
-uv run --all-groups --extra cuda python scripts/benchmark_envs.py --backend jax --output docs/data/envs-port--throughput--jax-gpu.csv
-uv run --group benchmark python scripts/generate_environment_report.py
+# Parity CSVs are optional pytest outputs
+JAX_PLATFORMS=cpu uv run --extra cuda pytest tests/test_env_transition_parity.py -m "not gpu" --parity-output docs/data/envs-port--parity--cpu.csv
+JAX_PLATFORMS=cuda uv run --extra cuda pytest tests/test_env_transition_parity.py -m gpu --parity-output docs/data/envs-port--parity--gpu.csv
 
+# Throughput; SOURCE_ROOT is the same pinned local checkout
+uv run --group benchmark scripts/envs_port/benchmark_throughput.py --backend original --source-root "$SOURCE_ROOT" --output docs/data/envs-port--throughput--gymnasium-cpu.csv
+JAX_PLATFORMS=cpu uv run --all-groups --extra cuda scripts/envs_port/benchmark_throughput.py --backend jax --output docs/data/envs-port--throughput--jax-cpu.csv
+JAX_PLATFORMS=cuda uv run --all-groups --extra cuda scripts/envs_port/benchmark_throughput.py --backend jax --output docs/data/envs-port--throughput--jax-gpu.csv
+
+# Derived data and figures
+uv run --group benchmark scripts/envs_port/summarise_throughput.py
+uv run --group benchmark scripts/envs_port/plot_throughput.py
 ```
 
-All script settings shown above—and the rollout sizes, sample counts, timing threshold,
-figure dimensions, and output paths—are adjustable as `tyro` CLI options. Run any script
-with `--help` to inspect them.
+All script settings—including rollout sizes, sample counts, timing thresholds,
+confidence settings, figure dimensions, and output paths—are adjustable through `tyro`. Run
+any entry point with `--help` to inspect them. This Markdown report is maintained by hand;
+the scripts regenerate only measurements, the summary CSV, and figures.
 
 ## Provenance and limitations
 
