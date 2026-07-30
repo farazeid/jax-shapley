@@ -22,12 +22,14 @@ dev = [
     "numpy>=2.0",
     "pytest>=8.0",
     "ruff>=0.12",
+    "tyro>=0.9",
 ]
 benchmark = [
     "gymnasium==0.29.1",
     "matplotlib>=3.10",
     "psutil>=7.0",
     "tqdm>=4.67",
+    "tyro>=0.9",
 ]
 
 [tool.pytest.ini_options]
