@@ -1,0 +1,46 @@
+[build-system]
+requires = ["uv_build>=0.8.14,<0.9"]
+build-backend = "uv_build"
+
+[project]
+name = "jax-shapley"
+version = "0.1.0"
+description = "JAX-native reinforcement-learning environments for Shapley-value research"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "flax>=0.10",
+    "gymnax==0.0.9",
+    "jax>=0.6",
+]
+
+[project.optional-dependencies]
+cuda = ["jax[cuda13]>=0.6"]
+
+[dependency-groups]
+dev = [
+    "numpy>=2.0",
+    "pytest>=8.0",
+    "ruff>=0.12",
+]
+benchmark = [
+    "gymnasium==0.29.1",
+    "matplotlib>=3.10",
+    "psutil>=7.0",
+    "tqdm>=4.67",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+markers = [
+    "gpu: requires a JAX GPU backend",
+    "slow: exhaustive or performance-sensitive test",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

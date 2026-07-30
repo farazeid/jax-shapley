@@ -1,0 +1,15 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "fixture_sha256": "1c8637568704afaa463ff6b6d20735ba9634a0da5fa51f1e55edf180f352a611",
+  "source_sha256": {
+    "gridworld": "fa63ba4c4376f0ca3a4e6707c1758739a6fd5084b736ccd230b9188ecaca48bb",
+    "hypercube": "af586a54482cd0606a8137ea6df54f0a1c8b594c6e4dfef7fb8c5aacf3361e75",
+    "mastermind": "16ae8c47583ddf506ab074c965f5c0099c048a23d9090b3704e257e758663b5a"
+  },
+  "transition_counts": {
+    "gridworld": 20,
+    "hypercube": 143052,
+    "mastermind_222": 64,
+    "total": 143136
+  }
+}
