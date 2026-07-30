@@ -52,10 +52,10 @@ uv run ruff check .
 ```
 
 CPU and GPU each match all **143,136** source transitions with zero differences.
-See the [environment port report](docs/environment_port_report.md) for raw
+See the [environment port report](docs/Quantitative%20Comparison%20between%20Gymnasium%20and%20JAX%20environment%20implementations%20of%20FastSVERL.md) for raw
 CPU/GPU throughput, speedups, methodology, and reproduction commands.
 
-![Original vs JAX throughput](docs/figures/environment_throughput.svg)
+![Original vs JAX throughput](docs/figures/envs-port--throughput.svg)
 
 Agents, FastSVERL models, replay buffers, training, and paper evaluation
 reproduction are intentionally deferred to the later end-to-end JAX work.

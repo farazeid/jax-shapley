@@ -1,4 +1,4 @@
-# JAX environment port: parity and throughput
+# Quantitative Comparison between Gymnasium and JAX environment implementations of FastSVERL
 
 ## Result
 
@@ -7,14 +7,14 @@ GPU. Throughput depends strongly on batch size: GPU has overhead at small batche
 then reaches hundreds of millions of transitions per second at 2,048 environments.
 
 | JAX backend | Transitions tested | Mismatched | Proportion |
-| --- | ---: | ---: | ---: |
+|---|---:|---:|---:|
 | CPU | 143,136 | 0 | 0.000000000000 |
 | GPU | 143,136 | 0 | 0.000000000000 |
 
 The mismatch criterion is record-level: a transition is different if any next
 observation, environment-state field, reward, termination, or truncation value differs.
 Component-level counts and every per-configuration result are retained in
-`docs/data/parity_cpu.csv` and `docs/data/parity_gpu.csv`.
+`docs/data/envs-port--parity--cpu.csv` and `docs/data/envs-port--parity--gpu.csv`.
 
 ## Throughput
 
@@ -23,13 +23,13 @@ Gridworld, Hypercube 2×2, and Mastermind rows use 2,048 environments. Hypercube
 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 | Environment | Workers | Gymnasium CPU | JAX CPU | JAX GPU | CPU speedup | GPU speedup |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+|---|---:|---:|---:|---:|---:|---:|
 | Gridworld | 2,048 | 216,062 | 8,935,941 | 196,861,104 | 41.4× | 911.1× |
 | Hypercube 2×2 | 2,048 | 222,354 | 27,859,808 | 207,388,886 | 125.3× | 932.7× |
 | Hypercube 6×5 | 16 | 211,298 | 8,201,712 | 1,948,432 | 38.8× | 9.2× |
 | Mastermind-222 | 2,048 | 66,845 | 6,597,059 | 176,219,751 | 98.7× | 2,636.2× |
 
-![Environment throughput](figures/environment_throughput.svg)
+![Environment throughput](figures/envs-port--throughput.svg)
 
 The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed
 times, and IQRs are available in `docs/data/`. Initial reset, construction, action
@@ -56,7 +56,7 @@ The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s 
 - JAX/JAXLIB: 0.11.0 / 0.11.0
 - Gymnax: 0.0.9 (locked)
 - Gymnasium: 0.29.1
-- uv lock SHA-256: `c844907de86e8b0b08de87d79bfde8161740ec83f1c578b556b8a952038de9fc`
+- uv lock SHA-256: `ba3f74e0648eab6e2c632a9d4e742efbcf7eb8c68071e0bf8415ed91d1a1dbdc`
 - FastSVERL source commit: `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`
 
 ## Reproduction
@@ -69,20 +69,20 @@ JAX_PLATFORMS=cpu uv run --extra cuda pytest
 uv run --extra cuda pytest -m gpu
 
 # Parity CSVs
-PYTHONPATH=. JAX_PLATFORMS=cpu uv run --extra cuda python scripts/report_parity.py \
-  --output docs/data/parity_cpu.csv
-PYTHONPATH=. uv run --extra cuda python scripts/report_parity.py \
-  --output docs/data/parity_gpu.csv
+PYTHONPATH=. JAX_PLATFORMS=cpu uv run --extra cuda python scripts/report_parity.py --output docs/data/envs-port--parity--cpu.csv
+PYTHONPATH=. uv run --extra cuda python scripts/report_parity.py --output docs/data/envs-port--parity--gpu.csv
 
 # Throughput; SOURCE_ROOT is a temporary checkout at the pinned commit
-uv run --group benchmark python scripts/benchmark_envs.py --backend original \
-  --source-root "$SOURCE_ROOT" --output docs/data/throughput_gymnasium_cpu.csv
-JAX_PLATFORMS=cpu uv run --all-groups --extra cuda python scripts/benchmark_envs.py \
-  --backend jax --output docs/data/throughput_jax_cpu.csv
-uv run --all-groups --extra cuda python scripts/benchmark_envs.py \
-  --backend jax --output docs/data/throughput_jax_gpu.csv
+uv run --group benchmark python scripts/benchmark_envs.py --backend original --source-root "$SOURCE_ROOT" --output docs/data/envs-port--throughput--gymnasium-cpu.csv
+JAX_PLATFORMS=cpu uv run --all-groups --extra cuda python scripts/benchmark_envs.py --backend jax --output docs/data/envs-port--throughput--jax-cpu.csv
+uv run --all-groups --extra cuda python scripts/benchmark_envs.py --backend jax --output docs/data/envs-port--throughput--jax-gpu.csv
 uv run --group benchmark python scripts/generate_environment_report.py
+
 ```
+
+All script settings shown above—and the rollout sizes, sample counts, timing threshold,
+figure dimensions, and output paths—are adjustable as `tyro` CLI options. Run any script
+with `--help` to inspect them.
 
 ## Provenance and limitations
 
