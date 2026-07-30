@@ -32,7 +32,10 @@ uses 16—the largest safe original point—so all three backends are directly c
 ![Environment throughput](figures/envs-port--throughput.svg)
 
 The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed
-times, and IQRs are available in `docs/data/`. Initial reset, construction, action
+times, IQRs, and 95% confidence bounds are available in `docs/data/`. The shaded
+areas are deterministic percentile-bootstrap confidence intervals for the median,
+using 10,000 resamples with seed 0. Initial
+reset, construction, action
 generation, transfers, and compilation are excluded. Timed execution includes automatic
 resets encountered during 1,024-step rollout blocks.
 

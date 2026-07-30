@@ -65,12 +65,17 @@ class Args:
     endpoint_workers: int = 2_048
     hypercube_6x5_endpoint_workers: int = 16
     fastsverl_commit: str = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
+    confidence_level: float = 0.95
+    bootstrap_resamples: int = 10_000
+    bootstrap_seed: int = 0
+    confidence_band_alpha: float = 0.14
+    confidence_note_y: float = 0.895
 
 
 def main() -> None:
     args = tyro.cli(Args)
     data = load_throughput(args)
-    summary = summarize(data)
+    summary = summarize(args, data)
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.summary_output, index=False)
     plot(args, summary)
@@ -83,17 +88,47 @@ def load_throughput(args: Args) -> pd.DataFrame:
     return pd.concat((pd.read_csv(path) for path in paths), ignore_index=True)
 
 
-def summarize(data: pd.DataFrame) -> pd.DataFrame:
+def summarize(args: Args, data: pd.DataFrame) -> pd.DataFrame:
     valid = data[data["status"] == "ok"].copy()
-    return (
-        valid.groupby(["environment", "backend", "num_envs"])["steps_per_second"]
-        .agg(
-            median="median",
-            q1=lambda values: np.quantile(values, 0.25),
-            q3=lambda values: np.quantile(values, 0.75),
+    rng = np.random.default_rng(args.bootstrap_seed)
+    rows = []
+    groups = valid.groupby(["environment", "backend", "num_envs"])["steps_per_second"]
+    for (environment, backend, num_envs), group in groups:
+        values = group.to_numpy(dtype=np.float64)
+        ci_lower, ci_upper = bootstrap_median_interval(args, values, rng)
+        rows.append(
+            {
+                "environment": environment,
+                "backend": backend,
+                "num_envs": num_envs,
+                "samples": values.size,
+                "median": np.median(values),
+                "q1": np.quantile(values, 0.25),
+                "q3": np.quantile(values, 0.75),
+                "median_ci95_lower": ci_lower,
+                "median_ci95_upper": ci_upper,
+            }
         )
-        .reset_index()
+    return pd.DataFrame(rows)
+
+
+def bootstrap_median_interval(
+    args: Args,
+    values: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[float, float]:
+    if not 0.0 < args.confidence_level < 1.0:
+        raise ValueError("confidence_level must be between zero and one")
+    if args.bootstrap_resamples < 1:
+        raise ValueError("bootstrap_resamples must be positive")
+    indices = rng.integers(
+        values.size,
+        size=(args.bootstrap_resamples, values.size),
     )
+    bootstrap_medians = np.median(values[indices], axis=1)
+    tail = (1.0 - args.confidence_level) / 2.0
+    lower, upper = np.quantile(bootstrap_medians, (tail, 1.0 - tail))
+    return float(lower), float(upper)
 
 
 def plot(args: Args, summary: pd.DataFrame) -> None:
@@ -129,7 +164,13 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
                 linewidth=2,
                 markersize=4,
             )
-            axis.fill_between(x, line["q1"], line["q3"], color=color, alpha=0.14)
+            axis.fill_between(
+                x,
+                line["median_ci95_lower"],
+                line["median_ci95_upper"],
+                color=color,
+                alpha=args.confidence_band_alpha,
+            )
         axis.set_title(title)
         axis.set_xscale("log", base=2)
         axis.set_yscale("log")
@@ -159,6 +200,14 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
         bbox_to_anchor=(0.5, args.legend_y),
         ncol=3,
         frameon=False,
+    )
+    figure.text(
+        0.5,
+        args.confidence_note_y,
+        f"Shading: {args.confidence_level:.0%} bootstrap confidence interval for median",
+        horizontalalignment="center",
+        fontsize=9,
+        color="#555555",
     )
     figure.tight_layout(rect=(0, 0, 1, args.subplot_top))
     figure.savefig(args.svg_output)
@@ -200,10 +249,7 @@ def report_markdown(
     lock_hash: str,
     fixture_provenance: str,
 ) -> str:
-    title = (
-        "Quantitative Comparison between Gymnasium and JAX environment implementations of FastSVERL"
-    )
-    return f"""# {title}
+    return f"""# {args.report_title}
 
 ## Result
 
@@ -229,7 +275,10 @@ uses 16—the largest safe original point—so all three backends are directly c
 ![Environment throughput](figures/envs-port--throughput.svg)
 
 The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed
-times, and IQRs are available in `docs/data/`. Initial reset, construction, action
+times, IQRs, and 95% confidence bounds are available in `docs/data/`. The shaded
+areas are deterministic percentile-bootstrap confidence intervals for the median,
+using {args.bootstrap_resamples:,} resamples with seed {args.bootstrap_seed}. Initial
+reset, construction, action
 generation, transfers, and compilation are excluded. Timed execution includes automatic
 resets encountered during 1,024-step rollout blocks.
 
