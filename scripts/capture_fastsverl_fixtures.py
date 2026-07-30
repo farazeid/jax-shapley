@@ -1,29 +1,92 @@
 """Capture exhaustive transition fixtures from a local FastSVERL checkout.
 
 This developer tool deliberately does not fetch or install FastSVERL. Pass a
-checkout pinned to the commit recorded in ``EXPECTED_COMMIT``. The generated
+checkout pinned to the commit exposed as the ``expected_commit`` CLI option. The generated
 fixtures are consumed by offline tests.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import importlib.util
 import json
 import subprocess
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
 import numpy as np
+import tyro
 
-EXPECTED_COMMIT = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
-SOURCE_FILES = {
-    "gridworld": Path("fastsverl/fastsverl/envs/gwb.py"),
-    "hypercube": Path("fastsverl/fastsverl/envs/hypercube.py"),
-    "mastermind": Path("fastsverl/fastsverl/envs/mastermind.py"),
-}
+
+@dataclass(frozen=True)
+class Args:
+    """Configuration for fixture capture from a pinned local checkout."""
+
+    source_root: Path
+    output: Path = Path("tests/fixtures/fastsverl_transitions.npz")
+    expected_commit: str = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
+    gridworld_source: Path = Path("fastsverl/fastsverl/envs/gwb.py")
+    hypercube_source: Path = Path("fastsverl/fastsverl/envs/hypercube.py")
+    mastermind_source: Path = Path("fastsverl/fastsverl/envs/mastermind.py")
+
+
+def main() -> None:
+    args = tyro.cli(Args)
+    source_root = args.source_root.resolve()
+    commit = git_commit(source_root)
+    if commit != args.expected_commit:
+        raise SystemExit(f"Expected FastSVERL {args.expected_commit}, found {commit}")
+
+    relative_paths = {
+        "gridworld": args.gridworld_source,
+        "hypercube": args.hypercube_source,
+        "mastermind": args.mastermind_source,
+    }
+    paths = {name: source_root / relative for name, relative in relative_paths.items()}
+    modules = {name: load_module(f"fastsverl_fixture_{name}", path) for name, path in paths.items()}
+    arrays = capture_transitions(modules)
+    counts = transition_counts(arrays)
+    expected_counts = {
+        "gridworld": 20,
+        "hypercube": 143_052,
+        "mastermind_222": 64,
+        "total": 143_136,
+    }
+    if counts != expected_counts:
+        raise RuntimeError(f"Unexpected fixture counts: {counts}")
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(args.output, **arrays)
+    provenance = {
+        "fastsverl_commit": commit,
+        "source_sha256": {name: sha256(path) for name, path in paths.items()},
+        "transition_counts": counts,
+        "fixture_sha256": sha256(args.output),
+    }
+    args.output.with_suffix(".json").write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n"
+    )
+    print(json.dumps(provenance, indent=2, sort_keys=True))
+
+
+def capture_transitions(modules: dict[str, ModuleType]) -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {}
+    arrays.update(capture_gridworld(modules["gridworld"]))
+    arrays.update(capture_hypercubes(modules["hypercube"]))
+    arrays.update(capture_mastermind(modules["mastermind"]))
+    return arrays
+
+
+def transition_counts(arrays: dict[str, np.ndarray]) -> dict[str, int]:
+    counts = {
+        "gridworld": int(arrays["grid_action"].size),
+        "hypercube": int(arrays["cube_action"].size),
+        "mastermind_222": int(arrays["mm_action"].size),
+    }
+    counts["total"] = sum(counts.values())
+    return counts
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -156,57 +219,6 @@ def capture_mastermind(module: ModuleType) -> dict[str, np.ndarray]:
         "mm_terminated": np.asarray(terminated, dtype=np.bool_),
         "mm_truncated": np.asarray(truncated, dtype=np.bool_),
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source-root", type=Path, required=True)
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("tests/fixtures/fastsverl_transitions.npz"),
-    )
-    args = parser.parse_args()
-
-    source_root = args.source_root.resolve()
-    commit = git_commit(source_root)
-    if commit != EXPECTED_COMMIT:
-        raise SystemExit(f"Expected FastSVERL {EXPECTED_COMMIT}, found {commit}")
-
-    paths = {name: source_root / relative for name, relative in SOURCE_FILES.items()}
-    modules = {name: load_module(f"fastsverl_fixture_{name}", path) for name, path in paths.items()}
-
-    arrays: dict[str, np.ndarray] = {}
-    arrays.update(capture_gridworld(modules["gridworld"]))
-    arrays.update(capture_hypercubes(modules["hypercube"]))
-    arrays.update(capture_mastermind(modules["mastermind"]))
-
-    counts = {
-        "gridworld": int(arrays["grid_action"].size),
-        "hypercube": int(arrays["cube_action"].size),
-        "mastermind_222": int(arrays["mm_action"].size),
-    }
-    counts["total"] = sum(counts.values())
-    if counts != {
-        "gridworld": 20,
-        "hypercube": 143_052,
-        "mastermind_222": 64,
-        "total": 143_136,
-    }:
-        raise RuntimeError(f"Unexpected fixture counts: {counts}")
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.output, **arrays)
-    provenance = {
-        "fastsverl_commit": commit,
-        "source_sha256": {name: sha256(path) for name, path in paths.items()},
-        "transition_counts": counts,
-        "fixture_sha256": sha256(args.output),
-    }
-    args.output.with_suffix(".json").write_text(
-        json.dumps(provenance, indent=2, sort_keys=True) + "\n"
-    )
-    print(json.dumps(provenance, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

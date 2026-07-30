@@ -2,38 +2,79 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import gc
 import importlib.util
+import json
 import math
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
 import numpy as np
+import tyro
 
-BLOCK_STEPS = 1_024
-SAMPLES = 5
-MIN_SAMPLE_SECONDS = 0.5
-COUNTS = [2**power for power in range(12)]
-ENVIRONMENTS = ("gridworld", "hypercube_2x2", "hypercube_6x5", "mastermind_222")
-FIELDS = [
-    "environment",
-    "backend",
-    "device",
-    "num_envs",
-    "sample",
-    "block_steps",
-    "repeated_blocks",
-    "elapsed_seconds",
-    "steps_per_second",
-    "status",
-    "note",
-]
+
+@dataclass(frozen=True)
+class Args:
+    """Configuration for an original-Gymnasium or JAX throughput run."""
+
+    backend: Literal["original", "jax"] = "jax"
+    source_root: Path | None = None
+    output: Path = Path("docs/data/envs-port--throughput--jax-cpu.csv")
+    block_steps: int = 1_024
+    samples: int = 5
+    min_sample_seconds: float = 0.5
+    num_envs: tuple[int, ...] = tuple(2**power for power in range(12))
+    environments: tuple[str, ...] = (
+        "gridworld",
+        "hypercube_2x2",
+        "hypercube_6x5",
+        "mastermind_222",
+    )
+    seed: int = 0
+    available_memory_fraction: float = 0.25
+    construction_seconds_limit: float = 120.0
+
+
+def main() -> None:
+    args = tyro.cli(Args)
+    if args.backend == "original":
+        if args.source_root is None:
+            raise SystemExit("--source-root is required when --backend original")
+        rows = benchmark_original(args, args.source_root.resolve())
+    else:
+        rows = benchmark_jax(args)
+    write_rows(args.output, rows)
+    print(f"Wrote {len(rows)} rows to {args.output}")
+
+
+def benchmark_original(args: Args, source_root: Path) -> list[dict[str, object]]:
+    modules = source_modules(source_root)
+    safe_6x5, safe_note = hypercube_6x5_safe_count(args, source_root)
+    rows: list[dict[str, object]] = []
+    for environment_name in args.environments:
+        for num_envs in args.num_envs:
+            if environment_name == "hypercube_6x5" and num_envs > safe_6x5:
+                rows.append(infeasible_row(args, environment_name, num_envs, safe_note))
+                continue
+            print(f"original {environment_name} n={num_envs}", flush=True)
+            rows.extend(benchmark_original_point(args, environment_name, num_envs, modules))
+    return rows
+
+
+def source_modules(source_root: Path) -> dict[str, ModuleType]:
+    base = source_root / "fastsverl" / "fastsverl" / "envs"
+    return {
+        "gridworld": load_module("bench_fastsverl_gwb", base / "gwb.py"),
+        "hypercube": load_module("bench_fastsverl_hypercube", base / "hypercube.py"),
+        "mastermind": load_module("bench_fastsverl_mastermind", base / "mastermind.py"),
+    }
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -45,13 +86,107 @@ def load_module(name: str, path: Path) -> ModuleType:
     return module
 
 
-def source_modules(source_root: Path) -> dict[str, ModuleType]:
-    base = source_root / "fastsverl" / "fastsverl" / "envs"
+def hypercube_6x5_safe_count(args: Args, source_root: Path) -> tuple[int, str]:
+    """Estimate a safe original-worker cap using a clean subprocess RSS delta."""
+    code = f"""
+import importlib.util, json, psutil, time
+from pathlib import Path
+path = Path({str(source_root)!r}) / 'fastsverl/fastsverl/envs/hypercube.py'
+spec = importlib.util.spec_from_file_location('memory_probe_hypercube', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+process = psutil.Process()
+before = process.memory_info().rss
+started = time.perf_counter()
+env = module.Hypercube(n=6, d=5, p=0, seed={args.seed})
+elapsed = time.perf_counter() - started
+after = process.memory_info().rss
+print(json.dumps({{'bytes': max(after-before, 1), 'seconds': elapsed}}))
+"""
+    output = subprocess.check_output([sys.executable, "-c", code], text=True)
+
+    import psutil
+
+    measurement = json.loads(output)
+    budget = int(psutil.virtual_memory().available * args.available_memory_fraction)
+    memory_cap = max(1, budget // measurement["bytes"])
+    time_cap = max(
+        1,
+        int(args.construction_seconds_limit / max(measurement["seconds"], 1e-6)),
+    )
+    cap = min(max(args.num_envs), memory_cap, time_cap)
+    safe_power = max(value for value in args.num_envs if value <= cap)
+    note = (
+        f"one 6x5 source env: {measurement['bytes']} bytes RSS, "
+        f"{measurement['seconds']:.3f}s construction; safe cap {safe_power}"
+    )
+    return safe_power, note
+
+
+def infeasible_row(
+    args: Args, environment_name: str, num_envs: int, note: str
+) -> dict[str, object]:
     return {
-        "gridworld": load_module("bench_fastsverl_gwb", base / "gwb.py"),
-        "hypercube": load_module("bench_fastsverl_hypercube", base / "hypercube.py"),
-        "mastermind": load_module("bench_fastsverl_mastermind", base / "mastermind.py"),
+        "environment": environment_name,
+        "backend": "gymnasium_cpu",
+        "device": "cpu",
+        "num_envs": num_envs,
+        "sample": -1,
+        "block_steps": args.block_steps,
+        "repeated_blocks": 0,
+        "elapsed_seconds": "",
+        "steps_per_second": "",
+        "status": "memory_infeasible",
+        "note": note,
     }
+
+
+def benchmark_original_point(
+    args: Args,
+    environment_name: str,
+    num_envs: int,
+    modules: dict[str, ModuleType],
+) -> list[dict[str, object]]:
+    import gymnasium as gym
+
+    envs = gym.vector.SyncVectorEnv(
+        [original_thunk(environment_name, modules, args.seed + index) for index in range(num_envs)]
+    )
+    envs.reset(seed=args.seed)
+    actions = action_schedule(args, environment_name, num_envs)
+
+    def run_block() -> None:
+        for action in actions:
+            envs.step(action)
+
+    run_block()
+    started = time.perf_counter()
+    run_block()
+    repeated_blocks = calibrate(args, time.perf_counter() - started)
+
+    rows = []
+    for sample in range(args.samples):
+        started = time.perf_counter()
+        for _ in range(repeated_blocks):
+            run_block()
+        elapsed = time.perf_counter() - started
+        transitions = num_envs * args.block_steps * repeated_blocks
+        rows.append(
+            result_row(
+                args,
+                environment_name,
+                "gymnasium_cpu",
+                "cpu",
+                num_envs,
+                sample,
+                repeated_blocks,
+                elapsed,
+                transitions,
+            )
+        )
+    envs.close()
+    gc.collect()
+    return rows
 
 
 def original_thunk(
@@ -77,135 +212,71 @@ def original_thunk(
     return thunk
 
 
-def action_count(environment_name: str) -> int:
-    return {
-        "gridworld": 4,
-        "hypercube_2x2": 4,
-        "hypercube_6x5": 10,
-        "mastermind_222": 4,
-    }[environment_name]
-
-
-def action_schedule(environment_name: str, num_envs: int) -> np.ndarray:
-    actions = action_count(environment_name)
-    time_indices = np.arange(BLOCK_STEPS, dtype=np.int32)[:, None]
-    env_indices = np.arange(num_envs, dtype=np.int32)[None, :]
-    return (time_indices + env_indices) % actions
-
-
-def calibrate(probe_seconds: float) -> int:
-    return max(1, math.ceil(MIN_SAMPLE_SECONDS / max(probe_seconds, 1e-9)))
-
-
-def benchmark_original_point(
-    environment_name: str, num_envs: int, modules: dict[str, ModuleType]
-) -> list[dict[str, object]]:
-    import gymnasium as gym
-
-    envs = gym.vector.SyncVectorEnv(
-        [original_thunk(environment_name, modules, seed) for seed in range(num_envs)]
-    )
-    envs.reset(seed=0)
-    actions = action_schedule(environment_name, num_envs)
-
-    def run_block() -> None:
-        for action in actions:
-            envs.step(action)
-
-    run_block()
-    start = time.perf_counter()
-    run_block()
-    probe_seconds = time.perf_counter() - start
-    repeated_blocks = calibrate(probe_seconds)
-
-    rows = []
-    for sample in range(SAMPLES):
-        start = time.perf_counter()
-        for _ in range(repeated_blocks):
-            run_block()
-        elapsed = time.perf_counter() - start
-        transitions = num_envs * BLOCK_STEPS * repeated_blocks
-        rows.append(
-            {
-                "environment": environment_name,
-                "backend": "gymnasium_cpu",
-                "device": "cpu",
-                "num_envs": num_envs,
-                "sample": sample,
-                "block_steps": BLOCK_STEPS,
-                "repeated_blocks": repeated_blocks,
-                "elapsed_seconds": elapsed,
-                "steps_per_second": transitions / elapsed,
-                "status": "ok",
-                "note": "",
-            }
-        )
-    envs.close()
-    gc.collect()
+def benchmark_jax(args: Args) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for environment_name in args.environments:
+        for num_envs in args.num_envs:
+            print(f"jax {environment_name} n={num_envs}", flush=True)
+            rows.extend(benchmark_jax_point(args, environment_name, num_envs))
     return rows
 
 
-def hypercube_6x5_safe_count(source_root: Path) -> tuple[int, str]:
-    """Estimate a safe original-worker cap using a clean subprocess RSS delta."""
-    code = f"""
-import importlib.util, json, psutil, time
-from pathlib import Path
-path = Path({str(source_root)!r}) / 'fastsverl/fastsverl/envs/hypercube.py'
-spec = importlib.util.spec_from_file_location('memory_probe_hypercube', path)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-process = psutil.Process()
-before = process.memory_info().rss
-started = time.perf_counter()
-env = module.Hypercube(n=6, d=5, p=0, seed=0)
-elapsed = time.perf_counter() - started
-after = process.memory_info().rss
-print(json.dumps({{'bytes': max(after-before, 1), 'seconds': elapsed}}))
-"""
-    output = subprocess.check_output([sys.executable, "-c", code], text=True)
-    import json
+def benchmark_jax_point(
+    args: Args, environment_name: str, num_envs: int
+) -> list[dict[str, object]]:
+    import jax
+    import jax.numpy as jnp
 
-    import psutil
+    env = jax_environment(environment_name)
+    params = env.default_params
+    keys = jax.random.split(jax.random.key(args.seed), num_envs)
+    batched_reset = jax.vmap(env.reset, in_axes=(0, None))
+    batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
+    obs, state = batched_reset(keys, params)
+    actions = jax.device_put(jnp.asarray(action_schedule(args, environment_name, num_envs)))
 
-    measurement = json.loads(output)
-    budget = int(psutil.virtual_memory().available * 0.25)
-    memory_cap = max(1, budget // measurement["bytes"])
-    # Avoid multi-minute construction runs while still exposing the source's scaling limit.
-    time_cap = max(1, int(120 / max(measurement["seconds"], 1e-6)))
-    cap = min(max(COUNTS), memory_cap, time_cap)
-    safe_power = max(value for value in COUNTS if value <= cap)
-    note = (
-        f"one 6x5 source env: {measurement['bytes']} bytes RSS, "
-        f"{measurement['seconds']:.3f}s construction; safe cap {safe_power}"
-    )
-    return safe_power, note
+    def rollout(carry: tuple, rollout_actions: jax.Array) -> tuple:
+        def scan_step(current: tuple, action: jax.Array) -> tuple:
+            _, current_state, current_keys = current
+            split = jax.vmap(jax.random.split)(current_keys)
+            next_keys, step_keys = split[:, 0], split[:, 1]
+            next_obs, next_state, reward, done, _ = batched_step(
+                step_keys, current_state, action, params
+            )
+            return (next_obs, next_state, next_keys), (reward, done)
 
+        return jax.lax.scan(scan_step, carry, rollout_actions)
 
-def benchmark_original(source_root: Path) -> list[dict[str, object]]:
-    modules = source_modules(source_root)
-    safe_6x5, safe_note = hypercube_6x5_safe_count(source_root)
-    rows: list[dict[str, object]] = []
-    for environment_name in ENVIRONMENTS:
-        for num_envs in COUNTS:
-            if environment_name == "hypercube_6x5" and num_envs > safe_6x5:
-                rows.append(
-                    {
-                        "environment": environment_name,
-                        "backend": "gymnasium_cpu",
-                        "device": "cpu",
-                        "num_envs": num_envs,
-                        "sample": -1,
-                        "block_steps": BLOCK_STEPS,
-                        "repeated_blocks": 0,
-                        "elapsed_seconds": "",
-                        "steps_per_second": "",
-                        "status": "memory_infeasible",
-                        "note": safe_note,
-                    }
-                )
-                continue
-            print(f"original {environment_name} n={num_envs}", flush=True)
-            rows.extend(benchmark_original_point(environment_name, num_envs, modules))
+    compiled = jax.jit(rollout)
+    carry = (obs, state, keys)
+    carry, outputs = compiled(carry, actions)
+    jax.block_until_ready(outputs)
+    started = time.perf_counter()
+    carry, outputs = compiled(carry, actions)
+    jax.block_until_ready(outputs)
+    repeated_blocks = calibrate(args, time.perf_counter() - started)
+
+    rows = []
+    for sample in range(args.samples):
+        started = time.perf_counter()
+        for _ in range(repeated_blocks):
+            carry, outputs = compiled(carry, actions)
+        jax.block_until_ready(outputs)
+        elapsed = time.perf_counter() - started
+        transitions = num_envs * args.block_steps * repeated_blocks
+        rows.append(
+            result_row(
+                args,
+                environment_name,
+                f"jax_{jax.default_backend()}",
+                str(jax.devices()[0]),
+                num_envs,
+                sample,
+                repeated_blocks,
+                elapsed,
+                transitions,
+            )
+        )
     return rows
 
 
@@ -223,99 +294,67 @@ def jax_environment(environment_name: str) -> object:
     raise ValueError(environment_name)
 
 
-def benchmark_jax_point(environment_name: str, num_envs: int) -> list[dict[str, object]]:
-    import jax
-    import jax.numpy as jnp
-
-    env = jax_environment(environment_name)
-    params = env.default_params
-    keys = jax.random.split(jax.random.key(0), num_envs)
-    batched_reset = jax.vmap(env.reset, in_axes=(0, None))
-    batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
-    obs, state = batched_reset(keys, params)
-    actions = jax.device_put(jnp.asarray(action_schedule(environment_name, num_envs)))
-
-    def rollout(carry: tuple, rollout_actions: jax.Array) -> tuple:
-        def scan_step(current: tuple, action: jax.Array) -> tuple:
-            current_obs, current_state, current_keys = current
-            del current_obs
-            split = jax.vmap(jax.random.split)(current_keys)
-            next_keys, step_keys = split[:, 0], split[:, 1]
-            next_obs, next_state, reward, done, _ = batched_step(
-                step_keys, current_state, action, params
-            )
-            return (next_obs, next_state, next_keys), (reward, done)
-
-        return jax.lax.scan(scan_step, carry, rollout_actions)
-
-    compiled = jax.jit(rollout)
-    carry = (obs, state, keys)
-    carry, outputs = compiled(carry, actions)
-    jax.block_until_ready(outputs)
-    start = time.perf_counter()
-    carry, outputs = compiled(carry, actions)
-    jax.block_until_ready(outputs)
-    probe_seconds = time.perf_counter() - start
-    repeated_blocks = calibrate(probe_seconds)
-
-    rows = []
-    for sample in range(SAMPLES):
-        start = time.perf_counter()
-        for _ in range(repeated_blocks):
-            carry, outputs = compiled(carry, actions)
-        jax.block_until_ready(outputs)
-        elapsed = time.perf_counter() - start
-        transitions = num_envs * BLOCK_STEPS * repeated_blocks
-        rows.append(
-            {
-                "environment": environment_name,
-                "backend": f"jax_{jax.default_backend()}",
-                "device": str(jax.devices()[0]),
-                "num_envs": num_envs,
-                "sample": sample,
-                "block_steps": BLOCK_STEPS,
-                "repeated_blocks": repeated_blocks,
-                "elapsed_seconds": elapsed,
-                "steps_per_second": transitions / elapsed,
-                "status": "ok",
-                "note": "",
-            }
-        )
-    return rows
+def action_schedule(args: Args, environment_name: str, num_envs: int) -> np.ndarray:
+    actions = {
+        "gridworld": 4,
+        "hypercube_2x2": 4,
+        "hypercube_6x5": 10,
+        "mastermind_222": 4,
+    }[environment_name]
+    time_indices = np.arange(args.block_steps, dtype=np.int32)[:, None]
+    env_indices = np.arange(num_envs, dtype=np.int32)[None, :]
+    return (time_indices + env_indices) % actions
 
 
-def benchmark_jax() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for environment_name in ENVIRONMENTS:
-        for num_envs in COUNTS:
-            print(f"jax {environment_name} n={num_envs}", flush=True)
-            rows.extend(benchmark_jax_point(environment_name, num_envs))
-    return rows
+def calibrate(args: Args, probe_seconds: float) -> int:
+    return max(1, math.ceil(args.min_sample_seconds / max(probe_seconds, 1e-9)))
+
+
+def result_row(
+    args: Args,
+    environment_name: str,
+    backend: str,
+    device: str,
+    num_envs: int,
+    sample: int,
+    repeated_blocks: int,
+    elapsed: float,
+    transitions: int,
+) -> dict[str, object]:
+    return {
+        "environment": environment_name,
+        "backend": backend,
+        "device": device,
+        "num_envs": num_envs,
+        "sample": sample,
+        "block_steps": args.block_steps,
+        "repeated_blocks": repeated_blocks,
+        "elapsed_seconds": elapsed,
+        "steps_per_second": transitions / elapsed,
+        "status": "ok",
+        "note": "",
+    }
 
 
 def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "environment",
+        "backend",
+        "device",
+        "num_envs",
+        "sample",
+        "block_steps",
+        "repeated_blocks",
+        "elapsed_seconds",
+        "steps_per_second",
+        "status",
+        "note",
+    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=FIELDS)
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=("original", "jax"), required=True)
-    parser.add_argument("--source-root", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-
-    if args.backend == "original":
-        if args.source_root is None:
-            parser.error("--source-root is required for the original backend")
-        rows = benchmark_original(args.source_root.resolve())
-    else:
-        rows = benchmark_jax()
-    write_rows(args.output, rows)
-    print(f"Wrote {len(rows)} rows to {args.output}")
 
 
 if __name__ == "__main__":
