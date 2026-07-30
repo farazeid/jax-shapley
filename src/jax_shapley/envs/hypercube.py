@@ -54,10 +54,11 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         self,
         key: jax.Array,
         state: HypercubeState,
-        action: int | jax.Array,
+        action: int | float | jax.Array,
         params: HypercubeParams,
     ) -> tuple[jax.Array, HypercubeState, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params
+        action = jnp.asarray(action, dtype=jnp.int32)
         axis = action // 2
         direction = jnp.where(action % 2 == 0, 1, -1).astype(jnp.int32)
         candidate = state.position.at[axis].add(direction)

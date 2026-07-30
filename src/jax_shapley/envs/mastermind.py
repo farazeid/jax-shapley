@@ -32,7 +32,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
     num_pegs = 2
 
     @staticmethod
-    def decode_action(action: int | jax.Array) -> jax.Array:
+    def decode_action(action: int | float | jax.Array) -> jax.Array:
         """Decode actions exactly like FastSVERL's least-significant-first table."""
         action = jnp.asarray(action, dtype=jnp.int32)
         powers = jnp.asarray([1, 2], dtype=jnp.int32)
@@ -60,7 +60,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         self,
         key: jax.Array,
         state: Mastermind222State,
-        action: int | jax.Array,
+        action: int | float | jax.Array,
         params: Mastermind222Params,
     ) -> tuple[jax.Array, Mastermind222State, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params

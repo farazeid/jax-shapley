@@ -50,10 +50,11 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         self,
         key: jax.Array,
         state: GridworldState,
-        action: int | jax.Array,
+        action: int | float | jax.Array,
         params: GridworldParams,
     ) -> tuple[jax.Array, GridworldState, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params
+        action = jnp.asarray(action, dtype=jnp.int32)
         candidate = state.position + self._action_deltas[action]
         in_bounds = (
             (candidate[0] >= 0) & (candidate[0] < 2) & (candidate[1] >= 0) & (candidate[1] < 4)
