@@ -11,8 +11,11 @@ from jax_shapley.envs import (
     Mastermind222Params,
     Mastermind222State,
 )
+from jax_shapley.wrappers import EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 __all__ = [
+    "EpisodeStatisticsState",
+    "EpisodeStatisticsWrapper",
     "Gridworld",
     "GridworldParams",
     "GridworldState",
