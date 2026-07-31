@@ -1,26 +1,19 @@
 # Quantitative Comparison between Gymnasium and JAX environment implementations of FastSVERL
 
-## Result
+## Parity
 
-The JAX ports match **all 143,136 exhaustive FastSVERL transitions** on both CPU and
-GPU. Throughput depends strongly on batch size: GPU has overhead at small batches,
-then reaches hundreds of millions of transitions per second at 2,048 environments.
+The JAX ports match **all 143,136 exhaustive FastSVERL transitions** on both CPU and GPU. Throughput depends strongly on batch size: GPU has overhead at small batches, then reaches hundreds of millions of transitions per second at 2,048 environments.
 
 | JAX backend | Transitions tested | Mismatched | Proportion |
 | --- | ---: | ---: | ---: |
 | CPU | 143,136 | 0 | 0.000000000000 |
 | GPU | 143,136 | 0 | 0.000000000000 |
 
-The mismatch criterion is record-level: a transition is different if any next
-observation, environment-state field, reward, termination, or truncation value differs.
-Component-level counts and every per-configuration result are retained in
-`docs/data/envs-port--parity--cpu.csv` and `docs/data/envs-port--parity--gpu.csv`.
+The mismatch criterion is record-level: a transition is different if any next observation, environment-state field, reward, termination, or truncation value differs. Component-level counts and every per-configuration result are retained in `docs/data/envs-port--parity--cpu.csv` and `docs/data/envs-port--parity--gpu.csv`.
 
 ## Throughput
 
-Rates below are mean environment transitions per second over five samples. The
-Gridworld, Hypercube 2x2, and Mastermind rows use 2,048 environments. Hypercube 6x5
-uses 16—the largest safe original point—so all three backends are directly comparable.
+Rates below are mean environment transitions per second over five samples. The Gridworld, Hypercube 2x2, and Mastermind rows use 2,048 environments. Hypercube 6x5 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 | Environment | Workers | Gymnasium CPU | JAX CPU | JAX GPU | CPU speedup | GPU speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -31,41 +24,25 @@ uses 16—the largest safe original point—so all three backends are directly c
 
 ![Environment throughput](figures/envs-port--throughput.svg)
 
-The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed
-times, sample standard deviations, and 95% confidence bounds are available in
-`docs/data/`. Each shaded region is the two-sided Student's $t$-distribution interval
-$\bar{x} \pm t_{0.975,n-1}s/\sqrt{n}$ around the sample mean. Here $n=5$ and the
-critical value has four degrees of freedom. The interval assumes independent,
-approximately normally distributed throughput measurements; five sequential samples give
-limited evidence for those assumptions. Initial reset, construction, action
-generation, transfers, and compilation are excluded. Timed execution includes automatic
-resets encountered during 1,024-step rollout blocks.
+The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed times, sample standard deviations, and 95% confidence bounds are available in `docs/data/`. Each shaded region is the two-sided Student's $t$-distribution interval $\bar{x} \pm t_{0.975,n-1}s/\sqrt{n}$ around the sample mean. Here $n=5$ and the critical value has four degrees of freedom. The interval assumes independent, approximately normally distributed throughput measurements; five sequential samples give limited evidence for those assumptions. Initial reset, construction, action generation, transfers, and compilation are excluded. Timed execution includes automatic resets encountered during 1,024-step rollout blocks.
 
-The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX wraps each environment in
-`EpisodeStatisticsWrapper`, then uses `jit(vmap(step))` inside `lax.scan`, synchronizing
-with `block_until_ready()`. Identical deterministic
-action schedules are used. The original implementation has no GPU path.
+The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX wraps each environment in `EpisodeStatisticsWrapper`, then uses `jit(vmap(step))` inside `lax.scan`, synchronising with `block_until_ready()`. Identical deterministic action schedules are used. The original implementation has no GPU path.
 
-The original benchmark uses Gymnasium's `RecordEpisodeStatistics`; the JAX benchmark
-uses the fixed-shape `EpisodeStatisticsWrapper`:
+The original benchmark uses Gymnasium's `RecordEpisodeStatistics`; the JAX benchmark uses the fixed-shape `EpisodeStatisticsWrapper`:
 
 | Episode statistic or storage | Gymnasium/FastSVERL benchmark | JAX benchmark |
 | --- | --- | --- |
 | Running return | `episode_returns` (`float32`) | `EpisodeStatisticsState.episode_return` (`float32`) |
 | Running length | `episode_lengths` (`int32`) | `EpisodeStatisticsState.episode_length` (`int32`) |
 | Completed return and length | `info["episode"]["r"]` and `info["episode"]["l"]` | `info["episode"]["return"]` and `info["episode"]["length"]` |
-| Completion indicator | Gymnasium vector mask `info["_episode"]` | Scalar `info["episode"]["completed"]`, vectorized by `vmap` |
+| Completion indicator | Gymnasium vector mask `info["_episode"]` | Scalar `info["episode"]["completed"]`, vectorised by `vmap` |
 | Completed-episode count | `episode_count` | `EpisodeStatisticsState.episode_count` |
 | Wall-clock duration | `episode_start_times` and `info["episode"]["t"]` | Omitted because host time is incompatible with pure compiled transitions |
 | Recent completed episodes | Per-environment Python deques retaining 100 returns and lengths | Omitted; `lax.scan` retains the fixed-shape masked event stream |
 
-The JAX accumulators reset after completion while the completed return and length are
-emitted on that transition. Raw `step_env()` remains the unwrapped FastSVERL parity
-boundary.
+The JAX accumulators reset after completion while the completed return and length are emitted on that transition. Raw `step_env()` remains the unwrapped FastSVERL parity boundary.
 
-For Hypercube 6x5, the unmodified source owns a large transition dictionary per worker.
-The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s construction; safe cap 16`. Original points above 16 are retained as
-`memory_infeasible`; JAX CPU and GPU include the complete curve through 2,048.
+For Hypercube 6x5, the unmodified source owns a large transition dictionary per worker. The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s construction; safe cap 16`. Original points above 16 are retained as `memory_infeasible`; JAX CPU and GPU include the complete curve through 2,048.
 
 ## Machine and software
 
@@ -84,8 +61,7 @@ The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s 
 
 ## Reproduction
 
-Run the complete pipeline from the repository root. It temporarily clones the pinned
-FastSVERL commit and removes the checkout on exit:
+Run the complete pipeline from the repository root. It temporarily clones the pinned FastSVERL commit and removes the checkout on exit:
 
 ```bash
 bash scripts/envs_port/run.sh
@@ -117,22 +93,13 @@ uv run --group benchmark scripts/envs_port/summarise_throughput.py
 uv run --group benchmark scripts/envs_port/plot_throughput.py
 ```
 
-GPU-specific test and benchmark stages log that they were skipped and exit successfully
-when no JAX GPU backend is available. Skipped GPU benchmark points are recorded with
-`status=gpu_unavailable` and excluded from the generated summary and figure.
+GPU-specific test and benchmark stages log that they were skipped and exit successfully when no JAX GPU backend is available. Skipped GPU benchmark points are recorded with `status=gpu_unavailable` and excluded from the generated summary and figure.
 
-All adjustable script settings—including rollout sizes, sample counts, timing thresholds,
-figure dimensions, and output paths—are exposed through `tyro`. Run
-any entry point with `--help` to inspect them. This Markdown report is maintained by hand;
-the scripts regenerate only measurements, the summary CSV, and figures.
+All adjustable script settings—including rollout sizes, sample counts, timing thresholds, figure dimensions, and output paths—are exposed through `tyro`. Run any entry point with `--help` to inspect them. This Markdown report is maintained by hand; the scripts regenerate only measurements, the summary CSV, and figures.
 
 ## Provenance and limitations
 
-Fixtures were captured from the pinned source and are offline test inputs; FastSVERL is
-not installed or imported by normal tests. NumPy and JAX PRNG streams are intentionally
-not expected to be seed-for-seed identical. This benchmark measures environments only,
-without policy inference or learning. Agents, FastSVERL models, replay buffers, training,
-and paper evaluation reproduction remain deferred.
+Fixtures were captured from the pinned source and are offline test inputs; FastSVERL is not installed or imported by normal tests. NumPy and JAX PRNG streams are intentionally not expected to be seed-for-seed identical. This benchmark measures environments only, without policy inference or learning. Agents, FastSVERL models, replay buffers, training, and paper evaluation reproduction remain deferred.
 
 Fixture provenance:
 
