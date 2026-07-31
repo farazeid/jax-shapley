@@ -45,6 +45,37 @@ batched_step = jax.jit(jax.vmap(env.step, in_axes=(0, 0, 0, None)))
 episode count. Each step adds fixed-shape `info["episode"]` return, length, and completion
 fields; `vmap` and `lax.scan` turn them into a masked episode-event stream.
 
+## Rendering
+
+Install the optional renderer interface with `uv sync --extra render`. Rendering is an
+explicit host-side operation outside `jit`, `vmap`, and `lax.scan`:
+
+```python
+import jax
+from PIL import Image
+
+from jax_shapley.envs import Gridworld, RenderConfig
+
+env = Gridworld()
+params = env.default_params
+_, state = env.reset(jax.random.key(0), params)
+frame = env.render(state, params, RenderConfig(width=640, height=480))
+
+assert frame.shape == (480, 640, 3)
+assert frame.dtype.name == "uint8"
+Image.fromarray(frame).save("gridworld.webp", lossless=True)
+```
+
+The public array remains RGB. The committed documentation WebPs use the same renderer with an internal alpha-aware export path so their outer canvas is transparent while boards, legends, and status panels remain opaque and readable.
+
+Call `render()` after each already-compiled step to capture an episode, or retain selected
+states from a compiled rollout and render them afterwards. Encoding images or video remains
+the caller responsibility. For an `EpisodeStatisticsWrapper` state, render with
+`wrapped_env.env.render(state.env_state)`.
+
+See the [environment rendering guide](docs/Environment%20Rendering.md) for environment
+cards, higher-dimensional Hypercube projections, and the Mastermind secret policy.
+
 ## Validation
 
 Offline fixtures were exhaustively captured from FastSVERL commit
