@@ -18,30 +18,50 @@ Component-level counts and every per-configuration result are retained in
 
 ## Throughput
 
-Rates below are median environment transitions per second over five samples. The
+Rates below are mean environment transitions per second over five samples. The
 Gridworld, Hypercube 2x2, and Mastermind rows use 2,048 environments. Hypercube 6x5
 uses 16—the largest safe original point—so all three backends are directly comparable.
 
 | Environment | Workers | Gymnasium CPU | JAX CPU | JAX GPU | CPU speedup | GPU speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Gridworld | 2,048 | 216,062 | 8,935,941 | 196,861,104 | 41.4x | 911.1x |
-| Hypercube 2x2 | 2,048 | 222,354 | 27,859,808 | 207,388,886 | 125.3x | 932.7x |
-| Hypercube 6x5 | 16 | 211,298 | 8,201,712 | 1,948,432 | 38.8x | 9.2x |
-| Mastermind-222 | 2,048 | 66,845 | 6,597,059 | 176,219,751 | 98.7x | 2,636.2x |
+| Gridworld | 2,048 | 216,064 | 8,988,350 | 164,905,947 | 41.6x | 763.2x |
+| Hypercube 2x2 | 2,048 | 220,402 | 26,517,196 | 180,082,076 | 120.3x | 817.1x |
+| Hypercube 6x5 | 16 | 210,675 | 6,175,486 | 1,626,073 | 29.3x | 7.7x |
+| Mastermind-222 | 2,048 | 66,670 | 6,619,422 | 154,320,168 | 99.3x | 2,314.7x |
 
 ![Environment throughput](figures/envs-port--throughput.svg)
 
 The complete 1, 2, 4, …, 2,048 curves, five raw samples per successful point, elapsed
-times, IQRs, and 95% confidence bounds are available in `docs/data/`. The shaded
-areas are deterministic percentile-bootstrap confidence intervals for the median,
-using 10,000 resamples with seed 0. Initial
-reset, construction, action
+times, sample standard deviations, and 95% confidence bounds are available in
+`docs/data/`. Each shaded region is the two-sided Student's $t$-distribution interval
+$\bar{x} \pm t_{0.975,n-1}s/\sqrt{n}$ around the sample mean. Here $n=5$ and the
+critical value has four degrees of freedom. The interval assumes independent,
+approximately normally distributed throughput measurements; five sequential samples give
+limited evidence for those assumptions. Initial reset, construction, action
 generation, transfers, and compilation are excluded. Timed execution includes automatic
 resets encountered during 1,024-step rollout blocks.
 
-The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX uses `jit(vmap(step))`
-inside `lax.scan`, synchronizing with `block_until_ready()`. Identical deterministic
+The original uses FastSVERL's `gym.vector.SyncVectorEnv`. JAX wraps each environment in
+`EpisodeStatisticsWrapper`, then uses `jit(vmap(step))` inside `lax.scan`, synchronizing
+with `block_until_ready()`. Identical deterministic
 action schedules are used. The original implementation has no GPU path.
+
+The original benchmark uses Gymnasium's `RecordEpisodeStatistics`; the JAX benchmark
+uses the fixed-shape `EpisodeStatisticsWrapper`:
+
+| Episode statistic or storage | Gymnasium/FastSVERL benchmark | JAX benchmark |
+| --- | --- | --- |
+| Running return | `episode_returns` (`float32`) | `EpisodeStatisticsState.episode_return` (`float32`) |
+| Running length | `episode_lengths` (`int32`) | `EpisodeStatisticsState.episode_length` (`int32`) |
+| Completed return and length | `info["episode"]["r"]` and `info["episode"]["l"]` | `info["episode"]["return"]` and `info["episode"]["length"]` |
+| Completion indicator | Gymnasium vector mask `info["_episode"]` | Scalar `info["episode"]["completed"]`, vectorized by `vmap` |
+| Completed-episode count | `episode_count` | `EpisodeStatisticsState.episode_count` |
+| Wall-clock duration | `episode_start_times` and `info["episode"]["t"]` | Omitted because host time is incompatible with pure compiled transitions |
+| Recent completed episodes | Per-environment Python deques retaining 100 returns and lengths | Omitted; `lax.scan` retains the fixed-shape masked event stream |
+
+The JAX accumulators reset after completion while the completed return and length are
+emitted on that transition. Raw `step_env()` remains the unwrapped FastSVERL parity
+boundary.
 
 For Hypercube 6x5, the unmodified source owns a large transition dictionary per worker.
 The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s construction; safe cap 16`. Original points above 16 are retained as
@@ -59,7 +79,7 @@ The safe-source probe reported: `one 6x5 source env: 34320384 bytes RSS, 6.359s 
 - JAX/JAXLIB: 0.11.0 / 0.11.0
 - Gymnax: 0.0.9 (locked)
 - Gymnasium: 0.29.1
-- uv lock SHA-256: `2e6c6e14767944c9f2eae8ae1bf51b01ad59a92292eef9ed76176570f02f58dc`
+- uv lock SHA-256: `50aa45872c12b3fec023defe8c5e3853175860cb0d71f7286e9989cc8617c7ef`
 - FastSVERL source commit: `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`
 
 ## Reproduction
@@ -78,7 +98,7 @@ uv sync --all-groups --extra cuda
 
 # Offline semantic tests
 JAX_PLATFORMS=cpu uv run --extra cuda pytest
-uv run --extra cuda pytest -m gpu
+JAX_PLATFORMS=cuda uv run --extra cuda pytest tests/test_env_transition_parity.py -m gpu
 
 # Reference transitions; SOURCE_ROOT is a local checkout at the pinned commit
 uv run scripts/envs_port/collect_fastsverl_transitions.py --source-root "$SOURCE_ROOT"
@@ -97,8 +117,12 @@ uv run --group benchmark scripts/envs_port/summarise_throughput.py
 uv run --group benchmark scripts/envs_port/plot_throughput.py
 ```
 
-All script settings—including rollout sizes, sample counts, timing thresholds,
-confidence settings, figure dimensions, and output paths—are adjustable through `tyro`. Run
+GPU-specific test and benchmark stages log that they were skipped and exit successfully
+when no JAX GPU backend is available. Skipped GPU benchmark points are recorded with
+`status=gpu_unavailable` and excluded from the generated summary and figure.
+
+All adjustable script settings—including rollout sizes, sample counts, timing thresholds,
+figure dimensions, and output paths—are exposed through `tyro`. Run
 any entry point with `--help` to inspect them. This Markdown report is maintained by hand;
 the scripts regenerate only measurements, the summary CSV, and figures.
 
