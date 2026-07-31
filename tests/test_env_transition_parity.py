@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-import os
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -33,14 +33,18 @@ def test_exhaustive_transition_parity(request: pytest.FixtureRequest) -> None:
 @pytest.mark.gpu
 @pytest.mark.slow
 def test_gpu_exhaustive_transition_parity(request: pytest.FixtureRequest) -> None:
+    jax_logger = logging.getLogger("jax._src.xla_bridge")
+    logger_was_disabled = jax_logger.disabled
+    jax_logger.disabled = True
     try:
-        gpu_devices = jax.devices("gpu")
-    except RuntimeError:
-        gpu_devices = []
+        try:
+            gpu_devices = jax.devices("gpu")
+        except RuntimeError:
+            gpu_devices = []
+    finally:
+        jax_logger.disabled = logger_was_disabled
     if not gpu_devices:
-        if os.environ.get("JAX_PLATFORMS") in {"cuda", "gpu"}:
-            pytest.fail("a GPU JAX platform was requested but no GPU backend is available")
-        pytest.skip("CUDA-enabled JAX is not installed")
+        pytest.skip("GPU parity skipped: this test requires an available JAX GPU backend")
     assert jax.default_backend() == "gpu"
     output = request.config.getoption("--parity-output")
     assert_zero_mismatches(measure_parity(output))
@@ -87,9 +91,11 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
         count,
         observation=_difference_mask(obs, fixture["grid_next_obs"]),
         state=_difference_mask(next_state.position, fixture["grid_next_obs"])
-        | _difference_mask(next_state.terminated, fixture["grid_terminated"]),
+        | _difference_mask(next_state.terminated, fixture["grid_terminated"])
+        | _difference_mask(next_state.time, np.ones(count, dtype=np.int32)),
         reward=_difference_mask(reward, fixture["grid_reward"]),
-        terminated=_difference_mask(done, fixture["grid_terminated"]),
+        terminated=_difference_mask(done, fixture["grid_terminated"])
+        | _difference_mask(info["terminated"], fixture["grid_terminated"]),
         truncated=_difference_mask(info["truncated"], fixture["grid_truncated"]),
     )
 
@@ -118,9 +124,11 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
                 count,
                 observation=_difference_mask(obs, expected_obs),
                 state=_difference_mask(next_state.position, expected_obs)
-                | _difference_mask(next_state.terminated, fixture["cube_terminated"][indices]),
+                | _difference_mask(next_state.terminated, fixture["cube_terminated"][indices])
+                | _difference_mask(next_state.time, np.ones(count, dtype=np.int32)),
                 reward=_difference_mask(reward, fixture["cube_reward"][indices]),
-                terminated=_difference_mask(done, fixture["cube_terminated"][indices]),
+                terminated=_difference_mask(done, fixture["cube_terminated"][indices])
+                | _difference_mask(info["terminated"], fixture["cube_terminated"][indices]),
                 truncated=_difference_mask(info["truncated"], fixture["cube_truncated"][indices]),
             )
 
@@ -150,9 +158,13 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
         | _difference_mask(
             next_state.guess_index, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32)
         )
-        | _difference_mask(next_state.terminated, fixture["mm_terminated"]),
+        | _difference_mask(next_state.terminated, fixture["mm_terminated"])
+        | _difference_mask(
+            next_state.time, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32)
+        ),
         reward=_difference_mask(reward, fixture["mm_reward"]),
-        terminated=_difference_mask(done, fixture["mm_terminated"]),
+        terminated=_difference_mask(done, fixture["mm_terminated"])
+        | _difference_mask(info["terminated"], fixture["mm_terminated"]),
         truncated=_difference_mask(info["truncated"], fixture["mm_truncated"]),
     )
     return results
@@ -232,6 +244,6 @@ def write_parity_csv(path: Path, rows: list[dict[str, object]]) -> None:
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)

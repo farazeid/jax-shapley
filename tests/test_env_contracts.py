@@ -41,6 +41,19 @@ def test_reset_and_jit_step_contract(env: object) -> None:
     ):
         np.testing.assert_array_equal(eager_leaf, compiled_leaf)
 
+    next_obs, next_state, reward, done, info = eager
+    assert np.asarray(next_obs).dtype == np.int32
+    assert np.asarray(next_state.time).dtype == np.int32
+    assert np.asarray(reward).dtype == np.float32
+    assert np.asarray(done).dtype == np.bool_
+    assert set(info) == {"discount", "terminated", "truncated"}
+    assert np.asarray(info["discount"]).dtype == np.float32
+    assert np.asarray(info["terminated"]).dtype == np.bool_
+    assert np.asarray(info["truncated"]).dtype == np.bool_
+    assert bool(info["terminated"]) == bool(done)
+    assert not bool(info["truncated"])
+    assert float(info["discount"]) == (0.0 if bool(done) else 1.0)
+
 
 def test_reset_support() -> None:
     keys = jax.random.split(jax.random.key(7), 256)
