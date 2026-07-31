@@ -6,7 +6,9 @@ import csv
 import gc
 import importlib.util
 import json
+import logging
 import math
+import os
 import subprocess
 import sys
 import time
@@ -160,16 +162,13 @@ def benchmark_original_point(
             envs.step(action)
 
     run_block()
-    started = time.perf_counter()
-    run_block()
-    repeated_blocks = calibrate(args, time.perf_counter() - started)
+    _, calibrated_blocks = measure_repeated_blocks(args, run_block, lambda: None)
 
     rows = []
     for sample in range(args.samples):
-        started = time.perf_counter()
-        for _ in range(repeated_blocks):
-            run_block()
-        elapsed = time.perf_counter() - started
+        elapsed, repeated_blocks = measure_repeated_blocks(
+            args, run_block, lambda: None, calibrated_blocks
+        )
         transitions = num_envs * args.block_steps * repeated_blocks
         rows.append(
             result_row(
@@ -213,12 +212,66 @@ def original_thunk(
 
 
 def benchmark_jax(args: Args) -> list[dict[str, object]]:
+    if unavailable_gpu_run_requested():
+        return skipped_gpu_rows(args)
+
     rows: list[dict[str, object]] = []
     for environment_name in args.environments:
         for num_envs in args.num_envs:
             print(f"jax {environment_name} n={num_envs}", flush=True)
             rows.extend(benchmark_jax_point(args, environment_name, num_envs))
     return rows
+
+
+def unavailable_gpu_run_requested() -> bool:
+    requested_platforms = {
+        platform.strip() for platform in os.environ.get("JAX_PLATFORMS", "").split(",")
+    }
+    if not requested_platforms.intersection({"cuda", "gpu"}):
+        return False
+
+    import jax
+
+    jax_logger = logging.getLogger("jax._src.xla_bridge")
+    logger_was_disabled = jax_logger.disabled
+    jax_logger.disabled = True
+    try:
+        try:
+            gpu_devices = jax.devices("gpu")
+        except RuntimeError:
+            gpu_devices = []
+    finally:
+        jax_logger.disabled = logger_was_disabled
+    if gpu_devices:
+        return False
+
+    print(
+        "SKIPPED JAX GPU throughput benchmark: "
+        "this run requires an available JAX GPU backend.",
+        flush=True,
+    )
+    return True
+
+
+def skipped_gpu_rows(args: Args) -> list[dict[str, object]]:
+    note = "GPU benchmark skipped: this run requires an available JAX GPU backend"
+    return [
+        {
+            "environment": environment_name,
+            "backend": "jax_gpu",
+            "device": "",
+            "num_envs": num_envs,
+            "sample": -1,
+            "block_steps": args.block_steps,
+            "repeated_blocks": 0,
+            "elapsed_seconds": "",
+            "steps_per_second": "",
+            "status": "gpu_unavailable",
+            "note": note,
+        }
+        for environment_name in args.environments
+        for num_envs in args.num_envs
+    ]
 
 
 def benchmark_jax_point(
@@ -240,29 +293,33 @@ def benchmark_jax_point(
             _, current_state, current_keys = current
             split = jax.vmap(jax.random.split)(current_keys)
             next_keys, step_keys = split[:, 0], split[:, 1]
-            next_obs, next_state, reward, done, _ = batched_step(
+            next_obs, next_state, reward, done, info = batched_step(
                 step_keys, current_state, action, params
             )
-            return (next_obs, next_state, next_keys), (reward, done)
+            return (next_obs, next_state, next_keys), (reward, done, info["episode"])
 
         return jax.lax.scan(scan_step, carry, rollout_actions)
 
     compiled = jax.jit(rollout)
     carry = (obs, state, keys)
-    carry, outputs = compiled(carry, actions)
-    jax.block_until_ready(outputs)
-    started = time.perf_counter()
-    carry, outputs = compiled(carry, actions)
-    jax.block_until_ready(outputs)
-    repeated_blocks = calibrate(args, time.perf_counter() - started)
+    outputs = None
+
+    def run_block() -> None:
+        nonlocal carry, outputs
+        carry, outputs = compiled(carry, actions)
+
+    def synchronize() -> None:
+        jax.block_until_ready(outputs)
+
+    run_block()
+    synchronize()
+    _, calibrated_blocks = measure_repeated_blocks(args, run_block, synchronize)
 
     rows = []
     for sample in range(args.samples):
-        started = time.perf_counter()
-        for _ in range(repeated_blocks):
-            carry, outputs = compiled(carry, actions)
-        jax.block_until_ready(outputs)
-        elapsed = time.perf_counter() - started
+        elapsed, repeated_blocks = measure_repeated_blocks(
+            args, run_block, synchronize, calibrated_blocks
+        )
         transitions = num_envs * args.block_steps * repeated_blocks
         rows.append(
             result_row(
@@ -281,17 +338,20 @@ def benchmark_jax_point(
 
 
 def jax_environment(environment_name: str) -> object:
+    from jax_shapley import EpisodeStatisticsWrapper
     from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
 
     if environment_name == "gridworld":
-        return Gridworld()
-    if environment_name == "hypercube_2x2":
-        return Hypercube(2, 2)
-    if environment_name == "hypercube_6x5":
-        return Hypercube(6, 5)
-    if environment_name == "mastermind_222":
-        return Mastermind222()
-    raise ValueError(environment_name)
+        env = Gridworld()
+    elif environment_name == "hypercube_2x2":
+        env = Hypercube(2, 2)
+    elif environment_name == "hypercube_6x5":
+        env = Hypercube(6, 5)
+    elif environment_name == "mastermind_222":
+        env = Mastermind222()
+    else:
+        raise ValueError(environment_name)
+    return EpisodeStatisticsWrapper(env)
 
 
 def action_schedule(args: Args, environment_name: str, num_envs: int) -> np.ndarray:
@@ -306,8 +366,27 @@ def action_schedule(args: Args, environment_name: str, num_envs: int) -> np.ndar
     return (time_indices + env_indices) % actions
 
 
-def calibrate(args: Args, probe_seconds: float) -> int:
-    return max(1, math.ceil(args.min_sample_seconds / max(probe_seconds, 1e-9)))
+def measure_repeated_blocks(
+    args: Args,
+    run_block: Callable[[], None],
+    synchronize: Callable[[], None],
+    initial_blocks: int = 1,
+) -> tuple[float, int]:
+    repeated_blocks = 0
+    additional_blocks = max(1, initial_blocks)
+    started = time.perf_counter()
+    while True:
+        for _ in range(additional_blocks):
+            run_block()
+        repeated_blocks += additional_blocks
+        synchronize()
+        elapsed = time.perf_counter() - started
+        if elapsed >= args.min_sample_seconds:
+            return elapsed, repeated_blocks
+        projected_blocks = math.ceil(
+            repeated_blocks * args.min_sample_seconds / max(elapsed, 1e-9)
+        )
+        additional_blocks = max(1, projected_blocks - repeated_blocks)
 
 
 def result_row(
@@ -352,7 +431,7 @@ def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
