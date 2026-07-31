@@ -288,6 +288,7 @@ benchmark = [
     { name = "matplotlib" },
     { name = "pandas" },
     { name = "psutil" },
+    { name = "scipy" },
     { name = "tyro" },
 ]
 dev = [
@@ -312,6 +313,7 @@ benchmark = [
     { name = "matplotlib", specifier = ">=3.10" },
     { name = "pandas", specifier = ">=2.3" },
     { name = "psutil", specifier = ">=7.0" },
+    { name = "scipy", specifier = ">=1.16" },
     { name = "tyro", specifier = ">=0.9" },
 ]
 dev = [

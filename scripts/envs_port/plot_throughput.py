@@ -40,7 +40,6 @@ class Args:
     backend_labels: tuple[str, ...] = ("Gymnasium CPU", "JAX CPU", "JAX GPU")
     backend_colors: tuple[str, ...] = ("#555555", "#2070b4", "#d1495b")
     backend_markers: tuple[str, ...] = ("o", "s", "^")
-    confidence_level: float = 0.95
     confidence_band_alpha: float = 0.14
     confidence_note_y: float = 0.895
     original_hypercube_6x5_cap: int = 16
@@ -79,7 +78,7 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
             x = line["num_envs"].to_numpy()
             axis.plot(
                 x,
-                line["median"],
+                line["mean"],
                 label=label,
                 color=color,
                 marker=marker,
@@ -88,8 +87,8 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
             )
             axis.fill_between(
                 x,
-                line["median_ci95_lower"],
-                line["median_ci95_upper"],
+                line["mean_ci95_lower"],
+                line["mean_ci95_upper"],
                 color=color,
                 alpha=args.confidence_band_alpha,
             )
@@ -128,7 +127,7 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
     figure.text(
         0.5,
         args.confidence_note_y,
-        f"Shading: {args.confidence_level:.0%} bootstrap confidence interval for median",
+        "Shading: 95% Student's t-distribution confidence interval for mean",
         horizontalalignment="center",
         fontsize=9,
         color="#555555",
@@ -137,6 +136,12 @@ def plot(args: Args, summary: pd.DataFrame) -> None:
     figure.savefig(args.svg_output)
     figure.savefig(args.png_output, dpi=args.png_dpi)
     plt.close(figure)
+    normalize_svg(args.svg_output)
+
+
+def normalize_svg(path: Path) -> None:
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(line.rstrip() for line in lines) + "\n")
 
 
 if __name__ == "__main__":
