@@ -1,11 +1,16 @@
 """JAX port of FastSVERL's Mastermind-222 environment."""
 
-from typing import overload
+from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from jax_shapley.envs.render import RenderConfig
 
 
 @struct.dataclass
@@ -142,6 +147,23 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
     def observation_space(self, params: Mastermind222Params) -> spaces.Box:
         del params
         return spaces.Box(low=-1, high=2, shape=(8,), dtype=jnp.int32)
+
+    def render(
+        self,
+        state: Mastermind222State,
+        params: Mastermind222Params | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render the public board as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.mastermind import render_mastermind
+
+        return render_mastermind(
+            state,
+            num_guesses=self.num_guesses,
+            code_size=self.code_size,
+            config=render_config,
+        )
 
     def state_space(self, params: Mastermind222Params) -> spaces.Dict:
         return spaces.Dict(

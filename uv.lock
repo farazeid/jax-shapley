@@ -281,6 +281,9 @@ dependencies = [
 cuda = [
     { name = "jax", extra = ["cuda13"] },
 ]
+render = [
+    { name = "pillow" },
+]
 
 [package.dev-dependencies]
 benchmark = [
@@ -304,8 +307,9 @@ requires-dist = [
     { name = "gymnax", specifier = "==0.0.9" },
     { name = "jax", specifier = ">=0.6" },
     { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda'", specifier = ">=0.6" },
+    { name = "pillow", marker = "extra == 'render'", specifier = ">=11.3" },
 ]
-provides-extras = ["cuda"]
+provides-extras = ["cuda", "render"]
 
 [package.metadata.requires-dev]
 benchmark = [

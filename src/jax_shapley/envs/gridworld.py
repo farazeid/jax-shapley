@@ -1,11 +1,16 @@
 """JAX port of FastSVERL's deterministic 2 x 4 Gridworld."""
 
-from typing import overload
+from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from jax_shapley.envs.render import RenderConfig
 
 
 @struct.dataclass
@@ -124,6 +129,23 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
             high=jnp.asarray([1, 3], dtype=jnp.int32),
             shape=(2,),
             dtype=jnp.int32,
+        )
+
+    def render(
+        self,
+        state: GridworldState,
+        params: GridworldParams | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render an unbatched state as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.gridworld import render_gridworld
+
+        return render_gridworld(
+            state,
+            starts=self._starts,
+            blocked=self._blocked,
+            config=render_config,
         )
 
     def state_space(self, params: GridworldParams) -> spaces.Dict:

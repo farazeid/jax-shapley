@@ -7,6 +7,7 @@ from jax_shapley.envs.mastermind import (
     Mastermind222Params,
     Mastermind222State,
 )
+from jax_shapley.envs.render import RenderConfig
 
 __all__ = [
     "Gridworld",
@@ -18,4 +19,5 @@ __all__ = [
     "Mastermind222",
     "Mastermind222Params",
     "Mastermind222State",
+    "RenderConfig",
 ]

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["jax[cuda13]>=0.6"]
+render = ["pillow>=11.3"]
 
 [dependency-groups]
 dev = [
@@ -37,6 +38,7 @@ benchmark = [
 addopts = "-ra"
 markers = [
     "gpu: requires a JAX GPU backend",
+    "render: requires the optional rendering dependencies",
     "slow: exhaustive or performance-sensitive test",
 ]
 testpaths = ["tests"]

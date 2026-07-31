@@ -10,6 +10,7 @@ from jax_shapley.envs import (
     Mastermind222,
     Mastermind222Params,
     Mastermind222State,
+    RenderConfig,
 )
 from jax_shapley.wrappers import EpisodeStatisticsState, EpisodeStatisticsWrapper
 
@@ -25,4 +26,5 @@ __all__ = [
     "Mastermind222",
     "Mastermind222Params",
     "Mastermind222State",
+    "RenderConfig",
 ]

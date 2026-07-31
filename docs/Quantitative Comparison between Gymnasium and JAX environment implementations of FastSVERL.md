@@ -56,7 +56,7 @@ For Hypercube 6x5, the unmodified source owns a large transition dictionary per 
 - JAX/JAXLIB: 0.11.0 / 0.11.0
 - Gymnax: 0.0.9 (locked)
 - Gymnasium: 0.29.1
-- uv lock SHA-256: `50aa45872c12b3fec023defe8c5e3853175860cb0d71f7286e9989cc8617c7ef`
+- uv lock SHA-256: `36aa1d8e90d9c7819376d3a7586f27b2b3e83918f83ddf66b581abcaa2c498b9`
 - FastSVERL source commit: `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`
 
 ## Reproduction

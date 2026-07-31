@@ -1,11 +1,16 @@
 """JAX port of FastSVERL's obstacle-free Hypercube environment."""
 
-from typing import overload
+from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from jax_shapley.envs.render import RenderConfig
 
 
 @struct.dataclass
@@ -126,6 +131,25 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
             high=self.side_length - 1,
             shape=(self.dimension,),
             dtype=jnp.int32,
+        )
+
+    def render(
+        self,
+        state: HypercubeState,
+        params: HypercubeParams | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render a 2D view and coordinate tracks as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.hypercube import render_hypercube
+
+        return render_hypercube(
+            state,
+            side_length=self.side_length,
+            dimension=self.dimension,
+            start=self._start,
+            goal=self._goal,
+            config=render_config,
         )
 
     def state_space(self, params: HypercubeParams) -> spaces.Dict:
