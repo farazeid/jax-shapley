@@ -26,6 +26,12 @@ obs, state, reward, done, info = env.step(
 
 The environments use the Gymnax API. Public `step()` auto-resets terminal instances; `env.env.step_env()` accesses raw FastSVERL-compatible transitions on the unwrapped environment. Gridworld preserves the FastSVERL `[0, 0]` terminal-observation quirk. Hypercube supports side lengths 2–6 and dimensions 2–5 as static JIT specializations. Mastermind-222 preserves the source action decoding, eight-feature board, clues, rewards, and horizon.
 
+Exhaustive environment cards:
+
+- [Gridworld](src/jax_shapley/envs/gridworld.md)
+- [Hypercube](src/jax_shapley/envs/hypercube.md)
+- [Mastermind-222](src/jax_shapley/envs/mastermind.md)
+
 Vectorization uses the standard JAX composition:
 
 ```python
@@ -60,7 +66,7 @@ The public array remains RGB. The committed documentation WebPs use the same ren
 
 Call `render()` after each already-compiled step to capture an episode, or retain selected states from a compiled rollout and render them afterwards. Encoding images or video remains the caller responsibility. For an `EpisodeStatisticsWrapper` state, render with `wrapped_env.env.render(state.env_state)`.
 
-See the [environment rendering guide](docs/Environment%20Rendering.md) for environment cards, higher-dimensional Hypercube projections, and the Mastermind secret policy.
+See the [environment rendering guide](docs/Environment%20Rendering.md) for rendering contracts, higher-dimensional Hypercube projections, and the Mastermind secret policy.
 
 ## Validation
 
