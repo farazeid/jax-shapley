@@ -39,7 +39,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
     num_pegs = 2
 
     @staticmethod
-    def decode_action(action: int | float | jax.Array) -> jax.Array:
+    def decode_action(action: float | jax.Array) -> jax.Array:
         """Decode actions exactly like FastSVERL's least-significant-first table."""
         action = jnp.asarray(action, dtype=jnp.int32)
         powers = jnp.asarray([1, 2], dtype=jnp.int32)
@@ -50,7 +50,9 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         return Mastermind222Params()
 
     def reset_env(
-        self, key: jax.Array, params: Mastermind222Params
+        self,
+        key: jax.Array,
+        params: Mastermind222Params,
     ) -> tuple[jax.Array, Mastermind222State]:
         del params
         goal_index = jax.random.randint(key, (), 0, 4)
@@ -67,7 +69,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         self,
         key: jax.Array,
         state: Mastermind222State,
-        action: int | float | jax.Array,
+        action: float | jax.Array,
         params: Mastermind222Params,
     ) -> tuple[jax.Array, Mastermind222State, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params
@@ -82,13 +84,11 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         goal_counts = jnp.sum(goal_one_hot * unmatched, axis=0)
         num_misplaced = jnp.sum(jnp.minimum(guess_counts, goal_counts), dtype=jnp.int32)
 
-        row = jnp.concatenate(
-            (
-                jnp.asarray([num_misplaced], dtype=jnp.int32),
-                guess,
-                jnp.asarray([num_exact], dtype=jnp.int32),
-            )
-        )
+        row = jnp.concatenate((
+            jnp.asarray([num_misplaced], dtype=jnp.int32),
+            guess,
+            jnp.asarray([num_exact], dtype=jnp.int32),
+        ))
         board = state.board.at[state.guess_index].set(row)
         correct = num_exact == self.code_size
         terminated = correct | (state.guess_index == self.num_guesses - 1)
@@ -100,7 +100,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info = {
+        info: dict[str, jax.Array] = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -115,7 +115,10 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
 
     @overload
     def get_obs(
-        self, state: Mastermind222State, key: jax.Array, params: Mastermind222Params
+        self,
+        state: Mastermind222State,
+        key: jax.Array,
+        params: Mastermind222Params,
     ) -> jax.Array: ...
 
     def get_obs(
@@ -166,12 +169,10 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         )
 
     def state_space(self, params: Mastermind222Params) -> spaces.Dict:
-        return spaces.Dict(
-            {
-                "board": spaces.Box(low=-1, high=2, shape=(2, 4), dtype=jnp.int32),
-                "goal": spaces.Box(low=1, high=2, shape=(2,), dtype=jnp.int32),
-                "guess_index": spaces.Discrete(3),
-                "terminated": spaces.Discrete(2),
-                "time": spaces.Discrete(params.max_steps_in_episode + 1),
-            }
-        )
+        return spaces.Dict({
+            "board": spaces.Box(low=-1, high=2, shape=(2, 4), dtype=jnp.int32),
+            "goal": spaces.Box(low=1, high=2, shape=(2,), dtype=jnp.int32),
+            "guess_index": spaces.Discrete(3),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode + 1),
+        })

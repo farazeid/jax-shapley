@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+import jax
 import numpy as np
 
+from jax_shapley.envs.gridworld import GridworldState
 from jax_shapley.envs.render.common import (
     PALETTE,
+    ImageDrawType,
+    ImageFontType,
     RenderConfig,
     cell_box,
     create_canvas,
@@ -20,11 +22,12 @@ from jax_shapley.envs.render.common import (
 )
 
 
-def render_gridworld(
-    state: Any,
+# This host-only renderer intentionally keeps drawing branches together for visual clarity.
+def render_gridworld(  # ruff: ignore[complex-structure]
+    state: GridworldState,
     *,
-    starts: Any,
-    blocked: Any,
+    starts: np.ndarray | jax.Array,
+    blocked: np.ndarray | jax.Array,
     config: RenderConfig | None,
     transparent: bool = False,
 ) -> np.ndarray:
@@ -169,7 +172,12 @@ def render_gridworld(
     return finish_canvas(image, config, transparent=transparent)
 
 
-def _draw_legend(draw: Any, font: Any, scale: int, config: RenderConfig) -> None:
+def _draw_legend(
+    draw: ImageDrawType,
+    font: ImageFontType,
+    scale: int,
+    config: RenderConfig,
+) -> None:
     """Explain every Gridworld symbol inside the returned frame."""
     if config.width < 500:
         draw_text(
@@ -211,7 +219,14 @@ def _draw_legend(draw: Any, font: Any, scale: int, config: RenderConfig) -> None
             fill="#FFFFFF" if fill in (PALETTE.blocked, PALETTE.goal) else PALETTE.ink,
             anchor="mm",
         )
-        draw_text(draw, (x + 31, y + 12), label, font=font, scale=scale, anchor="lm")
+        draw_text(
+            draw,
+            (x + 31, y + 12),
+            label,
+            font=font,
+            scale=scale,
+            anchor="lm",
+        )
     draw_text(
         draw,
         (config.width / 2, config.height - 19),

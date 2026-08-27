@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 
+from jax_shapley.envs.mastermind import Mastermind222State
 from jax_shapley.envs.render.common import (
     PALETTE,
+    ImageDrawType,
+    ImageFontType,
     RenderConfig,
     create_canvas,
     draw_text,
@@ -20,7 +21,7 @@ from jax_shapley.envs.render.common import (
 
 
 def render_mastermind(
-    state: Any,
+    state: Mastermind222State,
     *,
     num_guesses: int,
     code_size: int,
@@ -35,9 +36,7 @@ def render_mastermind(
     terminated = bool(host_scalar(state.terminated, "state.terminated"))
     time = int(host_scalar(state.time, "state.time"))
     if board.shape != (num_guesses, code_size + 2):
-        raise ValueError(
-            f"Mastermind board must have shape {(num_guesses, code_size + 2)}, got {board.shape}"
-        )
+        raise ValueError(f"Mastermind board must have shape {(num_guesses, code_size + 2)}, got {board.shape}")
     if goal.shape != (code_size,):
         raise ValueError(f"Mastermind goal must have shape {(code_size,)}, got {goal.shape}")
 
@@ -150,8 +149,8 @@ def render_mastermind(
 
 
 def _draw_peg(
-    draw: Any,
-    font: Any,
+    draw: ImageDrawType,
+    font: ImageFontType,
     scale: int,
     x: float,
     y: float,
@@ -172,8 +171,8 @@ def _draw_peg(
 
 
 def _draw_clues(
-    draw: Any,
-    font: Any,
+    draw: ImageDrawType,
+    font: ImageFontType,
     scale: int,
     x: float,
     y: float,
@@ -215,8 +214,8 @@ def _draw_clues(
 
 
 def _draw_legend(
-    draw: Any,
-    font: Any,
+    draw: ImageDrawType,
+    font: ImageFontType,
     scale: int,
     *,
     left: float,
@@ -251,7 +250,13 @@ def _draw_legend(
         outline=PALETTE.ink,
     )
     draw_text(
-        draw, (left + 9, top + 159), "-", font=font, scale=scale, fill=PALETTE.muted, anchor="mm"
+        draw,
+        (left + 9, top + 159),
+        "-",
+        font=font,
+        scale=scale,
+        fill=PALETTE.muted,
+        anchor="mm",
     )
     draw_text(draw, (left + 27, top + 159), "unused position", font=font, scale=scale, anchor="lm")
     draw.rectangle(
@@ -273,14 +278,19 @@ def _draw_legend(
     draw_text(draw, (left + 27, top + 230), "wrong position", font=font, scale=scale)
     draw_text(draw, (left, top + 255), "Numbers are match counts.", font=font, scale=scale)
     draw_text(
-        draw, (left, top + 281), "Secret code is hidden", font=font, scale=scale, fill=PALETTE.muted
+        draw,
+        (left, top + 281),
+        "Secret code is hidden",
+        font=font,
+        scale=scale,
+        fill=PALETTE.muted,
     )
     draw_text(draw, (left, top + 299), "by default.", font=font, scale=scale, fill=PALETTE.muted)
 
 
 def _draw_secret(
-    draw: Any,
-    font: Any,
+    draw: ImageDrawType,
+    font: ImageFontType,
     scale: int,
     goal: np.ndarray,
     *,

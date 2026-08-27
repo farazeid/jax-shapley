@@ -10,14 +10,78 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import subprocess
+
+# Fixture provenance invokes Git with fixed argv and no shell.
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Protocol, cast
 
 import numpy as np
+import numpy.typing as npt
 import tyro
+
+ArrayLike = npt.ArrayLike
+
+
+class _ActionSpace(Protocol):
+    n: int
+
+
+class _GridworldFactory(Protocol):
+    def __call__(self, *, seed: int) -> _GridworldInstance: ...
+
+
+class _HypercubeFactory(Protocol):
+    def __call__(self, *, n: int, d: int, p: int, seed: int) -> _HypercubeInstance: ...
+
+
+class _MastermindFactory(Protocol):
+    def __call__(self, *, code_size: int, num_guesses: int, num_pegs: int, seed: int) -> _MastermindInstance: ...
+
+
+class _SavezCompressed(Protocol):
+    def __call__(self, file: Path, **arrays: ArrayLike) -> None: ...
+
+
+class _GridworldInstance(Protocol):
+    states_decode: dict[str, np.ndarray]
+    action_space: _ActionSpace
+
+    def reset(self, start_state: np.ndarray | None = None) -> object: ...
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
+
+
+class _HypercubeInstance(Protocol):
+    states: list[np.ndarray]
+    action_space: _ActionSpace
+    pos: np.ndarray
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
+
+
+class _MastermindInstance(Protocol):
+    index_to_guess: np.ndarray
+    action_space: _ActionSpace
+    grid: np.ndarray
+    goal: np.ndarray
+    count: int
+
+    def reset(self) -> object: ...
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
 
 
 @dataclass(frozen=True)
@@ -58,32 +122,34 @@ def main() -> None:
         raise RuntimeError(f"Unexpected fixture counts: {counts}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.output, **arrays)
+    cast(_SavezCompressed, np.savez_compressed)(args.output, **arrays)
     provenance = {
         "fastsverl_commit": commit,
         "source_sha256": {name: sha256(path) for name, path in paths.items()},
         "transition_counts": counts,
         "fixture_sha256": sha256(args.output),
     }
-    args.output.with_suffix(".json").write_text(
-        json.dumps(provenance, indent=2, sort_keys=True) + "\n"
-    )
+    args.output.with_suffix(".json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
     print(json.dumps(provenance, indent=2, sort_keys=True))
 
 
-def capture_transitions(modules: dict[str, ModuleType]) -> dict[str, np.ndarray]:
-    arrays: dict[str, np.ndarray] = {}
-    arrays.update(capture_gridworld(modules["gridworld"]))
-    arrays.update(capture_hypercubes(modules["hypercube"]))
-    arrays.update(capture_mastermind(modules["mastermind"]))
+def capture_transitions(modules: dict[str, ModuleType]) -> dict[str, ArrayLike]:
+    gridworld = cast(_GridworldFactory, modules["gridworld"].GWB)
+    hypercube = cast(_HypercubeFactory, modules["hypercube"].Hypercube)
+    mastermind = cast(_MastermindFactory, modules["mastermind"].Mastermind)
+    arrays: dict[str, ArrayLike] = {}
+    arrays.update(capture_gridworld(gridworld(seed=0)))
+    arrays.update(capture_hypercubes(hypercube))
+    arrays.update(capture_mastermind(mastermind(code_size=2, num_guesses=2, num_pegs=2, seed=0)))
     return arrays
 
 
-def transition_counts(arrays: dict[str, np.ndarray]) -> dict[str, int]:
+def transition_counts(arrays: dict[str, ArrayLike]) -> dict[str, int]:
+    arrays_nd = {key: np.asarray(value) for key, value in arrays.items()}
     counts = {
-        "gridworld": int(arrays["grid_action"].size),
-        "hypercube": int(arrays["cube_action"].size),
-        "mastermind_222": int(arrays["mm_action"].size),
+        "gridworld": int(arrays_nd["grid_action"].size),
+        "hypercube": int(arrays_nd["cube_action"].size),
+        "mastermind_222": int(arrays_nd["mm_action"].size),
     }
     counts["total"] = sum(counts.values())
     return counts
@@ -99,7 +165,10 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 def git_commit(root: Path) -> str:
-    return subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    return subprocess.check_output(  # ruff: ignore[subprocess-without-shell-equals-true]
+        ["git", "-C", str(root), "rev-parse", "HEAD"],  # ruff: ignore[start-process-with-partial-path]
+        text=True,
+    ).strip()
 
 
 def sha256(path: Path) -> str:
@@ -108,8 +177,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def capture_gridworld(module: ModuleType) -> dict[str, np.ndarray]:
-    env = module.GWB(seed=0)
+def capture_gridworld(env: _GridworldInstance) -> dict[str, ArrayLike]:
     states = np.asarray(list(env.states_decode.values()), dtype=np.int32)
     inputs: list[np.ndarray] = []
     actions: list[int] = []
@@ -123,8 +191,8 @@ def capture_gridworld(module: ModuleType) -> dict[str, np.ndarray]:
             obs, reward, done, trunc, _ = env.step(action)
             inputs.append(state.copy())
             actions.append(action)
-            next_obs.append(obs)
-            rewards.append(reward)
+            next_obs.append(np.asarray(obs, dtype=np.int32))
+            rewards.append(float(reward))
             terminated.append(done)
             truncated.append(trunc)
     return {
@@ -137,9 +205,9 @@ def capture_gridworld(module: ModuleType) -> dict[str, np.ndarray]:
     }
 
 
-def capture_hypercubes(module: ModuleType) -> dict[str, np.ndarray]:
-    configs: list[tuple[int, int]] = []
+def capture_hypercubes(factory: _HypercubeFactory) -> dict[str, ArrayLike]:
     states: list[np.ndarray] = []
+    configs: list[tuple[int, int]] = []
     actions: list[int] = []
     next_obs: list[np.ndarray] = []
     rewards: list[float] = []
@@ -148,7 +216,7 @@ def capture_hypercubes(module: ModuleType) -> dict[str, np.ndarray]:
 
     for side_length in range(2, 7):
         for dimension in range(2, 6):
-            env = module.Hypercube(n=side_length, d=dimension, p=0, seed=0)
+            env = factory(n=side_length, d=dimension, p=0, seed=0)
             for state in env.states:
                 for action in range(env.action_space.n):
                     env.pos = state.copy()
@@ -161,7 +229,7 @@ def capture_hypercubes(module: ModuleType) -> dict[str, np.ndarray]:
                     states.append(padded_state)
                     actions.append(action)
                     next_obs.append(padded_next)
-                    rewards.append(reward)
+                    rewards.append(float(reward))
                     terminated.append(done)
                     truncated.append(trunc)
 
@@ -176,8 +244,7 @@ def capture_hypercubes(module: ModuleType) -> dict[str, np.ndarray]:
     }
 
 
-def capture_mastermind(module: ModuleType) -> dict[str, np.ndarray]:
-    env = module.Mastermind(code_size=2, num_guesses=2, num_pegs=2, seed=0)
+def capture_mastermind(env: _MastermindInstance) -> dict[str, ArrayLike]:
     boards: list[np.ndarray] = []
     goals: list[np.ndarray] = []
     guess_indices: list[int] = []
@@ -187,22 +254,22 @@ def capture_mastermind(module: ModuleType) -> dict[str, np.ndarray]:
     terminated: list[bool] = []
     truncated: list[bool] = []
 
-    def record(source_env: object, action: int) -> object:
+    def record(source_env: _MastermindInstance, action: int) -> _MastermindInstance:
         transition_env = deepcopy(source_env)
-        boards.append(transition_env.grid.copy())
-        goals.append(transition_env.goal.copy())
-        guess_indices.append(transition_env.count)
+        boards.append(np.asarray(transition_env.grid.copy(), dtype=np.int32))
+        goals.append(np.asarray(transition_env.goal.copy(), dtype=np.int32))
+        guess_indices.append(int(transition_env.count))
         actions.append(action)
         _, reward, done, trunc, _ = transition_env.step(action)
-        next_boards.append(transition_env.grid.copy())
-        rewards.append(reward)
+        next_boards.append(np.asarray(transition_env.grid.copy(), dtype=np.int32))
+        rewards.append(float(reward))
         terminated.append(done)
         truncated.append(trunc)
         return transition_env
 
     for goal in env.index_to_guess:
         env.reset()
-        env.goal = goal.copy()
+        env.goal = np.asarray(goal.copy(), dtype=np.int32)
         for first_action in range(env.action_space.n):
             after_first = record(env, first_action)
             if not terminated[-1]:

@@ -32,7 +32,7 @@ class HypercubeParams(environment.EnvParams):
 class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
     """An obstacle-free ``n``-sided, ``d``-dimensional gridworld."""
 
-    def __init__(self, side_length: int, dimension: int):
+    def __init__(self, side_length: int, dimension: int) -> None:
         if side_length not in range(2, 7):
             raise ValueError("side_length must be one of the paper values 2, 3, 4, 5, or 6")
         if dimension not in range(2, 6):
@@ -47,7 +47,9 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         return HypercubeParams()
 
     def reset_env(
-        self, key: jax.Array, params: HypercubeParams
+        self,
+        key: jax.Array,
+        params: HypercubeParams,
     ) -> tuple[jax.Array, HypercubeState]:
         del key, params
         state = HypercubeState(
@@ -61,7 +63,7 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         self,
         key: jax.Array,
         state: HypercubeState,
-        action: int | float | jax.Array,
+        action: float | jax.Array,
         params: HypercubeParams,
     ) -> tuple[jax.Array, HypercubeState, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params
@@ -72,15 +74,13 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         valid = jnp.all((candidate >= 0) & (candidate < self.side_length))
         position = jnp.where(valid, candidate, state.position)
         terminated = jnp.all(position == self._goal)
-        reward = jnp.where(terminated, float(self.side_length * self.dimension - 1), -1.0).astype(
-            jnp.float32
-        )
+        reward = jnp.where(terminated, float(self.side_length * self.dimension - 1), -1.0).astype(jnp.float32)
         next_state = HypercubeState(
             position=position,
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info = {
+        info: dict[str, jax.Array] = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -95,7 +95,10 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
 
     @overload
     def get_obs(
-        self, state: HypercubeState, key: jax.Array, params: HypercubeParams
+        self,
+        state: HypercubeState,
+        key: jax.Array,
+        params: HypercubeParams,
     ) -> jax.Array: ...
 
     def get_obs(
@@ -153,10 +156,8 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         )
 
     def state_space(self, params: HypercubeParams) -> spaces.Dict:
-        return spaces.Dict(
-            {
-                "position": self.observation_space(params),
-                "terminated": spaces.Discrete(2),
-                "time": spaces.Discrete(params.max_steps_in_episode),
-            }
-        )
+        return spaces.Dict({
+            "position": self.observation_space(params),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode),
+        })

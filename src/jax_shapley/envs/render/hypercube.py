@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+import jax
 import numpy as np
 
+from jax_shapley.envs.hypercube import HypercubeState
 from jax_shapley.envs.render.common import (
     PALETTE,
+    ImageDrawType,
     RenderConfig,
     cell_box,
     create_canvas,
@@ -21,12 +22,12 @@ from jax_shapley.envs.render.common import (
 
 
 def render_hypercube(
-    state: Any,
+    state: HypercubeState,
     *,
     side_length: int,
     dimension: int,
-    start: Any,
-    goal: Any,
+    start: np.ndarray | jax.Array,
+    goal: np.ndarray | jax.Array,
     config: RenderConfig | None,
     transparent: bool = False,
 ) -> np.ndarray:
@@ -39,9 +40,7 @@ def render_hypercube(
     goal = host_array(goal, "goal", ndim=1)
     expected_shape = (dimension,)
     if position.shape != expected_shape:
-        raise ValueError(
-            f"Hypercube position must have shape {expected_shape}, got {position.shape}"
-        )
+        raise ValueError(f"Hypercube position must have shape {expected_shape}, got {position.shape}")
 
     image, draw, font, scale = create_canvas(config)
     margin = 24.0
@@ -135,7 +134,13 @@ def render_hypercube(
         panel_left = origin[0] + side_length * cell_size + 18
         draw.rounded_rectangle(
             scaled_box(
-                (panel_left - 8, margin - 8, config.width - margin + 8, config.height - 96), scale
+                (
+                    panel_left - 8,
+                    margin - 8,
+                    config.width - margin + 8,
+                    config.height - 96,
+                ),
+                scale,
             ),
             radius=10 * scale,
             fill=PALETTE.panel,
@@ -178,8 +183,8 @@ def render_hypercube(
 
 
 def _draw_coordinate_panel(
-    draw: Any,
-    font: Any,
+    draw: ImageDrawType,
+    font: object,
     scale: int,
     *,
     left: float,
@@ -258,7 +263,13 @@ def _draw_coordinate_panel(
         )
 
 
-def _draw_legend(draw: Any, font: Any, scale: int, config: RenderConfig, dimension: int) -> None:
+def _draw_legend(
+    draw: ImageDrawType,
+    font: object,
+    scale: int,
+    config: RenderConfig,
+    dimension: int,
+) -> None:
     """Explain the projection and every grid and track marker."""
     if config.width < 500:
         draw_text(

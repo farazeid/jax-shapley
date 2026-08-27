@@ -32,16 +32,18 @@ class GridworldParams(environment.EnvParams):
 class Gridworld(environment.Environment[GridworldState, GridworldParams]):
     """FastSVERL-compatible Gridworld (registered there as ``GWB-v0``)."""
 
-    _action_deltas = jnp.asarray([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.int32)
-    _starts = jnp.asarray([[0, 0], [1, 0]], dtype=jnp.int32)
-    _blocked = jnp.asarray([0, 1], dtype=jnp.int32)
+    _action_deltas: jax.Array = jnp.asarray([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.int32)
+    _starts: jax.Array = jnp.asarray([[0, 0], [1, 0]], dtype=jnp.int32)
+    _blocked: jax.Array = jnp.asarray([0, 1], dtype=jnp.int32)
 
     @property
     def default_params(self) -> GridworldParams:
         return GridworldParams()
 
     def reset_env(
-        self, key: jax.Array, params: GridworldParams
+        self,
+        key: jax.Array,
+        params: GridworldParams,
     ) -> tuple[jax.Array, GridworldState]:
         del params
         start_index = jax.random.randint(key, (), 0, 2)
@@ -57,15 +59,13 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         self,
         key: jax.Array,
         state: GridworldState,
-        action: int | float | jax.Array,
+        action: float | jax.Array,
         params: GridworldParams,
     ) -> tuple[jax.Array, GridworldState, jax.Array, jax.Array, dict[str, jax.Array]]:
         del key, params
         action = jnp.asarray(action, dtype=jnp.int32)
         candidate = state.position + self._action_deltas[action]
-        in_bounds = (
-            (candidate[0] >= 0) & (candidate[0] < 2) & (candidate[1] >= 0) & (candidate[1] < 4)
-        )
+        in_bounds = (candidate[0] >= 0) & (candidate[0] < 2) & (candidate[1] >= 0) & (candidate[1] < 4)
         not_blocked = jnp.any(candidate != self._blocked)
         moved_position = jnp.where(in_bounds & not_blocked, candidate, state.position)
         terminated = moved_position[1] == 3
@@ -78,7 +78,7 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info = {
+        info: dict[str, jax.Array] = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -93,7 +93,10 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
 
     @overload
     def get_obs(
-        self, state: GridworldState, key: jax.Array, params: GridworldParams
+        self,
+        state: GridworldState,
+        key: jax.Array,
+        params: GridworldParams,
     ) -> jax.Array: ...
 
     def get_obs(
@@ -149,10 +152,8 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         )
 
     def state_space(self, params: GridworldParams) -> spaces.Dict:
-        return spaces.Dict(
-            {
-                "position": self.observation_space(params),
-                "terminated": spaces.Discrete(2),
-                "time": spaces.Discrete(params.max_steps_in_episode),
-            }
-        )
+        return spaces.Dict({
+            "position": self.observation_space(params),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode),
+        })

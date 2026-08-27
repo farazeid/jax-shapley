@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Protocol, cast
 
 import jax
 import numpy as np
 from jax import core
 
 RENDER_DEPENDENCY_MESSAGE = (
-    "Rendering requires the optional 'render' dependencies. "
-    "Install them with: uv sync --extra render"
+    "Rendering requires the optional 'render' dependencies. Install them with: uv sync --extra render"
 )
 
 
@@ -51,6 +51,103 @@ class Palette:
 PALETTE = Palette()
 
 
+class _PillowImage(Protocol):
+    """Subset of Pillow image methods used by renderers."""
+
+    size: tuple[int, int]
+
+    def resize(self, size: tuple[int, int], resample: int) -> _PillowImage: ...
+    def convert(self, mode: str) -> _PillowImage: ...
+
+
+class _PillowImageModule(Protocol):
+    """Subset of Pillow module APIs used by this package."""
+
+    class Resampling:
+        LANCZOS: int
+
+    def new(
+        self,
+        mode: str,
+        size: tuple[int, int],
+        color: str | tuple[int, int, int] | tuple[int, int, int, int],
+    ) -> _PillowImage: ...
+
+    @staticmethod
+    def alpha_composite(im1: _PillowImage, im2: _PillowImage) -> _PillowImage: ...
+
+
+class _PillowDraw(Protocol):
+    """Drawing primitive protocol consumed by renderer modules."""
+
+    def text(
+        self,
+        xy: tuple[float, float],
+        text: str,
+        *,
+        font: _PillowFont,
+        fill: str,
+        anchor: str | None = ...,
+    ) -> None: ...
+
+    def rectangle(
+        self,
+        xy: tuple[int, int, int, int],
+        *,
+        fill: str | None = ...,
+        outline: str | None = ...,
+        width: int = ...,
+    ) -> None: ...
+
+    def line(self, xy: tuple[int, int, int, int], *, fill: str, width: int) -> None: ...
+
+    def ellipse(
+        self,
+        xy: tuple[int, int, int, int],
+        *,
+        fill: str,
+        outline: str,
+        width: int = 1,
+    ) -> None: ...
+
+    def rounded_rectangle(
+        self,
+        xy: tuple[int, int, int, int],
+        *,
+        radius: int,
+        fill: str | None = ...,
+        outline: str | None = ...,
+        width: int = ...,
+    ) -> None: ...
+
+    def polygon(self, xy: Sequence[tuple[int, int]], *, fill: str, outline: str) -> None: ...
+
+
+class _PillowFont(Protocol):
+    """Marker protocol for Pillow fonts."""
+
+
+class _PillowDrawModule(Protocol):
+    """Protocol for ImageDraw module-level factory."""
+
+    # Pillow exposes this factory with a capitalized public name.
+    def Draw(self, image: _PillowImage) -> _PillowDraw: ...  # ruff: ignore[invalid-function-name]
+
+
+class _PillowFontModule(Protocol):
+    """Protocol for ImageFont module API used by renderer."""
+
+    def load_default(self, size: int) -> _PillowFont: ...
+
+
+type ImageType = _PillowImage
+type ImageDrawType = _PillowDraw
+type ImageFontType = _PillowFont
+type ImageModule = _PillowImageModule
+type ImageDrawModule = _PillowDrawModule
+type ImageFontModule = _PillowFontModule
+
+
 def resolve_config(config: RenderConfig | None) -> RenderConfig:
     """Return and validate a rendering configuration."""
     config = config or RenderConfig()
@@ -61,7 +158,7 @@ def resolve_config(config: RenderConfig | None) -> RenderConfig:
     return config
 
 
-def require_pillow() -> tuple[Any, Any, Any]:
+def require_pillow() -> tuple[ImageModule, ImageDrawModule, ImageFontModule]:
     """Import Pillow lazily and provide an actionable missing-extra error."""
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -69,71 +166,80 @@ def require_pillow() -> tuple[Any, Any, Any]:
         if error.name == "PIL" or (error.name and error.name.startswith("PIL.")):
             raise ModuleNotFoundError(RENDER_DEPENDENCY_MESSAGE) from error
         raise
-    return Image, ImageDraw, ImageFont
+
+    return cast(ImageModule, Image), cast(ImageDrawModule, ImageDraw), cast(ImageFontModule, ImageFont)
 
 
-def host_array(value: Any, name: str, *, ndim: int) -> np.ndarray:
+def host_array(value: object, name: str, *, ndim: int) -> np.ndarray:
     """Cross the JAX host boundary and reject tracers and batched state fields."""
     if isinstance(value, core.Tracer):
-        raise RuntimeError(
-            "Rendering is host-side and cannot run inside jax.jit, jax.vmap, or lax.scan"
-        )
+        raise RuntimeError("Rendering is host-side and cannot run inside jax.jit, jax.vmap, or lax.scan")
     array = np.asarray(jax.device_get(value))
     if array.ndim != ndim:
         raise ValueError(
-            f"render() accepts an unbatched state; {name} must have {ndim} dimensions, "
-            f"got shape {array.shape}"
+            f"render() accepts an unbatched state; {name} must have {ndim} dimensions, got shape {array.shape}"
         )
     return array
 
 
-def host_scalar(value: Any, name: str) -> Any:
+def host_scalar(value: object, name: str) -> float:
     """Cross the JAX host boundary for an unbatched scalar."""
-    return host_array(value, name, ndim=0).item()
+    scalar = host_array(value, name, ndim=0).item()
+    if isinstance(scalar, (bool, np.bool_)):
+        return float(bool(scalar))
+    if isinstance(scalar, (int, np.integer)):
+        return float(int(scalar))
+    if isinstance(scalar, (float, np.floating)):
+        return float(scalar)
+    raise TypeError(f"Expected scalar host value for {name}, found {type(scalar).__name__}")
 
 
-def create_canvas(config: RenderConfig) -> tuple[Any, Any, Any, int]:
+def create_canvas(config: RenderConfig) -> tuple[ImageType, ImageDrawType, ImageFontType, int]:
     """Create a supersampled Pillow canvas and its default bundled font."""
-    Image, ImageDraw, ImageFont = require_pillow()
+    image_module, draw_module, font_module = require_pillow()
     scale = config.supersampling
-    image = Image.new("RGBA", (config.width * scale, config.height * scale), (247, 247, 242, 0))
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default(size=max(10, 14 * scale))
+    image = image_module.new("RGBA", (config.width * scale, config.height * scale), (247, 247, 242, 0))
+    draw = draw_module.Draw(image)
+    font = font_module.load_default(size=max(10, 14 * scale))
     return image, draw, font, scale
 
 
-def finish_canvas(image: Any, config: RenderConfig, *, transparent: bool = False) -> np.ndarray:
+def finish_canvas(image: ImageType, config: RenderConfig, *, transparent: bool = False) -> np.ndarray:
     """Downsample a canvas and return transparent RGBA or the public RGB contract."""
-    Image, _, _ = require_pillow()
+    image_module, _, _ = require_pillow()
     if config.supersampling != 1:
-        image = image.resize((config.width, config.height), Image.Resampling.LANCZOS)
+        image = image.resize((config.width, config.height), image_module.Resampling.LANCZOS)
     if transparent:
         output = image
         channels = 4
     else:
-        background = Image.new("RGBA", image.size, PALETTE.background)
-        output = Image.alpha_composite(background, image).convert("RGB")
+        background = image_module.new("RGBA", image.size, PALETTE.background)
+        output = image_module.alpha_composite(background, image).convert("RGB")
         channels = 3
     frame = np.ascontiguousarray(np.asarray(output, dtype=np.uint8))
     expected_shape = (config.height, config.width, channels)
     if frame.shape != expected_shape or frame.dtype != np.uint8:
-        raise RuntimeError(
-            f"renderer returned {frame.shape} {frame.dtype}; expected {expected_shape} uint8"
-        )
+        raise RuntimeError(f"renderer returned {frame.shape} {frame.dtype}; expected {expected_shape} uint8")
     return frame
 
 
 def scaled_box(box: tuple[float, float, float, float], scale: int) -> tuple[int, int, int, int]:
     """Scale a logical pixel box to supersampled coordinates."""
-    return tuple(round(value * scale) for value in box)
+    left, top, right, bottom = box
+    return (
+        round(left * scale),
+        round(top * scale),
+        round(right * scale),
+        round(bottom * scale),
+    )
 
 
 def draw_text(
-    draw: Any,
+    draw: ImageDrawType,
     position: tuple[float, float],
     text: str,
     *,
-    font: Any,
+    font: ImageFontType,
     scale: int,
     fill: str = PALETTE.ink,
     anchor: str | None = None,

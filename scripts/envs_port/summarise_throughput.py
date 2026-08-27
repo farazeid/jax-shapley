@@ -42,18 +42,16 @@ def summarize(args: Args, data: pd.DataFrame) -> pd.DataFrame:
     for (environment, backend, num_envs), group in groups:
         values = group.to_numpy(dtype=np.float64)
         mean, standard_deviation, ci_lower, ci_upper = mean_95_interval(values)
-        rows.append(
-            {
-                "environment": environment,
-                "backend": backend,
-                "num_envs": num_envs,
-                "samples": values.size,
-                "mean": mean,
-                "sample_standard_deviation": standard_deviation,
-                "mean_ci95_lower": ci_lower,
-                "mean_ci95_upper": ci_upper,
-            }
-        )
+        rows.append({
+            "environment": environment,
+            "backend": backend,
+            "num_envs": num_envs,
+            "samples": values.size,
+            "mean": mean,
+            "sample_standard_deviation": standard_deviation,
+            "mean_ci95_lower": ci_lower,
+            "mean_ci95_upper": ci_upper,
+        })
     return pd.DataFrame(rows)
 
 
