@@ -1,0 +1,1 @@
+"""Compile-only test partition."""

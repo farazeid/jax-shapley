@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -18,15 +19,43 @@ from jax_shapley.envs import (
 )
 
 
+class _Space(Protocol):
+    shape: tuple[int, ...]
+
+    def contains(self, value: object) -> bool: ...
+
+
+class _State(Protocol):
+    time: jax.Array
+
+
+class _Environment(Protocol):
+    @property
+    def default_params(self) -> object: ...
+
+    @property
+    def num_actions(self) -> int: ...
+
+    def reset(self, key: jax.Array, params: object) -> tuple[jax.Array, _State]: ...
+    def step_env(
+        self, key: jax.Array, state: _State, action: jax.Array, params: object
+    ) -> tuple[jax.Array, _State, jax.Array, jax.Array, dict[str, jax.Array]]: ...
+    def step(
+        self, key: jax.Array, state: _State, action: jax.Array, params: object
+    ) -> tuple[jax.Array, _State, jax.Array, jax.Array, dict[str, jax.Array]]: ...
+    def get_obs(self, state: _State, params: object) -> jax.Array: ...
+    def observation_space(self, params: object) -> _Space: ...
+
+
 @pytest.fixture(
     params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
     ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
 )
-def env(request: pytest.FixtureRequest) -> Iterator[object]:
-    yield request.param
+def env(request: pytest.FixtureRequest) -> Iterator[_Environment]:
+    yield cast(_Environment, request.param)
 
 
-def test_reset_and_jit_step_contract(env: object) -> None:
+def test_reset_and_jit_step_contract(env: _Environment) -> None:
     params = env.default_params
     key_reset, key_step = jax.random.split(jax.random.key(0))
     obs, state = env.reset(key_reset, params)
@@ -36,9 +65,7 @@ def test_reset_and_jit_step_contract(env: object) -> None:
 
     np.testing.assert_array_equal(obs, env.get_obs(state, params))
     assert env.observation_space(params).contains(obs)
-    for eager_leaf, compiled_leaf in zip(
-        jax.tree.leaves(eager), jax.tree.leaves(compiled), strict=True
-    ):
+    for eager_leaf, compiled_leaf in zip(jax.tree.leaves(eager), jax.tree.leaves(compiled), strict=True):
         np.testing.assert_array_equal(eager_leaf, compiled_leaf)
 
     next_obs, next_state, reward, done, info = eager
@@ -52,7 +79,7 @@ def test_reset_and_jit_step_contract(env: object) -> None:
     assert np.asarray(info["truncated"]).dtype == np.bool_
     assert bool(info["terminated"]) == bool(done)
     assert not bool(info["truncated"])
-    assert float(info["discount"]) == (0.0 if bool(done) else 1.0)
+    np.testing.assert_equal(float(info["discount"]), 0.0 if bool(done) else 1.0)
 
 
 def test_reset_support() -> None:
@@ -91,18 +118,16 @@ def test_gridworld_raw_terminal_and_public_autoreset() -> None:
         terminated=jnp.asarray(False),
         time=jnp.asarray(3, dtype=jnp.int32),
     )
-    raw_obs, raw_state, reward, done, _ = env.step_env(
-        jax.random.key(0), state, jnp.asarray(0), params
-    )
+    raw_obs, raw_state, reward, done, _ = env.step_env(jax.random.key(0), state, jnp.asarray(0), params)
     np.testing.assert_array_equal(raw_obs, [0, 0])
     np.testing.assert_array_equal(raw_state.position, [0, 0])
-    assert float(reward) == 9.0
+    np.testing.assert_equal(float(reward), 9.0)
     assert bool(done)
 
     obs, next_state, reward, done, _ = env.step(jax.random.key(0), state, jnp.asarray(0), params)
     assert tuple(np.asarray(obs)) in {(0, 0), (1, 0)}
     assert not bool(next_state.terminated)
-    assert float(reward) == 9.0
+    np.testing.assert_equal(float(reward), 9.0)
     assert bool(done)
 
 
@@ -121,18 +146,18 @@ def test_mastermind_clues_and_termination() -> None:
     # Action 1 decodes to [2, 1]: both symbols are misplaced.
     obs, state, reward, done, _ = env.step_env(jax.random.key(0), state, jnp.asarray(1), params)
     np.testing.assert_array_equal(obs[:4], [2, 2, 1, 0])
-    assert float(reward) == -1.0
+    np.testing.assert_equal(float(reward), -1.0)
     assert not bool(done)
 
     # Action 2 decodes to [1, 2]: exact on the final allowed guess.
     obs, _, reward, done, _ = env.step_env(jax.random.key(1), state, jnp.asarray(2), params)
     np.testing.assert_array_equal(obs[4:], [0, 1, 2, 2])
-    assert float(reward) == 1.0
+    np.testing.assert_equal(float(reward), 1.0)
     assert bool(done)
 
 
 @pytest.mark.slow
-def test_jitted_vmapped_scans(env: object) -> None:
+def test_jitted_vmapped_scans(env: _Environment) -> None:
     batch_size = 512
     horizon = 128
     params = env.default_params
@@ -140,24 +165,19 @@ def test_jitted_vmapped_scans(env: object) -> None:
     batched_reset = jax.vmap(env.reset, in_axes=(0, None))
     batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
     obs, state = batched_reset(keys, params)
-    actions = (
-        jnp.arange(horizon * batch_size, dtype=jnp.int32).reshape(horizon, batch_size)
-        % env.num_actions
-    )
+    actions = jnp.arange(horizon * batch_size, dtype=jnp.int32).reshape(horizon, batch_size) % env.num_actions
 
     def rollout(
-        initial: tuple[jax.Array, object, jax.Array], rollout_actions: jax.Array
-    ) -> tuple[tuple[jax.Array, object, jax.Array], tuple[jax.Array, jax.Array]]:
+        initial: tuple[jax.Array, _State, jax.Array], rollout_actions: jax.Array
+    ) -> tuple[tuple[jax.Array, _State, jax.Array], tuple[jax.Array, jax.Array]]:
         def scan_step(
-            carry: tuple[jax.Array, object, jax.Array], action: jax.Array
-        ) -> tuple[tuple[jax.Array, object, jax.Array], tuple[jax.Array, jax.Array]]:
+            carry: tuple[jax.Array, _State, jax.Array], action: jax.Array
+        ) -> tuple[tuple[jax.Array, _State, jax.Array], tuple[jax.Array, jax.Array]]:
             current_obs, current_state, current_keys = carry
             del current_obs
             split = jax.vmap(jax.random.split)(current_keys)
             next_keys, step_keys = split[:, 0], split[:, 1]
-            next_obs, next_state, reward, done, _ = batched_step(
-                step_keys, current_state, action, params
-            )
+            next_obs, next_state, reward, done, _ = batched_step(step_keys, current_state, action, params)
             return (next_obs, next_state, next_keys), (reward, done)
 
         return jax.lax.scan(scan_step, initial, rollout_actions)
@@ -166,6 +186,6 @@ def test_jitted_vmapped_scans(env: object) -> None:
     final_obs, _, _ = final
     rewards, dones = outputs
     jax.block_until_ready(final_obs)
-    assert final_obs.shape == (batch_size,) + env.observation_space(params).shape
+    assert final_obs.shape == (batch_size, *env.observation_space(params).shape)
     assert rewards.shape == (horizon, batch_size)
     assert dones.shape == (horizon, batch_size)

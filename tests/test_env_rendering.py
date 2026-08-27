@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import builtins
 import os
-import subprocess
+
+# This test launches the current interpreter with fixed source and no shell.
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,17 +34,30 @@ REFERENCE_PATH = Path(__file__).parent / "fixtures" / "env_render_reference.npz"
 TEST_CONFIG = RenderConfig(width=640, height=480, supersampling=1)
 
 
+class _RenderableEnvironment(Protocol):
+    @property
+    def default_params(self) -> object: ...
+
+    def reset(self, key: jax.Array, params: object) -> tuple[jax.Array, object]: ...
+    def render(
+        self,
+        state: object,
+        params: object | None = None,
+        render_config: RenderConfig | None = None,
+    ) -> np.ndarray: ...
+
+
 @pytest.fixture(
     params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
     ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
 )
-def environment_and_state(request: pytest.FixtureRequest) -> tuple[object, object]:
-    environment = request.param
+def environment_and_state(request: pytest.FixtureRequest) -> tuple[_RenderableEnvironment, object]:
+    environment = cast(_RenderableEnvironment, request.param)
     _, state = environment.reset(jax.random.key(4), environment.default_params)
     return environment, state
 
 
-def test_rgb_array_contract_and_determinism(environment_and_state: tuple[object, object]) -> None:
+def test_rgb_array_contract_and_determinism(environment_and_state: tuple[_RenderableEnvironment, object]) -> None:
     environment, state = environment_and_state
     before = jax.tree.map(lambda value: np.asarray(value).copy(), state)
 
@@ -53,9 +71,7 @@ def test_rgb_array_contract_and_determinism(environment_and_state: tuple[object,
     assert int(first.min()) >= 0
     assert int(first.max()) <= 255
     np.testing.assert_array_equal(first, second)
-    for before_leaf, after_leaf in zip(
-        jax.tree.leaves(before), jax.tree.leaves(state), strict=True
-    ):
+    for before_leaf, after_leaf in zip(jax.tree.leaves(before), jax.tree.leaves(state), strict=True):
         np.testing.assert_array_equal(before_leaf, after_leaf)
 
 
@@ -88,7 +104,7 @@ def test_base_package_import_does_not_import_renderer_modules() -> None:
         'assert not any(name.startswith("jax_shapley.envs.render.") '
         'and not name.endswith(".common") for name in sys.modules)'
     )
-    result = subprocess.run(
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [sys.executable, "-c", code],
         check=False,
         capture_output=True,
@@ -103,10 +119,16 @@ def test_missing_render_extra_has_actionable_error(monkeypatch: pytest.MonkeyPat
     _, state = environment.reset(jax.random.key(0), environment.default_params)
     original_import = builtins.__import__
 
-    def import_without_pillow(name: str, *args: object, **kwargs: object) -> object:
+    def import_without_pillow(
+        name: str,
+        globals_: Mapping[str, object] | None = None,
+        locals_: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> object:
         if name == "PIL" or name.startswith("PIL."):
             raise ModuleNotFoundError("No module named 'PIL'", name="PIL")
-        return original_import(name, *args, **kwargs)
+        return original_import(name, globals_, locals_, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", import_without_pillow)
     with pytest.raises(ModuleNotFoundError, match="uv sync --extra render"):
@@ -120,7 +142,7 @@ def test_gridworld_agent_movement_changes_only_dynamic_pixels() -> None:
         terminated=jnp.asarray(False),
         time=jnp.asarray(0, dtype=jnp.int32),
     )
-    moved = initial.replace(position=jnp.asarray([1, 0], dtype=jnp.int32))
+    moved = replace(initial, position=jnp.asarray([1, 0], dtype=jnp.int32))
     config = RenderConfig(width=640, height=480, supersampling=1, show_status=False)
 
     initial_frame = environment.render(initial, render_config=config)
@@ -147,7 +169,7 @@ def test_hypercube_hidden_coordinate_changes_panel() -> None:
         terminated=jnp.asarray(False),
         time=jnp.asarray(3, dtype=jnp.int32),
     )
-    changed = state.replace(position=jnp.asarray([1, 1, 2, 0, 0], dtype=jnp.int32))
+    changed = replace(state, position=jnp.asarray([1, 1, 2, 0, 0], dtype=jnp.int32))
 
     first = environment.render(state, render_config=TEST_CONFIG)
     second = environment.render(changed, render_config=TEST_CONFIG)
@@ -158,10 +180,8 @@ def test_hypercube_hidden_coordinate_changes_panel() -> None:
 
 def test_mastermind_secret_is_hidden_by_default() -> None:
     environment = Mastermind222()
-    public = mastermind_state(
-        goal=(1, 1), board=np.full((2, 4), -1), guess_index=0
-    )
-    different_secret = public.replace(goal=jnp.asarray([2, 2], dtype=jnp.int32))
+    public = mastermind_state(goal=(1, 1), board=np.full((2, 4), -1), guess_index=0)
+    different_secret = replace(public, goal=jnp.asarray([2, 2], dtype=jnp.int32))
 
     first = environment.render(public, render_config=TEST_CONFIG)
     second = environment.render(different_secret, render_config=TEST_CONFIG)
@@ -170,10 +190,8 @@ def test_mastermind_secret_is_hidden_by_default() -> None:
 
 def test_mastermind_secret_changes_explicit_debug_render() -> None:
     environment = Mastermind222()
-    first_state = mastermind_state(
-        goal=(1, 1), board=np.full((2, 4), -1), guess_index=0
-    )
-    second_state = first_state.replace(goal=jnp.asarray([2, 2], dtype=jnp.int32))
+    first_state = mastermind_state(goal=(1, 1), board=np.full((2, 4), -1), guess_index=0)
+    second_state = replace(first_state, goal=jnp.asarray([2, 2], dtype=jnp.int32))
     config = RenderConfig(width=640, height=480, supersampling=1, reveal_secret=True)
 
     first = environment.render(first_state, render_config=config)
@@ -183,9 +201,7 @@ def test_mastermind_secret_changes_explicit_debug_render() -> None:
 
 def test_mastermind_documented_clue_is_a_real_transition() -> None:
     environment = Mastermind222()
-    state = mastermind_state(
-        goal=(1, 2), board=np.full((2, 4), -1), guess_index=0
-    )
+    state = mastermind_state(goal=(1, 2), board=np.full((2, 4), -1), guess_index=0)
     _, next_state, _, _, _ = environment.step_env(
         jax.random.key(0), state, jnp.asarray(1, dtype=jnp.int32), environment.default_params
     )
@@ -201,8 +217,7 @@ def test_mastermind_board_and_clues_change_public_render() -> None:
         guess_index=1,
     )
     assert np.any(
-        environment.render(initial, render_config=TEST_CONFIG)
-        != environment.render(played, render_config=TEST_CONFIG)
+        environment.render(initial, render_config=TEST_CONFIG) != environment.render(played, render_config=TEST_CONFIG)
     )
 
 
@@ -270,7 +285,8 @@ def representative_frames() -> dict[str, np.ndarray]:
         terminated=jnp.asarray(False),
         time=jnp.asarray(0, dtype=jnp.int32),
     )
-    grid_terminal = grid_initial.replace(
+    grid_terminal = replace(
+        grid_initial,
         position=jnp.asarray([0, 0], dtype=jnp.int32),
         terminated=jnp.asarray(True),
         time=jnp.asarray(4, dtype=jnp.int32),
@@ -302,9 +318,7 @@ def representative_frames() -> dict[str, np.ndarray]:
         "gridworld_terminal": gridworld.render(grid_terminal, render_config=TEST_CONFIG),
         "hypercube_2d": cube_2.render(cube_2_state, render_config=TEST_CONFIG),
         "hypercube_5d": cube_5.render(cube_5_state, render_config=TEST_CONFIG),
-        "hypercube_terminal": cube_5.render(
-            cube_terminal_state, render_config=TEST_CONFIG
-        ),
+        "hypercube_terminal": cube_5.render(cube_terminal_state, render_config=TEST_CONFIG),
         "mastermind_initial": mastermind.render(
             mastermind_state(goal=(1, 2), board=empty_board, guess_index=0),
             render_config=TEST_CONFIG,

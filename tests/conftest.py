@@ -19,9 +19,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_cmdline_main(config: pytest.Config) -> pytest.ExitCode | None:
-    requested_platforms = {
-        platform.strip() for platform in os.environ.get("JAX_PLATFORMS", "").split(",")
-    }
+    requested_platforms = {platform.strip() for platform in os.environ.get("JAX_PLATFORMS", "").split(",")}
     if not requested_platforms.intersection({"cuda", "gpu"}):
         return None
 

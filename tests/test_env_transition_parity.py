@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import csv
 import logging
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -20,6 +20,15 @@ from jax_shapley.envs import (
     Mastermind222,
     Mastermind222State,
 )
+
+
+class _RawStep(Protocol):
+    def __call__(
+        self, key: jax.Array, state: object, action: jax.Array, params: object
+    ) -> tuple[jax.Array, object, jax.Array, jax.Array, dict[str, jax.Array]]: ...
+
+
+type RawStepOutput = tuple[jax.Array, object, jax.Array, jax.Array, dict[str, jax.Array]]
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "fastsverl_transitions.npz"
 
@@ -80,7 +89,7 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
         time=jnp.zeros(count, dtype=jnp.int32),
     )
     output = _batched_raw_step(
-        env.step_env,
+        cast(_RawStep, env.step_env),
         jax.random.split(jax.random.key(0), count),
         state,
         jnp.asarray(fixture["grid_action"]),
@@ -112,7 +121,7 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
                 time=jnp.zeros(count, dtype=jnp.int32),
             )
             output = _batched_raw_step(
-                env.step_env,
+                cast(_RawStep, env.step_env),
                 jax.random.split(jax.random.key(side_length * 10 + dimension), count),
                 state,
                 jnp.asarray(fixture["cube_action"][indices]),
@@ -142,7 +151,7 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
         time=jnp.asarray(fixture["mm_guess_index"]),
     )
     output = _batched_raw_step(
-        env.step_env,
+        cast(_RawStep, env.step_env),
         jax.random.split(jax.random.key(999), count),
         state,
         jnp.asarray(fixture["mm_action"]),
@@ -155,13 +164,9 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
         observation=_difference_mask(obs, expected_board.reshape(count, -1)),
         state=_difference_mask(next_state.board, expected_board)
         | _difference_mask(next_state.goal, fixture["mm_goal"])
-        | _difference_mask(
-            next_state.guess_index, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32)
-        )
+        | _difference_mask(next_state.guess_index, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32))
         | _difference_mask(next_state.terminated, fixture["mm_terminated"])
-        | _difference_mask(
-            next_state.time, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32)
-        ),
+        | _difference_mask(next_state.time, fixture["mm_guess_index"] + np.asarray(1, dtype=np.int32)),
         reward=_difference_mask(reward, fixture["mm_reward"]),
         terminated=_difference_mask(done, fixture["mm_terminated"])
         | _difference_mask(info["terminated"], fixture["mm_terminated"]),
@@ -171,9 +176,14 @@ def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
 
 
 def _batched_raw_step(
-    step: Callable, keys: jax.Array, state: object, actions: jax.Array, params: object
-) -> tuple:
-    return jax.jit(jax.vmap(step, in_axes=(0, 0, 0, None)))(keys, state, actions, params)
+    step: _RawStep,
+    keys: jax.Array,
+    state: object,
+    actions: jax.Array,
+    params: object,
+) -> RawStepOutput:
+    transformed = jax.jit(jax.vmap(step, in_axes=(0, 0, 0, None)))
+    return cast(RawStepOutput, transformed(keys, state, actions, params))
 
 
 def _result_row(tested: int, **components: np.ndarray) -> dict[str, int]:
@@ -199,7 +209,7 @@ def parity_rows(
     backend: str,
     results: dict[str, dict[str, int]],
 ) -> list[dict[str, object]]:
-    rows = [
+    rows: list[dict[str, object]] = [
         {
             "backend": backend,
             "environment": environment,
@@ -218,14 +228,12 @@ def parity_rows(
         "truncated",
     )
     aggregate = {key: sum(row[key] for row in results.values()) for key in count_fields}
-    rows.append(
-        {
-            "backend": backend,
-            "environment": "aggregate",
-            **aggregate,
-            "mismatch_proportion": aggregate["mismatched"] / aggregate["tested"],
-        }
-    )
+    rows.append({
+        "backend": backend,
+        "environment": "aggregate",
+        **aggregate,
+        "mismatch_proportion": aggregate["mismatched"] / aggregate["tested"],
+    })
     return rows
 
 
