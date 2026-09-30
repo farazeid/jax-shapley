@@ -7,6 +7,9 @@ import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
 
+from jax_shapley.envs.base import TypedEnvironment
+from jax_shapley.envs.contracts import Counter, Flag, Observation, Position2, Reward, StepInfo
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -17,9 +20,9 @@ if TYPE_CHECKING:
 class GridworldState(environment.EnvState):
     """Gridworld state carried through JAX transformations."""
 
-    position: jax.Array
-    terminated: jax.Array
-    time: jax.Array
+    position: Position2
+    terminated: Flag
+    time: Counter
 
 
 @struct.dataclass
@@ -29,7 +32,7 @@ class GridworldParams(environment.EnvParams):
     max_steps_in_episode: int = 2**31 - 1
 
 
-class Gridworld(environment.Environment[GridworldState, GridworldParams]):
+class Gridworld(TypedEnvironment[GridworldState, GridworldParams]):
     """FastSVERL-compatible Gridworld (registered there as ``GWB-v0``)."""
 
     _action_deltas: jax.Array = jnp.asarray([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.int32)
@@ -44,7 +47,7 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         self,
         key: jax.Array,
         params: GridworldParams,
-    ) -> tuple[jax.Array, GridworldState]:
+    ) -> tuple[Observation, GridworldState]:
         del params
         start_index = jax.random.randint(key, (), 0, 2)
         position = self._starts[start_index]
@@ -61,7 +64,7 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         state: GridworldState,
         action: float | jax.Array,
         params: GridworldParams,
-    ) -> tuple[jax.Array, GridworldState, jax.Array, jax.Array, dict[str, jax.Array]]:
+    ) -> tuple[Observation, GridworldState, Reward, Flag, StepInfo]:
         del key, params
         action = jnp.asarray(action, dtype=jnp.int32)
         candidate = state.position + self._action_deltas[action]
@@ -78,7 +81,7 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info: dict[str, jax.Array] = {
+        info: StepInfo = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -86,10 +89,10 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         return self.get_obs(next_state), next_state, reward, terminated, info
 
     @overload
-    def get_obs(self, state: GridworldState) -> jax.Array: ...
+    def get_obs(self, state: GridworldState) -> Observation: ...
 
     @overload
-    def get_obs(self, state: GridworldState, params: GridworldParams) -> jax.Array: ...
+    def get_obs(self, state: GridworldState, params: GridworldParams) -> Observation: ...
 
     @overload
     def get_obs(
@@ -97,7 +100,7 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         state: GridworldState,
         key: jax.Array,
         params: GridworldParams,
-    ) -> jax.Array: ...
+    ) -> Observation: ...
 
     def get_obs(
         self,
@@ -105,11 +108,11 @@ class Gridworld(environment.Environment[GridworldState, GridworldParams]):
         *args: GridworldParams | jax.Array,
         params: GridworldParams | None = None,
         key: jax.Array | None = None,
-    ) -> jax.Array:
+    ) -> Observation:
         del args, params, key
         return state.position
 
-    def is_terminal(self, state: GridworldState, params: GridworldParams) -> jax.Array:
+    def is_terminal(self, state: GridworldState, params: GridworldParams) -> Flag:
         del params
         return state.terminated
 

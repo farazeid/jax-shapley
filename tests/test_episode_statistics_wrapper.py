@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Protocol, TypedDict, cast
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -11,26 +11,30 @@ import numpy as np
 import pytest
 
 from jax_shapley import EpisodeStatisticsState, EpisodeStatisticsWrapper
-from jax_shapley.envs import Gridworld, GridworldState, Hypercube, Mastermind222
-from jax_shapley.wrappers import EnvironmentProtocol, EpisodeInfo
-
-
-class _Space(Protocol):
-    def contains(self, value: object) -> bool: ...
-
-
-class _WrappedInfo(TypedDict):
-    episode: EpisodeInfo
+from jax_shapley.envs import (
+    Gridworld,
+    GridworldState,
+    Hypercube,
+    Mastermind222,
+    Mastermind222Params,
+    Mastermind222State,
+)
+from jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo
+from jax_shapley.wrappers import EnvironmentProtocol
 
 
 class _BatchedStep(Protocol):
     def __call__(
-        self, keys: jax.Array, states: object, actions: jax.Array, params: object
-    ) -> tuple[jax.Array, EpisodeStatisticsState[object], jax.Array, jax.Array, _WrappedInfo]: ...
+        self,
+        keys: jax.Array,
+        states: EpisodeStatisticsState[Mastermind222State],
+        actions: jax.Array,
+        params: Mastermind222Params,
+    ) -> tuple[jax.Array, EpisodeStatisticsState[Mastermind222State], jax.Array, jax.Array, EpisodeStepInfo]: ...
 
 
 type GenericWrapper = EpisodeStatisticsWrapper[object, object]
-type RolloutCarry = tuple[jax.Array, EpisodeStatisticsState[object], jax.Array]
+type RolloutCarry = tuple[jax.Array, EpisodeStatisticsState[Mastermind222State], jax.Array]
 type RolloutOutput = tuple[jax.Array, jax.Array, EpisodeInfo]
 
 
@@ -47,7 +51,7 @@ def test_reset_and_jit_step_contract(wrapper: GenericWrapper) -> None:
     reset_key, step_key = jax.random.split(jax.random.key(0))
     observation, state = wrapper.reset(reset_key, params)
 
-    assert cast(_Space, wrapper.observation_space(params)).contains(observation)
+    assert wrapper.observation_space(params).contains(observation)
     assert np.asarray(state.episode_return).dtype == np.float32
     assert np.asarray(state.episode_length).dtype == np.int32
     assert np.asarray(state.episode_count).dtype == np.int32
@@ -129,10 +133,11 @@ def test_incomplete_episode_emits_masked_zero_values() -> None:
 def test_jitted_vmapped_scan_emits_every_completed_episode() -> None:
     batch_size = 512
     horizon = 128
-    wrapper = EpisodeStatisticsWrapper(cast(EnvironmentProtocol[object, object], Mastermind222()))
+    wrapper = EpisodeStatisticsWrapper(Mastermind222())
     params = wrapper.default_params
     keys = jax.random.split(jax.random.key(123), batch_size)
     reset = jax.vmap(wrapper.reset, in_axes=(0, None))
+    # JAX vmap erases the callable's generic state/info relationships in library typing.
     step = cast(_BatchedStep, jax.vmap(wrapper.step, in_axes=(0, 0, 0, None)))
     observation, state = reset(keys, params)
     actions = jnp.arange(horizon * batch_size, dtype=jnp.int32).reshape(horizon, batch_size) % wrapper.num_actions

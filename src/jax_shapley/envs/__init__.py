@@ -1,5 +1,6 @@
 """FastSVERL-compatible Gymnax environments."""
 
+from jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo, StepInfo
 from jax_shapley.envs.gridworld import Gridworld, GridworldParams, GridworldState
 from jax_shapley.envs.hypercube import Hypercube, HypercubeParams, HypercubeState
 from jax_shapley.envs.mastermind import (
@@ -10,6 +11,8 @@ from jax_shapley.envs.mastermind import (
 from jax_shapley.envs.render import RenderConfig
 
 __all__ = [
+    "EpisodeInfo",
+    "EpisodeStepInfo",
     "Gridworld",
     "GridworldParams",
     "GridworldState",
@@ -20,4 +23,5 @@ __all__ = [
     "Mastermind222Params",
     "Mastermind222State",
     "RenderConfig",
+    "StepInfo",
 ]
