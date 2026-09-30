@@ -12,6 +12,16 @@ from jax_shapley.envs import (
     Mastermind222State,
     RenderConfig,
 )
+from jax_shapley.networks import (
+    LayerConfig,
+    MLPConfig,
+    OrthogonalInit,
+    PPOActor,
+    PPOCritic,
+    QNetwork,
+    TorchLinearInit,
+    dqn_config,
+)
 from jax_shapley.wrappers import EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 __all__ = [
@@ -23,8 +33,16 @@ __all__ = [
     "Hypercube",
     "HypercubeParams",
     "HypercubeState",
+    "LayerConfig",
+    "MLPConfig",
     "Mastermind222",
     "Mastermind222Params",
     "Mastermind222State",
+    "OrthogonalInit",
+    "PPOActor",
+    "PPOCritic",
+    "QNetwork",
     "RenderConfig",
+    "TorchLinearInit",
+    "dqn_config",
 ]
