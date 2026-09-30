@@ -81,7 +81,25 @@ CPU and GPU each match all **143,136** source transitions with zero differences.
 
 ![Original vs JAX throughput](docs/figures/envs-port--throughput.svg)
 
-Agents, FastSVERL models, replay buffers, training, and paper evaluation reproduction are intentionally deferred to the later end-to-end JAX work.
+## Agent networks
+
+Typed Flax NNX networks provide DQN Q-values and independent PPO actor probabilities and critic values. Inputs have a final feature axis with optional leading batch/rollout axes. The model boundary converts int32 observations to float32; parameters and outputs use float32.
+
+```python
+import jax.numpy as jnp
+from flax import nnx
+from jax_shapley import QNetwork, dqn_config
+
+network = QNetwork(dqn_config(input_features=8, num_actions=4), rngs=nnx.Rngs(0))
+observations = jnp.full((16, 8), -1, dtype=jnp.int32)
+q_values = nnx.jit(lambda model, obs: model(obs).q_values)(network, observations)
+```
+
+The default DQN hidden widths are `(64, 64)` for Gridworld and Mastermind-222. Pass `hidden_widths=(128, 128)` for the upstream Hypercube/larger-Mastermind architectures. PPO architectures are explicit `MLPConfig` values; upstream does not supply paper-specific PPO presets. Initialization follows PyTorch Linear's uniform kernel/bias distribution unless a layer explicitly selects FastSVERL's orthogonal override. JAX and PyTorch seeds do not generate identical weights.
+
+Offline matched-weight tests compare outputs and input/parameter gradients against the pinned source builder, in eager and compiled execution. Abstract NNX compilation tests cover single observations, batches, rollout axes, int32/float32 inputs, gradients, `vmap`, and `scan`; GPU coverage skips explicitly when unavailable.
+
+See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. Agent algorithms, replay buffers, training, FastSVERL explanation models, and paper evaluation reproduction remain deferred.
 
 ## Typed contracts and compile-first checks
 
