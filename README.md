@@ -83,7 +83,22 @@ CPU and GPU each match all **143,136** source transitions with zero differences.
 
 Agents, FastSVERL models, replay buffers, training, and paper evaluation reproduction are intentionally deferred to the later end-to-end JAX work.
 
-## Compile-first checks
+## Typed contracts and compile-first checks
+
+[AGENTS.md](AGENTS.md) defines the project coding and validation conventions.
+Environment observations, actions, and counters use `int32`; rewards and discounts
+use `float32`; termination flags use `bool`. `jaxtyping` annotations describe shape
+and dtype intent without adding runtime checking or proving dimensions under ty.
+`StepInfo` and `EpisodeStepInfo` expose the transition and episode metadata schemas.
+
+The wrapper explicitly exposes reset, step, spaces, name, and action count. Access
+other environment capabilities through `wrapped_env.env`; arbitrary attribute
+forwarding is no longer part of the wrapper interface.
+
+Compile tests trace abstract shape/dtype inputs, lower and compile representative
+environment specializations and batched rollouts, and check output contracts.
+Rendering remains a host-side operation.
+
 
 Run these gates before opening PRs or long experiments:
 
