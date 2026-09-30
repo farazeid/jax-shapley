@@ -287,6 +287,8 @@ dependencies = [
     { name = "jax" },
     { name = "jaxtyping" },
     { name = "numpy" },
+    { name = "optax" },
+    { name = "tyro" },
 ]
 
 [package.optional-dependencies]
@@ -309,7 +311,6 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
-    { name = "tyro" },
 ]
 
 [package.metadata]
@@ -321,7 +322,9 @@ requires-dist = [
     { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda'", specifier = ">=0.6" },
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "optax", specifier = ">=0.2.8" },
     { name = "pillow", marker = "extra == 'render'", specifier = ">=11.3" },
+    { name = "tyro", specifier = ">=0.9" },
 ]
 provides-extras = ["cuda", "render"]
 
@@ -337,7 +340,6 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.12" },
     { name = "ty", specifier = "==0.0.73" },
-    { name = "tyro", specifier = ">=0.9" },
 ]
 
 [[package]]
