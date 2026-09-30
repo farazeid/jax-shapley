@@ -56,3 +56,13 @@ uv run --script scripts/networks_port/collect_fastsverl_networks.py \
 The script verifies the source commit and `models.py` contents before capture. It imports PyTorch through a typed optional-library adapter and does not add it to the project dependencies.
 
 Run `./check.sh` for the complete gates. Network compilation tests trace abstract observations through NNX forward and gradient boundaries, lower and compile before executing small numerical checks. They cover unbatched, batch, and time/batch shapes for both input dtypes, as well as composed NNX `vmap` and `scan`. GPU compile checks use an available GPU or skip explicitly; CPU success does not establish GPU performance.
+
+## Training configuration
+
+`MLPConfig` remains a network architecture contract. DQN training settings live in
+`DQNTrainConfig`, Adam settings in `AdamConfig`, and environment/seed/output controls
+in `DQNRunConfig`. The Tyro CLI derives network dimensions from the environment and
+uses the selected hidden widths to construct `MLPConfig`. Experiments supply values
+through shell recipes, not YAML or Python preset files. See [DQN Training](DQN%20Training.md).
+
+PPO actor/critic networks remain available; PPO configuration and training are deferred.

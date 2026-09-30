@@ -99,7 +99,7 @@ The default DQN hidden widths are `(64, 64)` for Gridworld and Mastermind-222. P
 
 Offline matched-weight tests compare outputs and input/parameter gradients against the pinned source builder, in eager and compiled execution. Abstract NNX compilation tests cover single observations, batches, rollout axes, int32/float32 inputs, gradients, `vmap`, and `scan`; GPU coverage skips explicitly when unavailable.
 
-See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. Agent algorithms, replay buffers, training, FastSVERL explanation models, and paper evaluation reproduction remain deferred.
+See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). PPO training, FastSVERL explanation models, and paper evaluation reproduction remain deferred.
 
 ## Typed contracts and compile-first checks
 
@@ -132,3 +132,15 @@ Quick alias:
 ```bash
 ./check.sh
 ```
+
+## DQN experiments
+
+Experiment settings live in shell recipes, parsed by Tyro into validated Python dataclasses.
+
+```bash
+bash experiments/dqn/gridworld.sh --validate-only
+bash experiments/dqn/mastermind222.sh --compile-only
+bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
+```
+
+Normal recipes run the required gates, compile before training, and save local metrics, models, and optional replay. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
