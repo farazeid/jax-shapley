@@ -315,7 +315,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "einops", specifier = ">=0.8.1" },
-    { name = "flax", specifier = ">=0.10" },
+    { name = "flax", specifier = ">=0.12.8" },
     { name = "gymnax", specifier = "==0.0.9" },
     { name = "jax", specifier = ">=0.6" },
     { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda'", specifier = ">=0.6" },
