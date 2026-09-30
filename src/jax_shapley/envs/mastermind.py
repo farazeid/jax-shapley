@@ -7,6 +7,9 @@ import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
 
+from jax_shapley.envs.base import TypedEnvironment
+from jax_shapley.envs.contracts import Board222, Counter, Flag, Observation, Position2, Reward, StepInfo
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -17,11 +20,11 @@ if TYPE_CHECKING:
 class Mastermind222State(environment.EnvState):
     """Complete Markov state for Mastermind-222."""
 
-    board: jax.Array
-    goal: jax.Array
-    guess_index: jax.Array
-    terminated: jax.Array
-    time: jax.Array
+    board: Board222
+    goal: Position2
+    guess_index: Counter
+    terminated: Flag
+    time: Counter
 
 
 @struct.dataclass
@@ -31,7 +34,7 @@ class Mastermind222Params(environment.EnvParams):
     max_steps_in_episode: int = 2
 
 
-class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Params]):
+class Mastermind222(TypedEnvironment[Mastermind222State, Mastermind222Params]):
     """The Mastermind-222 configuration used by FastSVERL."""
 
     code_size = 2
@@ -39,7 +42,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
     num_pegs = 2
 
     @staticmethod
-    def decode_action(action: float | jax.Array) -> jax.Array:
+    def decode_action(action: float | jax.Array) -> Position2:
         """Decode actions exactly like FastSVERL's least-significant-first table."""
         action = jnp.asarray(action, dtype=jnp.int32)
         powers = jnp.asarray([1, 2], dtype=jnp.int32)
@@ -53,7 +56,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         self,
         key: jax.Array,
         params: Mastermind222Params,
-    ) -> tuple[jax.Array, Mastermind222State]:
+    ) -> tuple[Observation, Mastermind222State]:
         del params
         goal_index = jax.random.randint(key, (), 0, 4)
         state = Mastermind222State(
@@ -71,7 +74,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         state: Mastermind222State,
         action: float | jax.Array,
         params: Mastermind222Params,
-    ) -> tuple[jax.Array, Mastermind222State, jax.Array, jax.Array, dict[str, jax.Array]]:
+    ) -> tuple[Observation, Mastermind222State, Reward, Flag, StepInfo]:
         del key, params
         guess = self.decode_action(action)
         exact_mask = guess == state.goal
@@ -100,7 +103,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info: dict[str, jax.Array] = {
+        info: StepInfo = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -108,10 +111,10 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         return self.get_obs(next_state), next_state, reward, terminated, info
 
     @overload
-    def get_obs(self, state: Mastermind222State) -> jax.Array: ...
+    def get_obs(self, state: Mastermind222State) -> Observation: ...
 
     @overload
-    def get_obs(self, state: Mastermind222State, params: Mastermind222Params) -> jax.Array: ...
+    def get_obs(self, state: Mastermind222State, params: Mastermind222Params) -> Observation: ...
 
     @overload
     def get_obs(
@@ -119,7 +122,7 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         state: Mastermind222State,
         key: jax.Array,
         params: Mastermind222Params,
-    ) -> jax.Array: ...
+    ) -> Observation: ...
 
     def get_obs(
         self,
@@ -127,11 +130,11 @@ class Mastermind222(environment.Environment[Mastermind222State, Mastermind222Par
         *args: Mastermind222Params | jax.Array,
         params: Mastermind222Params | None = None,
         key: jax.Array | None = None,
-    ) -> jax.Array:
+    ) -> Observation:
         del args, params, key
         return state.board.reshape(-1)
 
-    def is_terminal(self, state: Mastermind222State, params: Mastermind222Params) -> jax.Array:
+    def is_terminal(self, state: Mastermind222State, params: Mastermind222Params) -> Flag:
         del params
         return state.terminated
 

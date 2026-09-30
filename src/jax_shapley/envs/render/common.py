@@ -15,7 +15,7 @@ RENDER_DEPENDENCY_MESSAGE = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RenderConfig:
     """Host-only presentation settings shared by all environment renderers."""
 
@@ -27,7 +27,7 @@ class RenderConfig:
     reveal_secret: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Palette:
     """Colour-blind-friendly colours with redundant borders and symbols."""
 

@@ -7,6 +7,9 @@ import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import environment, spaces
 
+from jax_shapley.envs.base import TypedEnvironment
+from jax_shapley.envs.contracts import Counter, Flag, Observation, Reward, StepInfo
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -17,9 +20,9 @@ if TYPE_CHECKING:
 class HypercubeState(environment.EnvState):
     """Hypercube state carried through JAX transformations."""
 
-    position: jax.Array
-    terminated: jax.Array
-    time: jax.Array
+    position: Observation
+    terminated: Flag
+    time: Counter
 
 
 @struct.dataclass
@@ -29,7 +32,7 @@ class HypercubeParams(environment.EnvParams):
     max_steps_in_episode: int = 2**31 - 1
 
 
-class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
+class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
     """An obstacle-free ``n``-sided, ``d``-dimensional gridworld."""
 
     def __init__(self, side_length: int, dimension: int) -> None:
@@ -50,7 +53,7 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         self,
         key: jax.Array,
         params: HypercubeParams,
-    ) -> tuple[jax.Array, HypercubeState]:
+    ) -> tuple[Observation, HypercubeState]:
         del key, params
         state = HypercubeState(
             position=self._start,
@@ -65,7 +68,7 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         state: HypercubeState,
         action: float | jax.Array,
         params: HypercubeParams,
-    ) -> tuple[jax.Array, HypercubeState, jax.Array, jax.Array, dict[str, jax.Array]]:
+    ) -> tuple[Observation, HypercubeState, Reward, Flag, StepInfo]:
         del key, params
         action = jnp.asarray(action, dtype=jnp.int32)
         axis = action // 2
@@ -80,7 +83,7 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
             terminated=terminated,
             time=state.time + jnp.asarray(1, dtype=jnp.int32),
         )
-        info: dict[str, jax.Array] = {
+        info: StepInfo = {
             "discount": jnp.where(terminated, 0.0, 1.0).astype(jnp.float32),
             "terminated": terminated,
             "truncated": jnp.asarray(False),
@@ -88,10 +91,10 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         return self.get_obs(next_state), next_state, reward, terminated, info
 
     @overload
-    def get_obs(self, state: HypercubeState) -> jax.Array: ...
+    def get_obs(self, state: HypercubeState) -> Observation: ...
 
     @overload
-    def get_obs(self, state: HypercubeState, params: HypercubeParams) -> jax.Array: ...
+    def get_obs(self, state: HypercubeState, params: HypercubeParams) -> Observation: ...
 
     @overload
     def get_obs(
@@ -99,7 +102,7 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         state: HypercubeState,
         key: jax.Array,
         params: HypercubeParams,
-    ) -> jax.Array: ...
+    ) -> Observation: ...
 
     def get_obs(
         self,
@@ -107,11 +110,11 @@ class Hypercube(environment.Environment[HypercubeState, HypercubeParams]):
         *args: HypercubeParams | jax.Array,
         params: HypercubeParams | None = None,
         key: jax.Array | None = None,
-    ) -> jax.Array:
+    ) -> Observation:
         del args, params, key
         return state.position
 
-    def is_terminal(self, state: HypercubeState, params: HypercubeParams) -> jax.Array:
+    def is_terminal(self, state: HypercubeState, params: HypercubeParams) -> Flag:
         del params
         return state.terminated
 

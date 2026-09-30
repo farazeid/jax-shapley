@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol, TypedDict
+from typing import Protocol
 
 import jax
 import jax.numpy as jnp
 from flax import struct
+from gymnax.environments import spaces
+
+from jax_shapley.envs.contracts import Counter, EpisodeInfo, EpisodeStepInfo, Flag, Observation, Reward, StepInfo
+
+__all__ = ["EnvironmentProtocol", "EpisodeInfo", "EpisodeStatisticsState", "EpisodeStatisticsWrapper"]
 
 
 class EnvironmentProtocol[EnvState, EnvParams](Protocol):
@@ -17,7 +22,7 @@ class EnvironmentProtocol[EnvState, EnvParams](Protocol):
     @property
     def default_params(self) -> EnvParams: ...
 
-    def reset(self, key: jax.Array, params: EnvParams) -> tuple[jax.Array, EnvState]: ...
+    def reset(self, key: jax.Array, params: EnvParams) -> tuple[Observation, EnvState]: ...
 
     def step(
         self,
@@ -25,26 +30,32 @@ class EnvironmentProtocol[EnvState, EnvParams](Protocol):
         state: EnvState,
         action: float | jax.Array,
         params: EnvParams,
-    ) -> tuple[jax.Array, EnvState, jax.Array, jax.Array, dict[str, jax.Array]]: ...
+    ) -> tuple[Observation, EnvState, Reward, Flag, StepInfo]: ...
 
-    def observation_space(self, params: EnvParams) -> object: ...
+    def reset_env(self, key: jax.Array, params: EnvParams) -> tuple[Observation, EnvState]: ...
 
-    def action_space(self, params: EnvParams | None = None) -> object: ...
+    def step_env(
+        self, key: jax.Array, state: EnvState, action: float | jax.Array, params: EnvParams
+    ) -> tuple[Observation, EnvState, Reward, Flag, StepInfo]: ...
+
+    @property
+    def name(self) -> str: ...
+
+    def observation_space(self, params: EnvParams) -> spaces.Box: ...
+
+    def action_space(self, params: EnvParams | None = None) -> spaces.Discrete: ...
 
     @property
     def num_actions(self) -> int: ...
 
 
-EpisodeInfo = TypedDict("EpisodeInfo", {"return": jax.Array, "length": jax.Array, "completed": jax.Array})
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EpisodeSummary:
     """Typed episode metadata produced by the wrapper around each step."""
 
-    return_value: jax.Array
-    length: jax.Array
-    completed: jax.Array
+    return_value: Reward
+    length: Counter
+    completed: Flag
 
 
 @struct.dataclass
@@ -52,9 +63,9 @@ class EpisodeStatisticsState[EnvState]:
     """Wrapped environment state and per-environment episode accumulators."""
 
     env_state: EnvState
-    episode_return: jax.Array
-    episode_length: jax.Array
-    episode_count: jax.Array
+    episode_return: Reward
+    episode_length: Counter
+    episode_count: Counter
 
 
 class EpisodeStatisticsWrapper[EnvState, EnvParams]:
@@ -73,18 +84,19 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
     def default_params(self) -> EnvParams:
         return self._env.default_params
 
-    def observation_space(self, params: EnvParams) -> object:
+    def observation_space(self, params: EnvParams) -> spaces.Box:
         return self._env.observation_space(params)
 
-    def action_space(self, params: EnvParams | None = None) -> object:
+    def action_space(self, params: EnvParams | None = None) -> spaces.Discrete:
         return self._env.action_space(params)
 
     @property
     def num_actions(self) -> int:
         return self._env.num_actions
 
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._env, name)
+    @property
+    def name(self) -> str:
+        return self._env.name
 
     @staticmethod
     def _defaulted_params(
@@ -95,9 +107,9 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
 
     @staticmethod
     def _as_episode_info(
-        completed: jax.Array,
-        episode_return: jax.Array,
-        episode_length: jax.Array,
+        completed: Flag,
+        episode_return: Reward,
+        episode_length: Counter,
     ) -> EpisodeInfo:
         return {
             "return": episode_return,
@@ -110,7 +122,7 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
         self,
         key: jax.Array,
         params: EnvParams | None = None,
-    ) -> tuple[jax.Array, EpisodeStatisticsState[EnvState]]:
+    ) -> tuple[Observation, EpisodeStatisticsState[EnvState]]:
         resolved_params = self._defaulted_params(self._env, params)
         observation, env_state = self._env.reset(key, resolved_params)
         state = EpisodeStatisticsState(
@@ -129,11 +141,11 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
         action: float | jax.Array,
         params: EnvParams | None = None,
     ) -> tuple[
-        jax.Array,
+        Observation,
         EpisodeStatisticsState[EnvState],
-        jax.Array,
-        jax.Array,
-        dict[str, jax.Array | EpisodeInfo],
+        Reward,
+        Flag,
+        EpisodeStepInfo,
     ]:
         resolved_params = self._defaulted_params(self._env, params)
         observation, env_state, reward, done, info = self._env.step(key, state.env_state, action, resolved_params)
@@ -158,8 +170,12 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
             episode_return=summary.return_value,
             episode_length=summary.length,
         )
-        wrapped_info: dict[str, jax.Array | EpisodeInfo] = dict(info)
-        wrapped_info["episode"] = episode_info
+        wrapped_info: EpisodeStepInfo = {
+            "discount": info["discount"],
+            "terminated": info["terminated"],
+            "truncated": info["truncated"],
+            "episode": episode_info,
+        }
         return (
             observation,
             next_state,
