@@ -5,6 +5,8 @@ description = "JAX-native reinforcement-learning environments for Shapley-value 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "einops>=0.8.1",
+    "jaxtyping>=0.3.2",
     "flax>=0.10",
     "gymnax==0.0.9",
     "jax>=0.6",
