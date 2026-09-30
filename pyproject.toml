@@ -11,6 +11,8 @@ dependencies = [
     "gymnax==0.0.9",
     "jax>=0.6",
     "numpy>=2.0",
+    "optax>=0.2.8",
+    "tyro>=0.9",
 ]
 
 [project.optional-dependencies]
@@ -22,7 +24,6 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.12",
     "ty==0.0.73",
-    "tyro>=0.9",
 ]
 benchmark = [
     "gymnasium==0.29.1",
