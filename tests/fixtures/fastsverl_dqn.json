@@ -1,0 +1,14 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": {
+    "dqn.py": "e6aa5ee1213ea20a0a06f6002b97d657c623d5fb25d280ad9e21bb4505035a92",
+    "models.py": "ad427b514e460a03b36e69699ed8d7d4a892e9aa3a3e6a308b5b24e777bae62a"
+  },
+  "fixture_sha256": "ea29e9beab7dcdf026ed961d4ce44fe3779a7828cb95988dfde145a2bbc9ddc2",
+  "torch_version": "2.6.0",
+  "seed": 1729,
+  "gamma": 0.9,
+  "tau": 0.01,
+  "steps": 3,
+  "collector": "unchanged DQN_Super AST, CPU, controlled batches"
+}
