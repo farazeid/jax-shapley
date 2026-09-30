@@ -1,0 +1,12 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": "ad427b514e460a03b36e69699ed8d7d4a892e9aa3a3e6a308b5b24e777bae62a",
+  "fixture_sha256": "a432f4f720478eff0915e9c9454d69b952dcfa118575a2054aa88dd27812e163",
+  "torch_version": "2.6.0",
+  "numpy_version": "2.5.3",
+  "seed": 1729,
+  "dtype": "float32",
+  "loss": "sum(outputs * probe)",
+  "kernel_layout": "in_features, out_features (transposed from PyTorch)",
+  "ppo_scope": "representative configurable SimpleNN architectures; no paper-specific PPO presets"
+}
