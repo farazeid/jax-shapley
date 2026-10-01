@@ -224,8 +224,10 @@ uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>
 Resume uses immutable saved settings, without algorithm overrides or duration
 extensions, and writes into the same folder. Each committed snapshot records a CSV
 byte boundary and SHA-256 prefix digest. Preflight verifies/restores before taking
-the writer lock; the writer rechecks the prefix, rolls back only its uncommitted
-tail, and appends. Changed/missing committed rows are rejected. Inspection modes
+the writer lock; the writer rechecks the checkpoint sequence and prefix, rolls back
+only its uncommitted tail, and appends. If another writer committed during
+preflight, resume stops without changing the log; retry to restore the latest
+checkpoint. Changed/missing committed rows are rejected. Inspection modes
 are read-only, including file contents and timestamps.
 
 Interrupted evaluation restarts from the committed post-training checkpoint and

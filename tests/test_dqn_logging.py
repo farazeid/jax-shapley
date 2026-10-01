@@ -4,13 +4,16 @@ import csv
 import json
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import pytest
 
-from jax_shapley.algorithms.dqn import StepMetrics
+from jax_shapley.algorithms.dqn import StepMetrics, initialize_run, make_snapshot, training_step
 from jax_shapley.artifacts import MetricRow, initialize_metrics, record_metrics, write_metric_rows
 from jax_shapley.checkpoints import CheckpointMetadata
-from jax_shapley.logging import prefix_digest, verify_log
+from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
+from jax_shapley.logging import ArtifactSink, prefix_digest, verify_log
+from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
 def test_selected_logging_matches_pinned_trainer(tmp_path: Path) -> None:
@@ -67,3 +70,38 @@ def test_log_prefix_rejects_corruption_and_allows_uncommitted_tail(tmp_path: Pat
     path.write_text("corrupted\n")
     with pytest.raises(ValueError, match="prefix"):
         verify_log(path, metadata)
+
+
+def test_stale_resume_preserves_newer_checkpoint_and_committed_log(tmp_path: Path) -> None:
+    config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(total_timesteps=4, buffer_size=3), hidden_widths=(4,))
+    env = EpisodeStatisticsWrapper(config.env.make())
+    state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(1))
+    zero = jnp.asarray(0, jnp.int32)
+    path = tmp_path / "metrics.csv"
+    initialize_metrics(path)
+    sink = ArtifactSink(tmp_path, config)
+    try:
+        sink.checkpoint(make_snapshot(state, zero, zero, config.train, "run"))
+        assert sink.store is not None
+        sink.store.wait()
+        preflight_metadata, preflight_sequence = sink.store.metadata(), sink.store.sequence
+        # A writer commits while the other resume is still compiling.
+        write_metric_rows(path, [MetricRow("episode", 0, episode_return=1.0, episode_length=1, epsilon=1.0)])
+        state, _ = training_step(state, env, env.default_params, config.train)
+        sink.checkpoint(make_snapshot(state, zero, zero, config.train, "run"))
+        sink.store.wait()
+        latest_metadata, latest_sequence = sink.store.metadata(), sink.store.sequence
+    finally:
+        sink.close()
+    committed = path.read_bytes()
+    verify_log(path, preflight_metadata)  # Prefix validation alone cannot detect staleness.
+    with pytest.raises(RuntimeError, match="checkpoint changed"):
+        ArtifactSink(tmp_path, config, metadata=preflight_metadata, checkpoint_sequence=preflight_sequence)
+    assert path.read_bytes() == committed
+    verify_log(path, latest_metadata)
+    # Rejection releases the lock, and a current resume still rolls back only its tail.
+    with path.open("a") as output:
+        output.write("uncommitted tail\n")
+    current = ArtifactSink(tmp_path, config, metadata=latest_metadata, checkpoint_sequence=latest_sequence)
+    current.close()
+    assert path.read_bytes() == committed
