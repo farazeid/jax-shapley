@@ -2,6 +2,7 @@
 
 from typing import Protocol
 
+import numpy as np
 from flax import struct
 from jax import Array
 
@@ -20,9 +21,12 @@ class Snapshot:
     epsilon: Array
 
 
+type CallbackToken = np.ndarray[tuple[()], np.dtype[np.int32]]
+
+
 class EventSink(Protocol):
-    def training(self, metrics: tuple[Array, ...], count: Array) -> Array: ...
+    def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken: ...
 
-    def evaluation(self, returns: Array, completed: Array, first_index: Array) -> Array: ...
+    def evaluation(self, returns: Array, completed: Array, first_index: Array) -> CallbackToken: ...
 
-    def checkpoint(self, snapshot: Snapshot) -> Array: ...
+    def checkpoint(self, snapshot: Snapshot) -> CallbackToken: ...
