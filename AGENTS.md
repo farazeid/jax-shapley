@@ -38,6 +38,27 @@ Add `--extra render` for rendering. JAX is required, not an optional backend.
 Generate PyTorch reference fixtures in a separate environment; normal tests must
 remain offline and independent of FastSVERL/PyTorch installation.
 
+## Python source structure
+
+After the module docstring, arrange Python modules and scripts in this order:
+
+1. Imports.
+2. Dataclasses for configuration, state, batches, outputs, and metrics.
+3. Other classes.
+4. All primary functions (entry points and high-level operations).
+5. Secondary functions called by the primary functions, followed by lower-level
+   helpers.
+6. Keep the `if __name__ == "__main__":` invocation at the end of executable scripts.
+
+Apply the same principle within classes: primary methods before their helpers.
+In tests, place test cases before supporting fixtures and helper functions.
+
+Preserve Python's evaluation dependencies: type aliases, constants, protocols,
+and helper declarations may appear earlier when annotations, defaults,
+decorators, inheritance, or module initialization require them. Keep overloads
+together in their declaration/implementation order. Reordering must preserve
+behaviour and public interfaces.
+
 ## Static contracts and boundaries
 
 - Treat every enabled ty warning/error as a build failure. Keep
