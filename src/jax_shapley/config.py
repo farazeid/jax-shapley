@@ -1,8 +1,10 @@
 """Immutable DQN contracts; shell recipes supply experiment-specific values."""
 
 from dataclasses import dataclass
+from enum import IntEnum
 from math import isfinite
 from pathlib import Path
+from typing import Literal
 
 from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
 from jax_shapley.networks import MLPConfig, dqn_config
@@ -113,6 +115,26 @@ class HypercubeConfig:
         return Hypercube(self.side_length, self.dimension)
 
 
+type CheckpointMode = Literal["none", "agent", "agent-replay", "run"]
+
+
+class ExecutionPhase(IntEnum):
+    TRAINING = 0
+    EVALUATION = 1
+    COMPLETE = 2
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeConfig:
+    run: Path
+    validate_only: bool = False
+    compile_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.validate_only and self.compile_only:
+            raise ValueError("validate_only and compile_only are mutually exclusive")
+
+
 type EnvironmentConfig = GridworldConfig | Mastermind222Config | HypercubeConfig
 
 
@@ -124,12 +146,13 @@ class DQNRunConfig[EnvConfig: EnvironmentConfig]:
     seed: int = 1
     chunk_steps: int = 64
     output: Path = Path("runs")
-    save_model: bool = True
-    save_replay: bool = True
+    checkpoint_mode: CheckpointMode = "run"
     validate_only: bool = False
     compile_only: bool = False
 
     def __post_init__(self) -> None:
+        if self.checkpoint_mode not in ("none", "agent", "agent-replay", "run"):
+            raise ValueError("invalid checkpoint mode")
         _positive("chunk_steps", self.chunk_steps)
         for width in self.hidden_widths:
             _positive("hidden_width", width)

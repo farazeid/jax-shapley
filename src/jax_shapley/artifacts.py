@@ -67,7 +67,7 @@ def save_checkpoint[State, Config: EnvironmentConfig](
     """Atomically replace each file; loaders reject interrupted mixed-step pairs."""
     step = host_array(state.vector_step)
     version = np.asarray(1, dtype=np.int32)
-    if config.save_model:
+    if config.checkpoint_mode != "none":
         epsilon = epsilon_at(config.train, jnp.maximum(state.vector_step - 1, 0) * config.train.num_envs)
         arrays: dict[str, HostArray] = {"version": version, "vector_step": step, "epsilon": host_array(epsilon)}
         for index, (source, target) in enumerate(zip(state.model.mlp.layers, state.target.mlp.layers, strict=True)):
@@ -76,7 +76,7 @@ def save_checkpoint[State, Config: EnvironmentConfig](
             arrays[f"target_kernel_{index}"] = host_array(target.kernel[...])
             arrays[f"target_bias_{index}"] = host_array(target.bias[...])
         _save_arrays(folder / "model.npz", arrays)
-    if config.save_replay:
+    if config.checkpoint_mode in ("agent-replay", "run"):
         data = state.replay.data
         replay = {
             "version": version,
