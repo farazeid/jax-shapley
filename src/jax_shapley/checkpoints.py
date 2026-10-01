@@ -113,14 +113,13 @@ class CheckpointStore:
         if set(data) != set(names):
             raise ValueError(f"invalid checkpoint {item} topology")
         values: list[Array] = []
-        sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
         for name, expected in zip(names, template, strict=True):
             actual = data[name]
             if not isinstance(actual, np.ndarray) or actual.shape != expected.shape or actual.dtype != expected.dtype:
                 raise ValueError(f"invalid checkpoint {item} shape or dtype")
             if np.issubdtype(actual.dtype, np.floating) and not bool(np.all(np.isfinite(actual))):
                 raise ValueError(f"nonfinite checkpoint {item}")
-            values.append(jax.device_put(actual, sharding))
+            values.append(jax.device_put(actual, expected.sharding))
         return tuple(values)
 
     def wait(self) -> None:
@@ -167,14 +166,7 @@ def load_replay(folder: Path) -> ReplayState:
 
 
 def load_replay_state(store: CheckpointStore, features: int, capacity: int) -> ReplayState:
-    template = empty_replay(capacity, features)
-    replay = cast(
-        ReplayState, jax.tree.unflatten(jax.tree.structure(template), store.arrays("replay", _leaves(template)))
-    )
-    replay.data.validate()
-    if not 0 <= int(replay.pointer) < capacity or not 0 <= int(replay.size) <= capacity:
-        raise ValueError("invalid replay pointer/size")
-    return replay
+    return _restore_replay(store, empty_replay(capacity, features))
 
 
 def restore_run[State, Config: EnvironmentConfig](
@@ -201,7 +193,10 @@ def restore_run[State, Config: EnvironmentConfig](
         template.updates,
         template.target_updates,
         # Key shape belongs to the saved implementation, not the host's current default.
-        jax.random.key_data(jax.random.key(0, impl=metadata.key_implementation)),
+        jax.device_put(
+            jax.random.key_data(jax.random.key(0, impl=metadata.key_implementation)),
+            jax.random.key_data(template.key).sharding,
+        ),
     )
     optimizer_count = len(_leaves(optimizer))
     values = store.arrays("run_state", (*_leaves(optimizer), *_leaves(runtime)))
@@ -214,7 +209,7 @@ def restore_run[State, Config: EnvironmentConfig](
         raise ValueError("invalid checkpoint vector step")
     if not 0 <= int(updates) <= int(step) or not 0 <= int(targets) <= int(step):
         raise ValueError("invalid checkpoint update counters")
-    replay = load_replay_state(store, config.network.input_features, config.train.buffer_size)
+    replay = _restore_replay(store, template.replay)
     # Preserve the environment's concrete generic structure through the validated tree restoration.
     restored_env = cast(EpisodeStatisticsState[State], env_state)
     restored = RunState(
@@ -235,6 +230,16 @@ def restore_run[State, Config: EnvironmentConfig](
     if int(replay.pointer) != inserted % replay.capacity or int(replay.size) != min(inserted, replay.capacity):
         raise ValueError("replay counters disagree with training progress")
     return restored, metadata
+
+
+def _restore_replay(store: CheckpointStore, template: ReplayState) -> ReplayState:
+    replay = cast(
+        ReplayState, jax.tree.unflatten(jax.tree.structure(template), store.arrays("replay", _leaves(template)))
+    )
+    replay.data.validate()
+    if not 0 <= int(replay.pointer) < replay.capacity or not 0 <= int(replay.size) <= replay.capacity:
+        raise ValueError("invalid replay pointer/size")
+    return replay
 
 
 def _leaves(tree: object) -> tuple[Array, ...]:
