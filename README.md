@@ -143,4 +143,4 @@ bash experiments/dqn/mastermind222.sh --compile-only
 bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
 ```
 
-Normal recipes run the required gates, compile before training, and save local metrics, models, and optional replay. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
+Normal recipes run the required gates, compile initialization/training/evaluation into one numerical invocation, and save selective CSV metrics plus Orbax checkpoints. Full-state checkpoints are the default; resume with `uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>`. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
