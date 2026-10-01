@@ -65,4 +65,8 @@ in `DQNRunConfig`. The Tyro CLI derives network dimensions from the environment 
 uses the selected hidden widths to construct `MLPConfig`. Experiments supply values
 through shell recipes, not YAML or Python preset files. See [DQN Training](DQN%20Training.md).
 
+DQN runs compile initialization, training and greedy evaluation together. Orbax
+composite checkpoints support partial agent/replay loading and full-state resume;
+network dimensions and saved architecture are validated before restoration.
+
 PPO actor/critic networks remain available; PPO configuration and training are deferred.

@@ -1,4 +1,4 @@
-"""Typed host-only JSON, CSV, and non-pickle checkpoint boundaries."""
+"""Typed host-only JSON and selective CSV artifact boundaries."""
 
 import csv
 import json
