@@ -9,7 +9,6 @@ for argument in "$@"; do
 done
 dqn_gates "$@"
 selected_seed=$(dqn_option --seed "$@")
---checkpoint-mode run \
 selected_side=$(dqn_option --env.side-length "$@")
 selected_dimension=$(dqn_option --env.dimension "$@")
 seeds=({1..20})
@@ -26,6 +25,7 @@ while read -r side dimension timesteps; do
             --env.side-length "$side" \
             --env.dimension "$dimension" \
             --seed "$seed" \
+            --checkpoint-mode run \
             --hidden-widths 128 128 \
             --train.num-envs 16 \
             --train.total-timesteps "$timesteps" \

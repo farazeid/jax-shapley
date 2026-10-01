@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from jax_shapley.config import HypercubeConfig
+from jax_shapley.config import DQNRunConfig, HypercubeConfig
 from jax_shapley.train_dqn import parse_args
 
 ROOT = Path(__file__).parents[1]
@@ -18,10 +18,12 @@ ROOT = Path(__file__).parents[1]
 
 def test_gridworld_and_mastermind_source_settings(tmp_path: Path) -> None:
     grid = parse_args(_capture(tmp_path, "gridworld.sh")[0][4:])
+    assert isinstance(grid, DQNRunConfig)
     assert (grid.train.num_envs, grid.train.total_timesteps, grid.train.buffer_size) == (1, 50_000, 50_000)
     assert grid.train.learning_starts == 10_000
     assert grid.hidden_widths == (64, 64)
     mastermind = parse_args(_capture(tmp_path, "mastermind222.sh", ("--seed", "3"))[0][4:])
+    assert isinstance(mastermind, DQNRunConfig)
     assert (mastermind.train.num_envs, mastermind.train.total_timesteps) == (16, 100_000)
     assert mastermind.train.exploration_fraction == pytest.approx(0.25)
     assert mastermind.seed == 3
@@ -55,6 +57,7 @@ def test_all_hypercube_settings_and_seed_selection(tmp_path: Path) -> None:
     }
     for index, command in enumerate(commands):
         config = parse_args(command[4:])
+        assert isinstance(config, DQNRunConfig)
         assert isinstance(config.env, HypercubeConfig)
         timesteps = expected[config.env.side_length, config.env.dimension]
         assert config.train.total_timesteps == config.train.buffer_size == timesteps
@@ -65,11 +68,14 @@ def test_all_hypercube_settings_and_seed_selection(tmp_path: Path) -> None:
         assert config.seed == index % 20 + 1
     selected = _capture(tmp_path, "hypercube.sh", ("--seed", "3", "--env.side-length", "6", "--env.dimension", "5"))
     assert len(selected) == 1
-    assert parse_args(selected[0][4:]).seed == 3
+    selected_config = parse_args(selected[0][4:])
+    assert isinstance(selected_config, DQNRunConfig)
+    assert selected_config.seed == 3
 
 
 def test_smoke_recipe_is_short_and_has_updates(tmp_path: Path) -> None:
     config = parse_args(_capture(tmp_path, "smoke.sh")[0][4:])
+    assert isinstance(config, DQNRunConfig)
     assert config.train.total_timesteps == 32
     assert config.train.learning_starts == 0
     assert config.train.eval_episodes == 2

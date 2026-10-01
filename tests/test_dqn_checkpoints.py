@@ -11,7 +11,7 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import initialize_run, run_chunk
+from jax_shapley.algorithms.dqn import epsilon_at, initialize_run, run_chunk
 from jax_shapley.artifacts import describe
 from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, load_agent, restore_run
 from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
@@ -31,6 +31,7 @@ def test_full_restoration_and_latest_retention(tmp_path: Path) -> None:
     state, _ = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config.train, chunk_steps=4))(
         state, jnp.asarray(4, jnp.int32)
     )
+
     def leaves(tree: object) -> tuple[Array, ...]:
         return tuple(cast(list[Array], jax.tree.leaves(tree)))
 
@@ -49,7 +50,7 @@ def test_full_restoration_and_latest_retention(tmp_path: Path) -> None:
         state.vector_step,
         jnp.asarray(0, jnp.int32),
         jnp.asarray(0, jnp.int32),
-        jnp.asarray(0.5, jnp.float32),
+        epsilon_at(config.train, (state.vector_step - 1) * config.train.num_envs),
     )
     store = CheckpointStore(tmp_path)
     store.save(snapshot, CheckpointMetadata(describe(config), 4, 0, 0))
@@ -97,3 +98,39 @@ def test_metadata_validation_and_empty_store(tmp_path: Path) -> None:
             store.metadata()
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("corruption", ["shape", "dtype", "nonfinite"])
+def test_agent_loading_rejects_corrupt_arrays(tmp_path: Path, corruption: str) -> None:
+    from jax_shapley.algorithms.dqn import make_snapshot
+
+    config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(total_timesteps=8, buffer_size=3), hidden_widths=(4,))
+    env = EpisodeStatisticsWrapper(Gridworld())
+    state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(0))
+    zero = jnp.asarray(0, jnp.int32)
+    snapshot = make_snapshot(state, zero, zero, config.train, "run")
+    value = snapshot.agent[0]
+    if corruption == "shape":
+        value = value[:-1]
+    elif corruption == "dtype":
+        value = value.astype(jnp.int32)
+    else:
+        value = value.at[0].set(jnp.nan)
+    snapshot = Snapshot(
+        (value, *snapshot.agent[1:]),
+        snapshot.replay,
+        snapshot.optimizer,
+        snapshot.runtime,
+        snapshot.vector_step,
+        snapshot.phase,
+        snapshot.evaluation_episodes,
+        snapshot.epsilon,
+    )
+    store = CheckpointStore(tmp_path)
+    try:
+        store.save(snapshot, CheckpointMetadata(describe(config), 0, 0, 0))
+        store.wait()
+    finally:
+        store.close()
+    with pytest.raises(ValueError, match=r"shape or dtype|nonfinite"):
+        load_agent(tmp_path, config.network, load_replay=False)
