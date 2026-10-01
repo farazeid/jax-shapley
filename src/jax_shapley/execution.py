@@ -20,6 +20,7 @@ class Snapshot:
     phase: Array
     evaluation_episodes: Array
     epsilon: Array
+    key_implementation: str = struct.field(pytree_node=False, default="threefry2x32")
 
 
 type CallbackToken = NDArray[np.int32]

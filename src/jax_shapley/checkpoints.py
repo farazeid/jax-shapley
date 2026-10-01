@@ -46,7 +46,7 @@ class CheckpointMetadata:
             raise ValueError("invalid checkpoint log boundary or timing")
         if not isfinite(self.training_seconds) or not 0 <= self.training_seconds <= self.elapsed_seconds:
             raise ValueError("invalid training timing")
-        if self.key_implementation != "threefry2x32":
+        if self.key_implementation not in ("threefry2x32", "rbg", "unsafe_rbg"):
             raise ValueError("unsupported checkpoint PRNG implementation")
         config = parse_settings(self.settings)
         _validate_phase(self, config.train.eval_episodes, config.train.num_envs, config.train.vector_steps)
@@ -69,6 +69,8 @@ class CheckpointStore:
 
     def save(self, snapshot: Snapshot, metadata: CheckpointMetadata) -> None:
         metadata.validate()
+        if metadata.key_implementation != snapshot.key_implementation:
+            raise ValueError("checkpoint PRNG metadata disagrees with snapshot")
         self.manager.wait_until_finished()
         sequence = 0 if self.sequence is None else self.sequence + 1
         items: dict[str, object] = {
@@ -198,7 +200,8 @@ def restore_run[State, Config: EnvironmentConfig](
         template.vector_step,
         template.updates,
         template.target_updates,
-        jax.random.key_data(template.key),
+        # Key shape belongs to the saved implementation, not the host's current default.
+        jax.random.key_data(jax.random.key(0, impl=metadata.key_implementation)),
     )
     optimizer_count = len(_leaves(optimizer))
     values = store.arrays("run_state", (*_leaves(optimizer), *_leaves(runtime)))

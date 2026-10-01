@@ -98,6 +98,7 @@ class ArtifactSink[Config: EnvironmentConfig]:
                 prefix_digest(path, boundary),
                 self.elapsed(),
                 training_seconds=self.training_seconds,
+                key_implementation=snapshot.key_implementation,
             )
             self.store.save(snapshot, metadata)
             # The pre-evaluation snapshot must commit before evaluation can emit rows.
