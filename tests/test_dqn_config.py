@@ -81,3 +81,18 @@ def test_network_dimensions_come_from_environments() -> None:
     assert (mastermind.input_features, mastermind.output_features) == (8, 4)
     assert (cube.input_features, cube.output_features) == (5, 10)
     assert tuple(layer.features for layer in cube.layers) == (128, 128, 10)
+
+
+def test_checkpoint_modes_and_resume_contracts() -> None:
+    from pathlib import Path
+
+    from jax_shapley.config import ResumeConfig
+
+    assert DQNRunConfig(GridworldConfig()).checkpoint_mode == "run"
+    for mode in ("none", "agent", "agent-replay", "run"):
+        assert replace(DQNRunConfig(GridworldConfig()), checkpoint_mode=mode).checkpoint_mode == mode
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ResumeConfig(Path("runs/example"), validate_only=True, compile_only=True)
+    resume = ResumeConfig(Path("runs/example"))
+    with pytest.raises(FrozenInstanceError):
+        resume.__setattr__("run", Path("other"))
