@@ -120,6 +120,7 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
 ) -> RunSummary | None:
     env = EpisodeStatisticsWrapper(environment)
     metadata: CheckpointMetadata | None = None
+    checkpoint_sequence: int | None = None
     restored: RunState[State] | None = None
     if resume is not None:
         store = CheckpointStore(resume.run, read_only=True)
@@ -128,6 +129,7 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
                 env, env.default_params, config.network, config.train, jax.random.key(config.seed)
             )
             restored, metadata = restore_run(store, template, config)
+            checkpoint_sequence = store.sequence
             verify_log(resume.run / "metrics.csv", metadata)
         finally:
             store.close()
@@ -143,7 +145,7 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
         folder.mkdir(parents=True, exist_ok=False)
         (folder / "config.json").write_text(describe(config))
         initialize_metrics(folder / "metrics.csv")
-    sink = ArtifactSink(folder, config, metadata=metadata)
+    sink = ArtifactSink(folder, config, metadata=metadata, checkpoint_sequence=checkpoint_sequence)
     program.router.sink = sink
     try:
         if program.fresh is not None:

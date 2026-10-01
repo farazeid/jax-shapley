@@ -27,6 +27,7 @@ class ArtifactSink[Config: EnvironmentConfig]:
         config: DQNRunConfig[Config],
         *,
         metadata: CheckpointMetadata | None = None,
+        checkpoint_sequence: int | None = None,
         clock: Callable[[], float] = perf_counter,
     ) -> None:
         self.folder, self.config, self.clock = folder, config, clock
@@ -39,6 +40,14 @@ class ArtifactSink[Config: EnvironmentConfig]:
         self.store: CheckpointStore | None = None
         try:
             if metadata is not None:
+                # Preflight restoration/compilation runs without the writer lock.
+                # Reject stale state before rolling back any committed log rows.
+                store = CheckpointStore(folder, read_only=True)
+                try:
+                    if checkpoint_sequence is None or store.sequence != checkpoint_sequence:
+                        raise RuntimeError("checkpoint changed during resume preflight; retry resume")
+                finally:
+                    store.close()
                 verify_log(folder / "metrics.csv", metadata)
                 with (folder / "metrics.csv").open("r+b") as log:
                     log.truncate(metadata.csv_bytes)
