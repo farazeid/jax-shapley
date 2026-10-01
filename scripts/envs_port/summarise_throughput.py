@@ -30,11 +30,6 @@ def main() -> None:
     print(f"Wrote {len(summary)} rows to {args.output}")
 
 
-def load_throughput(args: Args) -> pd.DataFrame:
-    paths = (args.gymnasium_cpu_data, args.jax_cpu_data, args.jax_gpu_data)
-    return pd.concat((pd.read_csv(path) for path in paths), ignore_index=True)
-
-
 def summarize(args: Args, data: pd.DataFrame) -> pd.DataFrame:
     valid = data[data["status"] == "ok"].copy()
     rows = []
@@ -53,6 +48,11 @@ def summarize(args: Args, data: pd.DataFrame) -> pd.DataFrame:
             "mean_ci95_upper": ci_upper,
         })
     return pd.DataFrame(rows)
+
+
+def load_throughput(args: Args) -> pd.DataFrame:
+    paths = (args.gymnasium_cpu_data, args.jax_cpu_data, args.jax_gpu_data)
+    return pd.concat((pd.read_csv(path) for path in paths), ignore_index=True)
 
 
 def mean_95_interval(values: np.ndarray) -> tuple[float, float, float, float]:

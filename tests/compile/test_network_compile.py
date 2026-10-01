@@ -10,35 +10,6 @@ from jax import Array
 from tests.network_cases import NETWORK_CASES, AgentNetwork, NetworkCase, make_network
 
 
-def _forward(model: AgentNetwork, observations: Array) -> Array:
-    return model(observations)[0]
-
-
-def _loss(model: AgentNetwork, observations: Array) -> Array:
-    return jnp.mean(jnp.square(_forward(model, observations)))
-
-
-def _assert_compile(case: NetworkCase, leading_shape: tuple[int, ...], *, floating: bool) -> None:
-    model = make_network(case)
-    shape = (*leading_shape, case.config.input_features)
-    dtype = jnp.float32 if floating else jnp.int32
-    spec = jax.ShapeDtypeStruct(shape, dtype)
-    compiled = nnx.jit(_forward).trace(model, spec).lower().compile()
-    observations = (jnp.arange(np.prod(shape), dtype=jnp.int32).reshape(shape) % 5 - 1).astype(dtype)
-    output = compiled(model, observations)
-    assert output.shape == (*leading_shape, case.config.output_features)
-    assert output.dtype == jnp.float32
-    np.testing.assert_allclose(output, _forward(model, observations), rtol=2e-5, atol=2e-6)
-    if case.kind == "actor":
-        np.testing.assert_allclose(output.sum(axis=-1), 1.0, rtol=1e-6, atol=1e-6)
-        assert jnp.all(output >= 0)
-    gradient = nnx.jit(nnx.value_and_grad(_loss)).trace(model, spec).lower().compile()
-    loss, state = gradient(model, observations)
-    assert loss.shape == ()
-    assert jnp.isfinite(loss)
-    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(state))
-
-
 @pytest.mark.compile
 @pytest.mark.parametrize("case", NETWORK_CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("leading_shape", [(), (3,), (2, 3)], ids=["single", "batch", "time-batch"])
@@ -80,3 +51,32 @@ def test_network_gpu_compile() -> None:
         for case in NETWORK_CASES:
             for floating in (False, True):
                 _assert_compile(case, (2, 3), floating=floating)
+
+
+def _forward(model: AgentNetwork, observations: Array) -> Array:
+    return model(observations)[0]
+
+
+def _loss(model: AgentNetwork, observations: Array) -> Array:
+    return jnp.mean(jnp.square(_forward(model, observations)))
+
+
+def _assert_compile(case: NetworkCase, leading_shape: tuple[int, ...], *, floating: bool) -> None:
+    model = make_network(case)
+    shape = (*leading_shape, case.config.input_features)
+    dtype = jnp.float32 if floating else jnp.int32
+    spec = jax.ShapeDtypeStruct(shape, dtype)
+    compiled = nnx.jit(_forward).trace(model, spec).lower().compile()
+    observations = (jnp.arange(np.prod(shape), dtype=jnp.int32).reshape(shape) % 5 - 1).astype(dtype)
+    output = compiled(model, observations)
+    assert output.shape == (*leading_shape, case.config.output_features)
+    assert output.dtype == jnp.float32
+    np.testing.assert_allclose(output, _forward(model, observations), rtol=2e-5, atol=2e-6)
+    if case.kind == "actor":
+        np.testing.assert_allclose(output.sum(axis=-1), 1.0, rtol=1e-6, atol=1e-6)
+        assert jnp.all(output >= 0)
+    gradient = nnx.jit(nnx.value_and_grad(_loss)).trace(model, spec).lower().compile()
+    loss, state = gradient(model, observations)
+    assert loss.shape == ()
+    assert jnp.isfinite(loss)
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(state))

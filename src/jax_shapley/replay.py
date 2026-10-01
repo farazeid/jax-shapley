@@ -83,14 +83,6 @@ def append(replay: ReplayState, batch: TransitionBatch) -> ReplayState:
     )
 
 
-def gather(replay: ReplayState, indices: Array) -> TransitionBatch:
-    if indices.ndim != 1 or indices.dtype != jnp.int32:
-        raise TypeError("replay indices must be a rank-one int32 array")
-    return cast(
-        TransitionBatch, jax.tree.map(lambda array: array[indices], replay.data)
-    )  # JAX tree.map preserves this struct topology.
-
-
 def sample(replay: ReplayState, batch_size: int, key: Array) -> tuple[TransitionBatch, Array]:
     """Sample a nonempty replay; callers gate learning until after insertion."""
     if batch_size < 1:
@@ -99,3 +91,11 @@ def sample(replay: ReplayState, batch_size: int, key: Array) -> tuple[Transition
     key, sample_key = keys[0], keys[1]
     indices = jax.random.randint(sample_key, (batch_size,), 0, replay.size, dtype=jnp.int32)
     return gather(replay, indices), key
+
+
+def gather(replay: ReplayState, indices: Array) -> TransitionBatch:
+    if indices.ndim != 1 or indices.dtype != jnp.int32:
+        raise TypeError("replay indices must be a rank-one int32 array")
+    return cast(
+        TransitionBatch, jax.tree.map(lambda array: array[indices], replay.data)
+    )  # JAX tree.map preserves this struct topology.

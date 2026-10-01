@@ -47,14 +47,6 @@ class _Environment(Protocol):
     def observation_space(self, params: object) -> _Space: ...
 
 
-@pytest.fixture(
-    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
-    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
-)
-def env(request: pytest.FixtureRequest) -> Iterator[_Environment]:
-    yield cast(_Environment, request.param)
-
-
 def test_reset_and_jit_step_contract(env: _Environment) -> None:
     params = env.default_params
     key_reset, key_step = jax.random.split(jax.random.key(0))
@@ -189,3 +181,11 @@ def test_jitted_vmapped_scans(env: _Environment) -> None:
     assert final_obs.shape == (batch_size, *env.observation_space(params).shape)
     assert rewards.shape == (horizon, batch_size)
     assert dones.shape == (horizon, batch_size)
+
+
+@pytest.fixture(
+    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
+    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
+)
+def env(request: pytest.FixtureRequest) -> Iterator[_Environment]:
+    yield cast(_Environment, request.param)

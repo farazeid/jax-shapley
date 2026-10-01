@@ -25,6 +25,44 @@ class _BatchedStep[State, Params](Protocol):
     ) -> tuple[jax.Array, EpisodeStatisticsState[State], jax.Array, jax.Array, EpisodeStepInfo]: ...
 
 
+@pytest.mark.compile
+@pytest.mark.parametrize(
+    "check",
+    [
+        lambda: _assert_env_compiles(Gridworld()),
+        lambda: _assert_env_compiles(Hypercube(3, 2)),
+        lambda: _assert_env_compiles(Mastermind222()),
+    ],
+    ids=["gridworld", "hypercube-3x2", "mastermind-222"],
+)
+def test_env_reset_and_step_compile(check: Callable[[], None]) -> None:
+    check()
+
+
+@pytest.mark.compile
+@pytest.mark.parametrize(
+    "side_length,dimension",
+    [(2, 2), (2, 5), (6, 2), (6, 5), (4, 3)],
+    ids=["2x2", "2x5", "6x2", "6x5", "4x3"],
+)
+def test_hypercube_shape_variants_compile(side_length: int, dimension: int) -> None:
+    _assert_env_compiles(Hypercube(side_length, dimension))
+
+
+@pytest.mark.compile
+@pytest.mark.parametrize(
+    "check",
+    [
+        lambda: _assert_rollout_compiles(Gridworld()),
+        lambda: _assert_rollout_compiles(Hypercube(4, 5)),
+        lambda: _assert_rollout_compiles(Mastermind222()),
+    ],
+    ids=["gridworld", "hypercube-4x5", "mastermind-222"],
+)
+def test_vectorized_rollout_scan_compile(check: Callable[[], None]) -> None:
+    check()
+
+
 def _abstract(tree: object) -> object:
     """Use only shapes/dtypes when tracing; values are not compile-time fixtures."""
     return jax.tree.map(lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype), tree)
@@ -54,30 +92,6 @@ def _assert_step_info(info: StepInfo, shape: tuple[int, ...]) -> None:
     for flag in (info["terminated"], info["truncated"]):
         assert flag.shape == shape
         assert flag.dtype == jnp.bool_
-
-
-@pytest.mark.compile
-@pytest.mark.parametrize(
-    "check",
-    [
-        lambda: _assert_env_compiles(Gridworld()),
-        lambda: _assert_env_compiles(Hypercube(3, 2)),
-        lambda: _assert_env_compiles(Mastermind222()),
-    ],
-    ids=["gridworld", "hypercube-3x2", "mastermind-222"],
-)
-def test_env_reset_and_step_compile(check: Callable[[], None]) -> None:
-    check()
-
-
-@pytest.mark.compile
-@pytest.mark.parametrize(
-    "side_length,dimension",
-    [(2, 2), (2, 5), (6, 2), (6, 5), (4, 3)],
-    ids=["2x2", "2x5", "6x2", "6x5", "4x3"],
-)
-def test_hypercube_shape_variants_compile(side_length: int, dimension: int) -> None:
-    _assert_env_compiles(Hypercube(side_length, dimension))
 
 
 def _assert_rollout_compiles[State, Params](env: EnvironmentProtocol[State, Params]) -> None:
@@ -118,17 +132,3 @@ def _assert_rollout_compiles[State, Params](env: EnvironmentProtocol[State, Para
     assert episode["length"].dtype == jnp.int32
     for value in episode.values():
         assert value.shape == (horizon, batch)
-
-
-@pytest.mark.compile
-@pytest.mark.parametrize(
-    "check",
-    [
-        lambda: _assert_rollout_compiles(Gridworld()),
-        lambda: _assert_rollout_compiles(Hypercube(4, 5)),
-        lambda: _assert_rollout_compiles(Mastermind222()),
-    ],
-    ids=["gridworld", "hypercube-4x5", "mastermind-222"],
-)
-def test_vectorized_rollout_scan_compile(check: Callable[[], None]) -> None:
-    check()

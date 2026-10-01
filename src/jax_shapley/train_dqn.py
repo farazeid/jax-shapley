@@ -86,49 +86,17 @@ class RunSummary:
     backend: str
 
 
-def parse_args(args: list[str] | None = None) -> CLIConfig:
-    return tyro.cli(CLIConfig, args=args)
-
-
-def compile_program[State, Params, Config: EnvironmentConfig](
-    env: EpisodeStatisticsWrapper[State, Params], params: Params, config: DQNRunConfig[Config]
-) -> CompiledProgram[State]:
-    key_spec = jax.ShapeDtypeStruct((), jax.random.key(config.seed).dtype)
-    initialize = nnx.jit(partial(initialize_run, env, params, config.network, config.train))
-    # NNX eval_shape retains graph semantics while leaving replay/model arrays abstract.
-    abstract = nnx.eval_shape(initialize, key_spec)
-    initialized = cast(Initializer[State], initialize.trace(key_spec).lower().compile())
-    chunk = nnx.jit(partial(run_chunk, env=env, params=params, config=config.train, chunk_steps=config.chunk_steps))
-    compiled = cast(ChunkRunner[State], chunk.trace(abstract, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile())
-    evaluate: Evaluator | None = None
-    if config.train.eval_episodes:
-        evaluation = nnx.jit(
-            partial(
-                evaluate_dqn,
-                env=env,
-                params=params,
-                num_envs=config.train.num_envs,
-                episodes=config.train.eval_episodes,
-            )
-        )
-        evaluate = cast(Evaluator, evaluation.trace(abstract.model, key_spec).lower().compile())
-    return CompiledProgram(initialized, compiled, evaluate)
-
-
-def checkpoint_due(vector_step: int, num_envs: int, total_timesteps: int) -> bool:
-    # Upstream divides by total_timesteps // 10. Guard only its host save cadence
-    # for tiny smoke runs (<10 transitions), leaving learning semantics unchanged.
-    interval = max(1, total_timesteps // 10)
-    return (vector_step * num_envs) % interval < num_envs
-
-
-def _active_steps[Config: EnvironmentConfig](current: int, config: DQNRunConfig[Config]) -> int:
-    active = min(config.chunk_steps, config.train.vector_steps - current)
-    if config.save_model or config.save_replay:
-        for offset in range(1, active + 1):
-            if checkpoint_due(current + offset, config.train.num_envs, config.train.total_timesteps):
-                return offset
-    return active
+def main(args: list[str] | None = None) -> RunSummary | None:
+    config = parse_args(args)
+    if config.validate_only:
+        print(describe(config), end="")
+        return None
+    # Narrow the closed union before coupling each environment to its own params.
+    if isinstance(config.env, GridworldConfig):
+        return run_experiment(config.env.make(), config)
+    if isinstance(config.env, Mastermind222Config):
+        return run_experiment(config.env.make(), config)
+    return run_experiment(config.env.make(), config)
 
 
 def run_experiment[State, Params, Config: EnvironmentConfig](
@@ -184,17 +152,49 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
     return summary
 
 
-def main(args: list[str] | None = None) -> RunSummary | None:
-    config = parse_args(args)
-    if config.validate_only:
-        print(describe(config), end="")
-        return None
-    # Narrow the closed union before coupling each environment to its own params.
-    if isinstance(config.env, GridworldConfig):
-        return run_experiment(config.env.make(), config)
-    if isinstance(config.env, Mastermind222Config):
-        return run_experiment(config.env.make(), config)
-    return run_experiment(config.env.make(), config)
+def parse_args(args: list[str] | None = None) -> CLIConfig:
+    return tyro.cli(CLIConfig, args=args)
+
+
+def compile_program[State, Params, Config: EnvironmentConfig](
+    env: EpisodeStatisticsWrapper[State, Params], params: Params, config: DQNRunConfig[Config]
+) -> CompiledProgram[State]:
+    key_spec = jax.ShapeDtypeStruct((), jax.random.key(config.seed).dtype)
+    initialize = nnx.jit(partial(initialize_run, env, params, config.network, config.train))
+    # NNX eval_shape retains graph semantics while leaving replay/model arrays abstract.
+    abstract = nnx.eval_shape(initialize, key_spec)
+    initialized = cast(Initializer[State], initialize.trace(key_spec).lower().compile())
+    chunk = nnx.jit(partial(run_chunk, env=env, params=params, config=config.train, chunk_steps=config.chunk_steps))
+    compiled = cast(ChunkRunner[State], chunk.trace(abstract, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile())
+    evaluate: Evaluator | None = None
+    if config.train.eval_episodes:
+        evaluation = nnx.jit(
+            partial(
+                evaluate_dqn,
+                env=env,
+                params=params,
+                num_envs=config.train.num_envs,
+                episodes=config.train.eval_episodes,
+            )
+        )
+        evaluate = cast(Evaluator, evaluation.trace(abstract.model, key_spec).lower().compile())
+    return CompiledProgram(initialized, compiled, evaluate)
+
+
+def checkpoint_due(vector_step: int, num_envs: int, total_timesteps: int) -> bool:
+    # Upstream divides by total_timesteps // 10. Guard only its host save cadence
+    # for tiny smoke runs (<10 transitions), leaving learning semantics unchanged.
+    interval = max(1, total_timesteps // 10)
+    return (vector_step * num_envs) % interval < num_envs
+
+
+def _active_steps[Config: EnvironmentConfig](current: int, config: DQNRunConfig[Config]) -> int:
+    active = min(config.chunk_steps, config.train.vector_steps - current)
+    if config.save_model or config.save_replay:
+        for offset in range(1, active + 1):
+            if checkpoint_due(current + offset, config.train.num_envs, config.train.total_timesteps):
+                return offset
+    return active
 
 
 if __name__ == "__main__":

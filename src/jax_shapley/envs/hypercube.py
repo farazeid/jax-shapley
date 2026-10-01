@@ -90,6 +90,53 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    def render(
+        self,
+        state: HypercubeState,
+        params: HypercubeParams | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render a 2D view and coordinate tracks as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.hypercube import render_hypercube
+
+        return render_hypercube(
+            state,
+            side_length=self.side_length,
+            dimension=self.dimension,
+            start=self._start,
+            goal=self._goal,
+            config=render_config,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Hypercube-v0"
+
+    @property
+    def num_actions(self) -> int:
+        return 2 * self.dimension
+
+    def action_space(self, params: HypercubeParams | None = None) -> spaces.Discrete:
+        del params
+        return spaces.Discrete(self.num_actions)
+
+    def observation_space(self, params: HypercubeParams) -> spaces.Box:
+        del params
+        return spaces.Box(
+            low=0,
+            high=self.side_length - 1,
+            shape=(self.dimension,),
+            dtype=jnp.int32,
+        )
+
+    def state_space(self, params: HypercubeParams) -> spaces.Dict:
+        return spaces.Dict({
+            "position": self.observation_space(params),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode),
+        })
+
     @overload
     def get_obs(self, state: HypercubeState) -> Observation: ...
 
@@ -117,50 +164,3 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
     def is_terminal(self, state: HypercubeState, params: HypercubeParams) -> Flag:
         del params
         return state.terminated
-
-    @property
-    def name(self) -> str:
-        return "Hypercube-v0"
-
-    @property
-    def num_actions(self) -> int:
-        return 2 * self.dimension
-
-    def action_space(self, params: HypercubeParams | None = None) -> spaces.Discrete:
-        del params
-        return spaces.Discrete(self.num_actions)
-
-    def observation_space(self, params: HypercubeParams) -> spaces.Box:
-        del params
-        return spaces.Box(
-            low=0,
-            high=self.side_length - 1,
-            shape=(self.dimension,),
-            dtype=jnp.int32,
-        )
-
-    def render(
-        self,
-        state: HypercubeState,
-        params: HypercubeParams | None = None,
-        render_config: "RenderConfig | None" = None,
-    ) -> "np.ndarray":
-        """Render a 2D view and coordinate tracks as a host-side RGB array."""
-        del params
-        from jax_shapley.envs.render.hypercube import render_hypercube
-
-        return render_hypercube(
-            state,
-            side_length=self.side_length,
-            dimension=self.dimension,
-            start=self._start,
-            goal=self._goal,
-            config=render_config,
-        )
-
-    def state_space(self, params: HypercubeParams) -> spaces.Dict:
-        return spaces.Dict({
-            "position": self.observation_space(params),
-            "terminated": spaces.Discrete(2),
-            "time": spaces.Discrete(params.max_steps_in_episode),
-        })

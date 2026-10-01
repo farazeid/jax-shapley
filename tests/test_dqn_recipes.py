@@ -16,38 +16,6 @@ from jax_shapley.train_dqn import parse_args
 ROOT = Path(__file__).parents[1]
 
 
-def _capture(tmp_path: Path, script: str, extra: tuple[str, ...] = ()) -> list[list[str]]:
-    binary = tmp_path / "bin"
-    binary.mkdir(exist_ok=True)
-    ledger = tmp_path / "commands.jsonl"
-    if ledger.exists():
-        ledger.unlink()
-    stub = binary / "uv"
-    stub.write_text(
-        f"#!{sys.executable}\nimport json, os, sys\nwith open(os.environ['DQN_TEST_CAPTURE'], 'a') as f:\n    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-    )
-    stub.chmod(0o755)
-    environment = dict(os.environ)
-    environment["PATH"] = str(binary) + os.pathsep + environment["PATH"]
-    environment["DQN_TEST_CAPTURE"] = str(ledger)
-    bash = shutil.which("bash")
-    if bash is None:
-        raise RuntimeError("bash is required for recipe validation")
-    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- trusted local script argv.
-        [bash, str(ROOT / "experiments/dqn" / script), "--validate-only", *extra],
-        env=environment,
-        check=True,
-        cwd=tmp_path,
-    )
-    commands: list[list[str]] = []
-    for line in ledger.read_text().splitlines():
-        value: object = json.loads(line)
-        if not isinstance(value, list) or not all(isinstance(arg, str) for arg in value):
-            raise ValueError("capture must contain string arguments")
-        commands.append(cast(list[str], value))  # Validated JSON boundary.
-    return commands
-
-
 def test_gridworld_and_mastermind_source_settings(tmp_path: Path) -> None:
     grid = parse_args(_capture(tmp_path, "gridworld.sh")[0][4:])
     assert (grid.train.num_envs, grid.train.total_timesteps, grid.train.buffer_size) == (1, 50_000, 50_000)
@@ -105,3 +73,35 @@ def test_smoke_recipe_is_short_and_has_updates(tmp_path: Path) -> None:
     assert config.train.total_timesteps == 32
     assert config.train.learning_starts == 0
     assert config.train.eval_episodes == 2
+
+
+def _capture(tmp_path: Path, script: str, extra: tuple[str, ...] = ()) -> list[list[str]]:
+    binary = tmp_path / "bin"
+    binary.mkdir(exist_ok=True)
+    ledger = tmp_path / "commands.jsonl"
+    if ledger.exists():
+        ledger.unlink()
+    stub = binary / "uv"
+    stub.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\nwith open(os.environ['DQN_TEST_CAPTURE'], 'a') as f:\n    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    stub.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = str(binary) + os.pathsep + environment["PATH"]
+    environment["DQN_TEST_CAPTURE"] = str(ledger)
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash is required for recipe validation")
+    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- trusted local script argv.
+        [bash, str(ROOT / "experiments/dqn" / script), "--validate-only", *extra],
+        env=environment,
+        check=True,
+        cwd=tmp_path,
+    )
+    commands: list[list[str]] = []
+    for line in ledger.read_text().splitlines():
+        value: object = json.loads(line)
+        if not isinstance(value, list) or not all(isinstance(arg, str) for arg in value):
+            raise ValueError("capture must contain string arguments")
+        commands.append(cast(list[str], value))  # Validated JSON boundary.
+    return commands

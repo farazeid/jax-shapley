@@ -94,18 +94,6 @@ class OneStepEnv:
         )
 
 
-def tiny_config(num_envs: int = 2) -> DQNTrainConfig:
-    return DQNTrainConfig(
-        num_envs=num_envs,
-        total_timesteps=32,
-        buffer_size=7,
-        batch_size=3,
-        learning_starts=2,
-        train_frequency=3,
-        target_network_frequency=5,
-    )
-
-
 def test_upstream_vector_timing_and_target_order() -> None:
     config = tiny_config()
     env = EpisodeStatisticsWrapper(Gridworld())
@@ -155,19 +143,6 @@ def test_collection_matches_gymnax_same_key() -> None:
         np.testing.assert_array_equal(left, right)
 
 
-def _run_chunks(chunk_steps: int) -> RunState[object]:
-    config = tiny_config()
-    env = EpisodeStatisticsWrapper(Gridworld())
-    state = initialize_run(env, env.default_params, dqn_config(2, 4, hidden_widths=(4,)), config, jax.random.key(12))
-    run = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config, chunk_steps=chunk_steps))
-    remaining = config.vector_steps
-    while remaining:
-        active = min(remaining, chunk_steps)
-        state, _ = run(state, jnp.asarray(active, jnp.int32))
-        remaining -= active
-    return cast(RunState[object], state)  # Test compares arrays without inspecting the concrete environment state.
-
-
 def test_chunk_equivalence_and_repeated_seed() -> None:
     baseline = _run_chunks(1)
     for other in (_run_chunks(5), _run_chunks(5)):
@@ -211,3 +186,28 @@ def test_evaluation_collects_entire_final_vector_step() -> None:
     result = evaluate(state.model, state.key)
     assert int(result.count) == 3
     np.testing.assert_array_equal(result.returns[:3], [2, 2, 2])
+
+
+def tiny_config(num_envs: int = 2) -> DQNTrainConfig:
+    return DQNTrainConfig(
+        num_envs=num_envs,
+        total_timesteps=32,
+        buffer_size=7,
+        batch_size=3,
+        learning_starts=2,
+        train_frequency=3,
+        target_network_frequency=5,
+    )
+
+
+def _run_chunks(chunk_steps: int) -> RunState[object]:
+    config = tiny_config()
+    env = EpisodeStatisticsWrapper(Gridworld())
+    state = initialize_run(env, env.default_params, dqn_config(2, 4, hidden_widths=(4,)), config, jax.random.key(12))
+    run = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config, chunk_steps=chunk_steps))
+    remaining = config.vector_steps
+    while remaining:
+        active = min(remaining, chunk_steps)
+        state, _ = run(state, jnp.asarray(active, jnp.int32))
+        remaining -= active
+    return cast(RunState[object], state)  # Test compares arrays without inspecting the concrete environment state.

@@ -33,19 +33,6 @@ class _BatchedStep(Protocol):
     ) -> tuple[jax.Array, EpisodeStatisticsState[Mastermind222State], jax.Array, jax.Array, EpisodeStepInfo]: ...
 
 
-type GenericWrapper = EpisodeStatisticsWrapper[object, object]
-type RolloutCarry = tuple[jax.Array, EpisodeStatisticsState[Mastermind222State], jax.Array]
-type RolloutOutput = tuple[jax.Array, jax.Array, EpisodeInfo]
-
-
-@pytest.fixture(
-    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
-    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
-)
-def wrapper(request: pytest.FixtureRequest) -> Iterator[GenericWrapper]:
-    yield EpisodeStatisticsWrapper(cast(EnvironmentProtocol[object, object], request.param))
-
-
 def test_reset_and_jit_step_contract(wrapper: GenericWrapper) -> None:
     params = wrapper.default_params
     reset_key, step_key = jax.random.split(jax.random.key(0))
@@ -168,3 +155,16 @@ def test_jitted_vmapped_scan_emits_every_completed_episode() -> None:
     np.testing.assert_array_equal(episode["length"][~completed], 0)
     np.testing.assert_array_equal(final_state.episode_count, completed.sum(axis=0))
     assert np.all(episode["length"][completed] > 0)
+
+
+type GenericWrapper = EpisodeStatisticsWrapper[object, object]
+type RolloutCarry = tuple[jax.Array, EpisodeStatisticsState[Mastermind222State], jax.Array]
+type RolloutOutput = tuple[jax.Array, jax.Array, EpisodeInfo]
+
+
+@pytest.fixture(
+    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
+    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
+)
+def wrapper(request: pytest.FixtureRequest) -> Iterator[GenericWrapper]:
+    yield EpisodeStatisticsWrapper(cast(EnvironmentProtocol[object, object], request.param))

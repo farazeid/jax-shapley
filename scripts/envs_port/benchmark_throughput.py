@@ -27,6 +27,28 @@ import tyro
 type ArgsModules = dict[str, ModuleType]
 
 
+@dataclass(frozen=True)
+class Args:
+    """Configuration for an original-Gymnasium or JAX throughput run."""
+
+    backend: Literal["original", "jax"] = "jax"
+    source_root: Path | None = None
+    output: Path = Path("docs/data/envs-port--throughput--jax-cpu.csv")
+    block_steps: int = 1_024
+    samples: int = 5
+    min_sample_seconds: float = 0.5
+    num_envs: tuple[int, ...] = tuple(2**power for power in range(12))
+    environments: tuple[str, ...] = (
+        "gridworld",
+        "hypercube_2x2",
+        "hypercube_6x5",
+        "mastermind_222",
+    )
+    seed: int = 0
+    available_memory_fraction: float = 0.25
+    construction_seconds_limit: float = 120.0
+
+
 class _ActionSpace(Protocol):
     n: int
 
@@ -68,28 +90,6 @@ class _JaxEnv(Protocol):
     ) -> tuple[jax.Array, object, jax.Array, jax.Array, _JaxStepInfo]: ...
 
 
-@dataclass(frozen=True)
-class Args:
-    """Configuration for an original-Gymnasium or JAX throughput run."""
-
-    backend: Literal["original", "jax"] = "jax"
-    source_root: Path | None = None
-    output: Path = Path("docs/data/envs-port--throughput--jax-cpu.csv")
-    block_steps: int = 1_024
-    samples: int = 5
-    min_sample_seconds: float = 0.5
-    num_envs: tuple[int, ...] = tuple(2**power for power in range(12))
-    environments: tuple[str, ...] = (
-        "gridworld",
-        "hypercube_2x2",
-        "hypercube_6x5",
-        "mastermind_222",
-    )
-    seed: int = 0
-    available_memory_fraction: float = 0.25
-    construction_seconds_limit: float = 120.0
-
-
 def main() -> None:
     args = tyro.cli(Args)
     if args.backend == "original":
@@ -116,6 +116,39 @@ def benchmark_original(args: Args, source_root: Path) -> list[dict[str, object]]
     return rows
 
 
+def benchmark_jax(args: Args) -> list[dict[str, object]]:
+    if unavailable_gpu_run_requested():
+        return skipped_gpu_rows(args)
+
+    rows: list[dict[str, object]] = []
+    for environment_name in args.environments:
+        for num_envs in args.num_envs:
+            print(f"jax {environment_name} n={num_envs}", flush=True)
+            rows.extend(benchmark_jax_point(args, environment_name, num_envs))
+    return rows
+
+
+def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "environment",
+        "backend",
+        "device",
+        "num_envs",
+        "sample",
+        "block_steps",
+        "repeated_blocks",
+        "elapsed_seconds",
+        "steps_per_second",
+        "status",
+        "note",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def source_modules(source_root: Path) -> dict[str, ModuleType]:
     base = source_root / "fastsverl" / "fastsverl" / "envs"
     return {
@@ -123,15 +156,6 @@ def source_modules(source_root: Path) -> dict[str, ModuleType]:
         "hypercube": load_module("bench_fastsverl_hypercube", base / "hypercube.py"),
         "mastermind": load_module("bench_fastsverl_mastermind", base / "mastermind.py"),
     }
-
-
-def load_module(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def hypercube_6x5_safe_count(args: Args, source_root: Path) -> tuple[int, str]:
@@ -171,27 +195,6 @@ print(json.dumps({{'bytes': max(after-before, 1), 'seconds': elapsed}}))
         f"{measurement['seconds']:.3f}s construction; safe cap {safe_power}"
     )
     return safe_power, note
-
-
-def infeasible_row(
-    args: Args,
-    environment_name: str,
-    num_envs: int,
-    note: str,
-) -> dict[str, object]:
-    return {
-        "environment": environment_name,
-        "backend": "gymnasium_cpu",
-        "device": "cpu",
-        "num_envs": num_envs,
-        "sample": -1,
-        "block_steps": args.block_steps,
-        "repeated_blocks": 0,
-        "elapsed_seconds": "",
-        "steps_per_second": "",
-        "status": "memory_infeasible",
-        "note": note,
-    }
 
 
 def benchmark_original_point(
@@ -235,46 +238,6 @@ def benchmark_original_point(
         )
     envs.close()
     gc.collect()
-    return rows
-
-
-def original_thunk(
-    environment_name: str,
-    modules: ArgsModules,
-    seed: int,
-) -> Callable[[], _GymEnv]:
-    import gymnasium as gym
-
-    def thunk() -> _GymEnv:
-        if environment_name == "gridworld":
-            env = modules["gridworld"].GWB(seed=seed)
-        elif environment_name == "hypercube_2x2":
-            env = modules["hypercube"].Hypercube(n=2, d=2, p=0, seed=seed)
-        elif environment_name == "hypercube_6x5":
-            env = modules["hypercube"].Hypercube(n=6, d=5, p=0, seed=seed)
-        elif environment_name == "mastermind_222":
-            env = modules["mastermind"].Mastermind(
-                code_size=2,
-                num_guesses=2,
-                num_pegs=2,
-                seed=seed,
-            )
-        else:
-            raise ValueError(environment_name)
-        return cast(_GymEnv, gym.wrappers.RecordEpisodeStatistics(env))
-
-    return thunk
-
-
-def benchmark_jax(args: Args) -> list[dict[str, object]]:
-    if unavailable_gpu_run_requested():
-        return skipped_gpu_rows(args)
-
-    rows: list[dict[str, object]] = []
-    for environment_name in args.environments:
-        for num_envs in args.num_envs:
-            print(f"jax {environment_name} n={num_envs}", flush=True)
-            rows.extend(benchmark_jax_point(args, environment_name, num_envs))
     return rows
 
 
@@ -387,6 +350,64 @@ def benchmark_jax_point(
     return rows
 
 
+def load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def infeasible_row(
+    args: Args,
+    environment_name: str,
+    num_envs: int,
+    note: str,
+) -> dict[str, object]:
+    return {
+        "environment": environment_name,
+        "backend": "gymnasium_cpu",
+        "device": "cpu",
+        "num_envs": num_envs,
+        "sample": -1,
+        "block_steps": args.block_steps,
+        "repeated_blocks": 0,
+        "elapsed_seconds": "",
+        "steps_per_second": "",
+        "status": "memory_infeasible",
+        "note": note,
+    }
+
+
+def original_thunk(
+    environment_name: str,
+    modules: ArgsModules,
+    seed: int,
+) -> Callable[[], _GymEnv]:
+    import gymnasium as gym
+
+    def thunk() -> _GymEnv:
+        if environment_name == "gridworld":
+            env = modules["gridworld"].GWB(seed=seed)
+        elif environment_name == "hypercube_2x2":
+            env = modules["hypercube"].Hypercube(n=2, d=2, p=0, seed=seed)
+        elif environment_name == "hypercube_6x5":
+            env = modules["hypercube"].Hypercube(n=6, d=5, p=0, seed=seed)
+        elif environment_name == "mastermind_222":
+            env = modules["mastermind"].Mastermind(
+                code_size=2,
+                num_guesses=2,
+                num_pegs=2,
+                seed=seed,
+            )
+        else:
+            raise ValueError(environment_name)
+        return cast(_GymEnv, gym.wrappers.RecordEpisodeStatistics(env))
+
+    return thunk
+
+
 def jax_environment(environment_name: str) -> _JaxEnv:
     from jax_shapley import EpisodeStatisticsWrapper
     from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
@@ -461,27 +482,6 @@ def result_row(
         "status": "ok",
         "note": "",
     }
-
-
-def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = [
-        "environment",
-        "backend",
-        "device",
-        "num_envs",
-        "sample",
-        "block_steps",
-        "repeated_blocks",
-        "elapsed_seconds",
-        "steps_per_second",
-        "status",
-        "note",
-    ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 if __name__ == "__main__":
