@@ -23,6 +23,12 @@ def test_complete_run_abstract_compile(mode: CheckpointMode, episodes: int) -> N
 
 
 @pytest.mark.compile
+@pytest.mark.parametrize("implementation", ["rbg", "unsafe_rbg"])
+def test_complete_run_prng_compile(implementation: str) -> None:
+    _compile("run", 2, implementation=implementation)
+
+
+@pytest.mark.compile
 @pytest.mark.gpu
 def test_complete_run_gpu_compile() -> None:
     try:
@@ -36,7 +42,7 @@ def test_complete_run_gpu_compile() -> None:
             _compile(mode, 2)
 
 
-def _compile(mode: CheckpointMode, episodes: int) -> None:
+def _compile(mode: CheckpointMode, episodes: int, *, implementation: str = "threefry2x32") -> None:
     sink = RecordingSink()
     config = DQNTrainConfig(
         num_envs=2,
@@ -49,7 +55,7 @@ def _compile(mode: CheckpointMode, episodes: int) -> None:
     )
     env = EpisodeStatisticsWrapper(Mastermind222())
     network = dqn_config(8, 4, hidden_widths=(4,))
-    key_spec = jax.ShapeDtypeStruct((), jax.random.key(1).dtype)
+    key_spec = jax.ShapeDtypeStruct((), jax.random.key(1, impl=implementation).dtype)
     fresh = nnx.jit(
         partial(
             whole_run,

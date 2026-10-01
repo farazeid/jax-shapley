@@ -299,7 +299,17 @@ def make_snapshot[State](
     )
     replay = state.replay if mode in ("agent-replay", "run") else None
     epsilon = epsilon_at(config, jnp.maximum(state.vector_step - 1, 0) * config.num_envs)
-    return Snapshot(agent, replay, optimizer, runtime, state.vector_step, phase, evaluation_episodes, epsilon)
+    return Snapshot(
+        agent,
+        replay,
+        optimizer,
+        runtime,
+        state.vector_step,
+        phase,
+        evaluation_episodes,
+        epsilon,
+        str(jax.random.key_impl(state.key)),
+    )
 
 
 def initialize_models(

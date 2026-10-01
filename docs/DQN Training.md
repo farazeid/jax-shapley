@@ -215,6 +215,12 @@ continuation on the same backend. Cross-device loading is supported; CPU/GPU
 floating-point trajectories need not be bitwise identical. Use the saved lockfile
 and compatible checkpoint schema when loading state.
 
+Snapshots record the key's PRNG implementation (`threefry2x32`, `rbg` or
+`unsafe_rbg`) alongside its raw data. Restoration uses that saved implementation,
+even when the destination's current JAX default differs. Existing Threefry
+checkpoints remain compatible; older RBG snapshots incorrectly labelled as
+Threefry are rejected rather than silently reinterpreted.
+
 ```bash
 uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --validate-only
 uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --compile-only

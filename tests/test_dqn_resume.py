@@ -8,6 +8,7 @@ from pathlib import Path
 import jax
 import numpy as np
 import pytest
+from flax import nnx
 from jax import Array
 
 from jax_shapley.algorithms.dqn import initialize_run
@@ -164,6 +165,56 @@ def test_required_checkpoint_failure_prevents_success(tmp_path: Path, monkeypatc
     folder = next(tmp_path.iterdir())
     assert not (folder / "summary.json").exists()
     assert load_agent(folder, load_settings(folder / "config.json").network, load_replay=False).vector_step >= 1
+
+
+@pytest.mark.parametrize("implementation", ["rbg", "unsafe_rbg"])
+def test_resume_uses_saved_prng_after_default_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, implementation: str
+) -> None:
+    original = ArtifactSink.checkpoint
+
+    def interrupt(self: ArtifactSink[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
+        token = original(self, snapshot)
+        assert snapshot.key_implementation == implementation
+        assert self.store is not None
+        self.store.wait()
+        if int(snapshot.vector_step) == 2 and int(snapshot.phase) == 0:
+            raise OSError("injected PRNG interruption")
+        return token
+
+    with jax.default_prng_impl(implementation):
+        baseline = main([*_args(tmp_path / "baseline"), "--train.total-timesteps", "8"])
+        assert baseline is not None
+        with monkeypatch.context() as patch:
+            patch.setattr(ArtifactSink, "checkpoint", interrupt)
+            with pytest.raises(Exception, match="PRNG interruption"):
+                main([*_args(tmp_path / "interrupted"), "--train.total-timesteps", "8"])
+            _clear_failed_effects()
+    folder = next((tmp_path / "interrupted").iterdir())
+    with jax.default_prng_impl("threefry2x32"):
+        before = _files(folder)
+        assert main(["resume", "--run", str(folder), "--validate-only"]) is None
+        assert main(["resume", "--run", str(folder), "--compile-only"]) is None
+        assert _files(folder) == before
+        resumed = main(["resume", "--run", str(folder)])
+    assert resumed is not None and resumed.environment_steps == baseline.environment_steps
+    assert _rows(folder) == _rows(Path(baseline.folder))
+    config = load_settings(folder / "config.json")
+    actual, expected = load_agent(folder, config.network), load_agent(Path(baseline.folder), config.network)
+    for left, right in zip(
+        jax.tree.leaves(nnx.state((actual.model, actual.target))),
+        jax.tree.leaves(nnx.state((expected.model, expected.target))),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(left, right)
+    assert actual.replay is not None and expected.replay is not None
+    for left, right in zip(jax.tree.leaves(actual.replay), jax.tree.leaves(expected.replay), strict=True):
+        np.testing.assert_array_equal(left, right)
+    store = CheckpointStore(folder, read_only=True)
+    try:
+        assert store.metadata().key_implementation == implementation
+    finally:
+        store.close()
 
 
 def _args(output: Path) -> list[str]:

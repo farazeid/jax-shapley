@@ -11,12 +11,13 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import epsilon_at, initialize_run, run_chunk
-from jax_shapley.artifacts import describe
+from jax_shapley.algorithms.dqn import epsilon_at, initialize_run, make_snapshot, run_chunk
+from jax_shapley.artifacts import describe, initialize_metrics
 from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, load_agent, restore_run
 from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
 from jax_shapley.envs import Gridworld
 from jax_shapley.execution import Snapshot
+from jax_shapley.logging import ArtifactSink
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
@@ -92,10 +93,79 @@ def test_metadata_validation_and_empty_store(tmp_path: Path) -> None:
         CheckpointMetadata("{}", 0, 0, 0, schema=2).validate()
     with pytest.raises(ValueError, match="timing"):
         CheckpointMetadata("{}", 0, 0, 0, elapsed_seconds=float("nan")).validate()
+    with pytest.raises(ValueError, match="PRNG"):
+        CheckpointMetadata("{}", 0, 0, 0, key_implementation="unknown").validate()
     store = CheckpointStore(tmp_path)
     try:
         with pytest.raises(ValueError, match="committed"):
             store.metadata()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("implementation", ["threefry2x32", "rbg", "unsafe_rbg"])
+def test_restoration_preserves_prng_across_different_defaults(tmp_path: Path, implementation: str) -> None:
+    config = DQNRunConfig(
+        GridworldConfig(),
+        train=DQNTrainConfig(total_timesteps=8, buffer_size=3, batch_size=2, learning_starts=0, train_frequency=1),
+        hidden_widths=(4,),
+    )
+    env = EpisodeStatisticsWrapper(config.env.make())
+    state = initialize_run(
+        env, env.default_params, config.network, config.train, jax.random.key(1, impl=implementation)
+    )
+    advance = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config.train, chunk_steps=2))
+    state, _ = advance(state, jnp.asarray(2, jnp.int32))
+    zero = jnp.asarray(0, jnp.int32)
+    snapshot = make_snapshot(state, zero, zero, config.train, "run")
+    assert snapshot.key_implementation == implementation
+    initialize_metrics(tmp_path / "metrics.csv")
+    sink = ArtifactSink(tmp_path, config)
+    try:
+        sink.checkpoint(snapshot)
+    finally:
+        sink.close()
+    other_implementation = "rbg" if implementation == "threefry2x32" else "threefry2x32"
+    with jax.default_prng_impl(other_implementation):
+        template = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(99))
+        assert str(jax.random.key_impl(template.key)) == other_implementation
+        store = CheckpointStore(tmp_path, read_only=True)
+        try:
+            restored, metadata = restore_run(store, template, config)
+            assert metadata.key_implementation == implementation
+        finally:
+            store.close()
+        assert str(jax.random.key_impl(restored.key)) == implementation
+        np.testing.assert_array_equal(jax.random.key_data(restored.key), jax.random.key_data(state.key))
+        expected, _ = advance(state, jnp.asarray(2, jnp.int32))
+        actual, _ = advance(restored, jnp.asarray(2, jnp.int32))
+    for left, right in zip(
+        jax.tree.leaves(nnx.state((expected.model, expected.target, expected.optimizer))),
+        jax.tree.leaves(nnx.state((actual.model, actual.target, actual.optimizer))),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(left, right)
+    for left, right in zip(
+        jax.tree.leaves((expected.replay, expected.observations, expected.env_state)),
+        jax.tree.leaves((actual.replay, actual.observations, actual.env_state)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(left, right)
+    np.testing.assert_array_equal(jax.random.key_data(expected.key), jax.random.key_data(actual.key))
+
+
+def test_save_rejects_inconsistent_prng_metadata(tmp_path: Path) -> None:
+    config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(total_timesteps=8, buffer_size=3), hidden_widths=(4,))
+    env = EpisodeStatisticsWrapper(config.env.make())
+    state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(1, impl="rbg"))
+    zero = jnp.asarray(0, jnp.int32)
+    store = CheckpointStore(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="PRNG metadata"):
+            store.save(
+                make_snapshot(state, zero, zero, config.train, "run"), CheckpointMetadata(describe(config), 0, 0, 0)
+            )
+        assert store.sequence is None
     finally:
         store.close()
 
