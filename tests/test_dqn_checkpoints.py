@@ -1,0 +1,99 @@
+"""Orbax commits, typed partial loading and complete numerical continuation."""
+
+from functools import partial
+from pathlib import Path
+from typing import cast
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from flax import nnx
+from jax import Array
+
+from jax_shapley.algorithms.dqn import initialize_run, run_chunk
+from jax_shapley.artifacts import describe
+from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, load_agent, restore_run
+from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
+from jax_shapley.envs import Gridworld
+from jax_shapley.execution import Snapshot
+from jax_shapley.wrappers import EpisodeStatisticsWrapper
+
+
+def test_full_restoration_and_latest_retention(tmp_path: Path) -> None:
+    config = DQNRunConfig(
+        GridworldConfig(),
+        train=DQNTrainConfig(total_timesteps=8, buffer_size=3, batch_size=2, learning_starts=0, train_frequency=1),
+        hidden_widths=(4,),
+    )
+    env = EpisodeStatisticsWrapper(Gridworld())
+    state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(0))
+    state, _ = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config.train, chunk_steps=4))(
+        state, jnp.asarray(4, jnp.int32)
+    )
+    def leaves(tree: object) -> tuple[Array, ...]:
+        return tuple(cast(list[Array], jax.tree.leaves(tree)))
+
+    snapshot = Snapshot(
+        leaves(nnx.state((state.model, state.target))),
+        state.replay,
+        leaves(nnx.state(state.optimizer)),
+        leaves((
+            state.observations,
+            state.env_state,
+            state.vector_step,
+            state.updates,
+            state.target_updates,
+            jax.random.key_data(state.key),
+        )),
+        state.vector_step,
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(0.5, jnp.float32),
+    )
+    store = CheckpointStore(tmp_path)
+    store.save(snapshot, CheckpointMetadata(describe(config), 4, 0, 0))
+    store.wait()
+    store.save(snapshot, CheckpointMetadata(describe(config), 4, 0, 0))
+    store.wait()
+    assert store.manager.all_steps() == [1]
+    store.close()
+    store = CheckpointStore(tmp_path, read_only=True)
+    try:
+        template = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(77))
+        restored, metadata = restore_run(store, template, config)
+        assert metadata.vector_step == 4
+        for left, right in zip(
+            leaves(nnx.state((state.model, state.target, state.optimizer))),
+            leaves(nnx.state((restored.model, restored.target, restored.optimizer))),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(left, right)
+        for left, right in zip(leaves(state.replay), leaves(restored.replay), strict=True):
+            np.testing.assert_array_equal(left, right)
+        np.testing.assert_array_equal(jax.random.key_data(state.key), jax.random.key_data(restored.key))
+        assert all(value.device == jax.devices()[0] for value in leaves(restored.replay))
+    finally:
+        store.close()
+    agent = load_agent(tmp_path, config.network)
+    assert agent.replay is not None
+    assert agent.vector_step == 4
+    assert load_agent(tmp_path, config.network, load_replay=False).replay is None
+    with pytest.raises(ValueError, match="architecture"):
+        load_agent(tmp_path, DQNRunConfig(GridworldConfig()).network)
+    # A staged/incomplete directory is not a committed checkpoint.
+    (tmp_path / "checkpoints" / "999.orbax-checkpoint-tmp").mkdir()
+    assert load_agent(tmp_path, config.network, load_replay=False).vector_step == 4
+
+
+def test_metadata_validation_and_empty_store(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="schema"):
+        CheckpointMetadata("{}", 0, 0, 0, schema=2).validate()
+    with pytest.raises(ValueError, match="timing"):
+        CheckpointMetadata("{}", 0, 0, 0, elapsed_seconds=float("nan")).validate()
+    store = CheckpointStore(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="committed"):
+            store.metadata()
+    finally:
+        store.close()
