@@ -9,6 +9,7 @@ for argument in "$@"; do
 done
 dqn_gates "$@"
 selected_seed=$(dqn_option --seed "$@")
+--checkpoint-mode run \
 selected_side=$(dqn_option --env.side-length "$@")
 selected_dimension=$(dqn_option --env.dimension "$@")
 seeds=({1..20})

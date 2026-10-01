@@ -49,7 +49,12 @@ class ArtifactSink[Config: EnvironmentConfig]:
             self.lock.close()
             raise
         self.started = clock()
+        self.training_seconds = 0.0 if metadata is None else metadata.training_seconds
         self.prior_elapsed = 0.0 if metadata is None else metadata.elapsed_seconds
+
+    def training_complete(self) -> CallbackToken:
+        self.training_seconds = self.elapsed()
+        return np.asarray(0, np.int32)
 
     def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken:
         active = int(host_array(count))
@@ -83,6 +88,7 @@ class ArtifactSink[Config: EnvironmentConfig]:
                 boundary,
                 prefix_digest(path, boundary),
                 self.elapsed(),
+                training_seconds=self.training_seconds,
             )
             self.store.save(snapshot, metadata)
             # The pre-evaluation snapshot must commit before evaluation can emit rows.
