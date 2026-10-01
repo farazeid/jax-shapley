@@ -1,0 +1,229 @@
+{
+  "reference_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": "f9f47faa0bb04faa08eee6dbfff2006d617656c4b12e46b74ea0d2cf16392e77",
+  "torch_version": "2.6.0",
+  "num_envs": 2,
+  "vector_steps": 54,
+  "records": [
+    {
+      "name": "agent/episodic_return",
+      "value": 0.0,
+      "step": 0
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 1.0,
+      "step": 0
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 0
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 1.0,
+      "step": 0
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 2.0,
+      "step": 0
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 0
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 7.0,
+      "step": 14
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 8.0,
+      "step": 14
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 14
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 12.0,
+      "step": 22
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 13.0,
+      "step": 22
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 22
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 14.0,
+      "step": 28
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 15.0,
+      "step": 28
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 28
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 21.0,
+      "step": 42
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 22.0,
+      "step": 42
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 42
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 23.0,
+      "step": 44
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 24.0,
+      "step": 44
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 44
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 28.0,
+      "step": 56
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 29.0,
+      "step": 56
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 56
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 34.0,
+      "step": 66
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 35.0,
+      "step": 66
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 66
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 35.0,
+      "step": 70
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 36.0,
+      "step": 70
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 70
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 42.0,
+      "step": 84
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 43.0,
+      "step": 84
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 84
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 45.0,
+      "step": 88
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 46.0,
+      "step": 88
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 88
+    },
+    {
+      "name": "agent/episodic_return",
+      "value": 49.0,
+      "step": 98
+    },
+    {
+      "name": "agent/episodic_length",
+      "value": 50.0,
+      "step": 98
+    },
+    {
+      "name": "agent/epsilon",
+      "value": 0.5,
+      "step": 98
+    },
+    {
+      "name": "agent/DQN_loss",
+      "value": 100.25,
+      "step": 100
+    },
+    {
+      "name": "agent/SPS",
+      "value": 50.0,
+      "step": 100
+    },
+    {
+      "name": "agent/eval_episodic_return",
+      "value": 4.0,
+      "step": 0
+    },
+    {
+      "name": "agent/eval_episodic_return",
+      "value": 5.0,
+      "step": 1
+    },
+    {
+      "name": "agent/eval_episodic_return",
+      "value": 6.0,
+      "step": 2
+    }
+  ]
+}
