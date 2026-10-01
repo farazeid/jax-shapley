@@ -47,16 +47,6 @@ class _RenderableEnvironment(Protocol):
     ) -> np.ndarray: ...
 
 
-@pytest.fixture(
-    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
-    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
-)
-def environment_and_state(request: pytest.FixtureRequest) -> tuple[_RenderableEnvironment, object]:
-    environment = cast(_RenderableEnvironment, request.param)
-    _, state = environment.reset(jax.random.key(4), environment.default_params)
-    return environment, state
-
-
 def test_rgb_array_contract_and_determinism(environment_and_state: tuple[_RenderableEnvironment, object]) -> None:
     environment, state = environment_and_state
     before = jax.tree.map(lambda value: np.asarray(value).copy(), state)
@@ -256,6 +246,16 @@ def test_render_state_originating_on_gpu() -> None:
     state = jax.device_put(state, device)
     frame = environment.render(state, render_config=TEST_CONFIG)
     assert frame.shape == (480, 640, 3)
+
+
+@pytest.fixture(
+    params=[Gridworld(), Hypercube(2, 2), Hypercube(6, 5), Mastermind222()],
+    ids=["gridworld", "hypercube-2x2", "hypercube-6x5", "mastermind-222"],
+)
+def environment_and_state(request: pytest.FixtureRequest) -> tuple[_RenderableEnvironment, object]:
+    environment = cast(_RenderableEnvironment, request.param)
+    _, state = environment.reset(jax.random.key(4), environment.default_params)
+    return environment, state
 
 
 def mastermind_state(

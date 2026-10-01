@@ -26,6 +26,18 @@ import tyro
 ArrayLike = npt.ArrayLike
 
 
+@dataclass(frozen=True)
+class Args:
+    """Configuration for fixture capture from a pinned local checkout."""
+
+    source_root: Path
+    output: Path = Path("tests/fixtures/fastsverl_transitions.npz")
+    expected_commit: str = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
+    gridworld_source: Path = Path("fastsverl/fastsverl/envs/gwb.py")
+    hypercube_source: Path = Path("fastsverl/fastsverl/envs/hypercube.py")
+    mastermind_source: Path = Path("fastsverl/fastsverl/envs/mastermind.py")
+
+
 class _ActionSpace(Protocol):
     n: int
 
@@ -82,18 +94,6 @@ class _MastermindInstance(Protocol):
         self,
         action: int,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
-
-
-@dataclass(frozen=True)
-class Args:
-    """Configuration for fixture capture from a pinned local checkout."""
-
-    source_root: Path
-    output: Path = Path("tests/fixtures/fastsverl_transitions.npz")
-    expected_commit: str = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
-    gridworld_source: Path = Path("fastsverl/fastsverl/envs/gwb.py")
-    hypercube_source: Path = Path("fastsverl/fastsverl/envs/hypercube.py")
-    mastermind_source: Path = Path("fastsverl/fastsverl/envs/mastermind.py")
 
 
 def main() -> None:
@@ -155,6 +155,13 @@ def transition_counts(arrays: dict[str, ArrayLike]) -> dict[str, int]:
     return counts
 
 
+def git_commit(root: Path) -> str:
+    return subprocess.check_output(  # ruff: ignore[subprocess-without-shell-equals-true]
+        ["git", "-C", str(root), "rev-parse", "HEAD"],  # ruff: ignore[start-process-with-partial-path]
+        text=True,
+    ).strip()
+
+
 def load_module(name: str, path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -162,13 +169,6 @@ def load_module(name: str, path: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def git_commit(root: Path) -> str:
-    return subprocess.check_output(  # ruff: ignore[subprocess-without-shell-equals-true]
-        ["git", "-C", str(root), "rev-parse", "HEAD"],  # ruff: ignore[start-process-with-partial-path]
-        text=True,
-    ).strip()
 
 
 def sha256(path: Path) -> str:

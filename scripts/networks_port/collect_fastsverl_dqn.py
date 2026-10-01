@@ -100,17 +100,44 @@ class Builder(Protocol):
     def SimpleNN(self, name: str, output_shape: tuple[int, ...], **architecture: object) -> Model: ...  # ruff: ignore[invalid-function-name] -- source constructor.
 
 
-def _array(tensor: Tensor) -> FloatArray:
-    return tensor.detach().cpu().numpy().astype(np.float32)
-
-
-def _load(path: Path, name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source_root", type=Path)
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+    root, output = Path(args.source_root), Path(args.output)
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git is required")
+    commit = subprocess.check_output([git, "-C", str(root), "rev-parse", "HEAD"], text=True).strip()  # ruff: ignore[subprocess-without-shell-equals-true] -- read-only fixed argv.
+    if commit != REFERENCE_COMMIT:
+        raise ValueError("unexpected reference commit")
+    hashes: dict[str, str] = {}
+    for name in ("dqn.py", "models.py"):
+        relative = f"fastsverl/fastsverl/{name}"
+        committed = subprocess.check_output([git, "-C", str(root), "show", f"HEAD:{relative}"])  # ruff: ignore[subprocess-without-shell-equals-true] -- read-only fixed argv.
+        if committed != (root / relative).read_bytes():
+            raise ValueError(f"modified reference {name}")
+        hashes[name] = hashlib.sha256(committed).hexdigest()
+    arrays, version = capture(root)
+    np.savez_compressed(output, allow_pickle=False, **arrays)
+    output.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "fastsverl_commit": commit,
+                "source_sha256": hashes,
+                "fixture_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "torch_version": version,
+                "seed": 1729,
+                "gamma": 0.9,
+                "tau": 0.01,
+                "steps": 3,
+                "collector": "unchanged DQN_Super AST, CPU, controlled batches",
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def capture(root: Path) -> tuple[dict[str, FloatArray], str]:
@@ -208,44 +235,17 @@ def capture(root: Path) -> tuple[dict[str, FloatArray], str]:
     return arrays, torch.__version__
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source_root", type=Path)
-    parser.add_argument("output", type=Path)
-    args = parser.parse_args()
-    root, output = Path(args.source_root), Path(args.output)
-    git = shutil.which("git")
-    if git is None:
-        raise RuntimeError("git is required")
-    commit = subprocess.check_output([git, "-C", str(root), "rev-parse", "HEAD"], text=True).strip()  # ruff: ignore[subprocess-without-shell-equals-true] -- read-only fixed argv.
-    if commit != REFERENCE_COMMIT:
-        raise ValueError("unexpected reference commit")
-    hashes: dict[str, str] = {}
-    for name in ("dqn.py", "models.py"):
-        relative = f"fastsverl/fastsverl/{name}"
-        committed = subprocess.check_output([git, "-C", str(root), "show", f"HEAD:{relative}"])  # ruff: ignore[subprocess-without-shell-equals-true] -- read-only fixed argv.
-        if committed != (root / relative).read_bytes():
-            raise ValueError(f"modified reference {name}")
-        hashes[name] = hashlib.sha256(committed).hexdigest()
-    arrays, version = capture(root)
-    np.savez_compressed(output, allow_pickle=False, **arrays)
-    output.with_suffix(".json").write_text(
-        json.dumps(
-            {
-                "fastsverl_commit": commit,
-                "source_sha256": hashes,
-                "fixture_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-                "torch_version": version,
-                "seed": 1729,
-                "gamma": 0.9,
-                "tau": 0.01,
-                "steps": 3,
-                "collector": "unchanged DQN_Super AST, CPU, controlled batches",
-            },
-            indent=2,
-        )
-        + "\n"
-    )
+def _load(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _array(tensor: Tensor) -> FloatArray:
+    return tensor.detach().cpu().numpy().astype(np.float32)
 
 
 if __name__ == "__main__":

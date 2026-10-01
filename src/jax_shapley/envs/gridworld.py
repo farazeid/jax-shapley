@@ -88,6 +88,51 @@ class Gridworld(TypedEnvironment[GridworldState, GridworldParams]):
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    def render(
+        self,
+        state: GridworldState,
+        params: GridworldParams | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render an unbatched state as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.gridworld import render_gridworld
+
+        return render_gridworld(
+            state,
+            starts=self._starts,
+            blocked=self._blocked,
+            config=render_config,
+        )
+
+    @property
+    def name(self) -> str:
+        return "GWB-v0"
+
+    @property
+    def num_actions(self) -> int:
+        return 4
+
+    def action_space(self, params: GridworldParams | None = None) -> spaces.Discrete:
+        del params
+        return spaces.Discrete(4)
+
+    def observation_space(self, params: GridworldParams) -> spaces.Box:
+        del params
+        return spaces.Box(
+            low=jnp.asarray([0, 0], dtype=jnp.int32),
+            high=jnp.asarray([1, 3], dtype=jnp.int32),
+            shape=(2,),
+            dtype=jnp.int32,
+        )
+
+    def state_space(self, params: GridworldParams) -> spaces.Dict:
+        return spaces.Dict({
+            "position": self.observation_space(params),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode),
+        })
+
     @overload
     def get_obs(self, state: GridworldState) -> Observation: ...
 
@@ -115,48 +160,3 @@ class Gridworld(TypedEnvironment[GridworldState, GridworldParams]):
     def is_terminal(self, state: GridworldState, params: GridworldParams) -> Flag:
         del params
         return state.terminated
-
-    @property
-    def name(self) -> str:
-        return "GWB-v0"
-
-    @property
-    def num_actions(self) -> int:
-        return 4
-
-    def action_space(self, params: GridworldParams | None = None) -> spaces.Discrete:
-        del params
-        return spaces.Discrete(4)
-
-    def observation_space(self, params: GridworldParams) -> spaces.Box:
-        del params
-        return spaces.Box(
-            low=jnp.asarray([0, 0], dtype=jnp.int32),
-            high=jnp.asarray([1, 3], dtype=jnp.int32),
-            shape=(2,),
-            dtype=jnp.int32,
-        )
-
-    def render(
-        self,
-        state: GridworldState,
-        params: GridworldParams | None = None,
-        render_config: "RenderConfig | None" = None,
-    ) -> "np.ndarray":
-        """Render an unbatched state as a host-side RGB array."""
-        del params
-        from jax_shapley.envs.render.gridworld import render_gridworld
-
-        return render_gridworld(
-            state,
-            starts=self._starts,
-            blocked=self._blocked,
-            config=render_config,
-        )
-
-    def state_space(self, params: GridworldParams) -> spaces.Dict:
-        return spaces.Dict({
-            "position": self.observation_space(params),
-            "terminated": spaces.Discrete(2),
-            "time": spaces.Discrete(params.max_steps_in_episode),
-        })

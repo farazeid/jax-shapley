@@ -76,6 +76,58 @@ def assert_zero_mismatches(results: dict[str, dict[str, int]]) -> None:
     assert not failures, failures
 
 
+def parity_rows(
+    backend: str,
+    results: dict[str, dict[str, int]],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = [
+        {
+            "backend": backend,
+            "environment": environment,
+            **counts,
+            "mismatch_proportion": counts["mismatched"] / counts["tested"],
+        }
+        for environment, counts in results.items()
+    ]
+    count_fields = (
+        "tested",
+        "mismatched",
+        "observation",
+        "state",
+        "reward",
+        "terminated",
+        "truncated",
+    )
+    aggregate = {key: sum(row[key] for row in results.values()) for key in count_fields}
+    rows.append({
+        "backend": backend,
+        "environment": "aggregate",
+        **aggregate,
+        "mismatch_proportion": aggregate["mismatched"] / aggregate["tested"],
+    })
+    return rows
+
+
+def write_parity_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "backend",
+        "environment",
+        "tested",
+        "mismatched",
+        "mismatch_proportion",
+        "observation",
+        "state",
+        "reward",
+        "terminated",
+        "truncated",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def transition_parity_counts(fixture_path: Path) -> dict[str, dict[str, int]]:
     """Return component-level mismatch counts for captured reference transitions."""
     fixture = np.load(fixture_path)
@@ -203,55 +255,3 @@ def _difference_mask(actual: np.ndarray, expected: np.ndarray) -> np.ndarray:
         return actual != expected
     axes = tuple(range(1, actual.ndim))
     return np.any(actual != expected, axis=axes)
-
-
-def parity_rows(
-    backend: str,
-    results: dict[str, dict[str, int]],
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = [
-        {
-            "backend": backend,
-            "environment": environment,
-            **counts,
-            "mismatch_proportion": counts["mismatched"] / counts["tested"],
-        }
-        for environment, counts in results.items()
-    ]
-    count_fields = (
-        "tested",
-        "mismatched",
-        "observation",
-        "state",
-        "reward",
-        "terminated",
-        "truncated",
-    )
-    aggregate = {key: sum(row[key] for row in results.values()) for key in count_fields}
-    rows.append({
-        "backend": backend,
-        "environment": "aggregate",
-        **aggregate,
-        "mismatch_proportion": aggregate["mismatched"] / aggregate["tested"],
-    })
-    return rows
-
-
-def write_parity_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = [
-        "backend",
-        "environment",
-        "tested",
-        "mismatched",
-        "mismatch_proportion",
-        "observation",
-        "state",
-        "reward",
-        "terminated",
-        "truncated",
-    ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)

@@ -158,42 +158,6 @@ def resolve_config(config: RenderConfig | None) -> RenderConfig:
     return config
 
 
-def require_pillow() -> tuple[ImageModule, ImageDrawModule, ImageFontModule]:
-    """Import Pillow lazily and provide an actionable missing-extra error."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ModuleNotFoundError as error:
-        if error.name == "PIL" or (error.name and error.name.startswith("PIL.")):
-            raise ModuleNotFoundError(RENDER_DEPENDENCY_MESSAGE) from error
-        raise
-
-    return cast(ImageModule, Image), cast(ImageDrawModule, ImageDraw), cast(ImageFontModule, ImageFont)
-
-
-def host_array(value: object, name: str, *, ndim: int) -> np.ndarray:
-    """Cross the JAX host boundary and reject tracers and batched state fields."""
-    if isinstance(value, core.Tracer):
-        raise RuntimeError("Rendering is host-side and cannot run inside jax.jit, jax.vmap, or lax.scan")
-    array = np.asarray(jax.device_get(value))
-    if array.ndim != ndim:
-        raise ValueError(
-            f"render() accepts an unbatched state; {name} must have {ndim} dimensions, got shape {array.shape}"
-        )
-    return array
-
-
-def host_scalar(value: object, name: str) -> float:
-    """Cross the JAX host boundary for an unbatched scalar."""
-    scalar = host_array(value, name, ndim=0).item()
-    if isinstance(scalar, (bool, np.bool_)):
-        return float(bool(scalar))
-    if isinstance(scalar, (int, np.integer)):
-        return float(int(scalar))
-    if isinstance(scalar, (float, np.floating)):
-        return float(scalar)
-    raise TypeError(f"Expected scalar host value for {name}, found {type(scalar).__name__}")
-
-
 def create_canvas(config: RenderConfig) -> tuple[ImageType, ImageDrawType, ImageFontType, int]:
     """Create a supersampled Pillow canvas and its default bundled font."""
     image_module, draw_module, font_module = require_pillow()
@@ -221,17 +185,6 @@ def finish_canvas(image: ImageType, config: RenderConfig, *, transparent: bool =
     if frame.shape != expected_shape or frame.dtype != np.uint8:
         raise RuntimeError(f"renderer returned {frame.shape} {frame.dtype}; expected {expected_shape} uint8")
     return frame
-
-
-def scaled_box(box: tuple[float, float, float, float], scale: int) -> tuple[int, int, int, int]:
-    """Scale a logical pixel box to supersampled coordinates."""
-    left, top, right, bottom = box
-    return (
-        round(left * scale),
-        round(top * scale),
-        round(right * scale),
-        round(bottom * scale),
-    )
 
 
 def draw_text(
@@ -268,3 +221,50 @@ def cell_box(
     right = origin[0] + (column + 1) * cell_size - inset
     bottom = origin[1] + (row + 1) * cell_size - inset
     return left, top, right, bottom
+
+
+def host_scalar(value: object, name: str) -> float:
+    """Cross the JAX host boundary for an unbatched scalar."""
+    scalar = host_array(value, name, ndim=0).item()
+    if isinstance(scalar, (bool, np.bool_)):
+        return float(bool(scalar))
+    if isinstance(scalar, (int, np.integer)):
+        return float(int(scalar))
+    if isinstance(scalar, (float, np.floating)):
+        return float(scalar)
+    raise TypeError(f"Expected scalar host value for {name}, found {type(scalar).__name__}")
+
+
+def require_pillow() -> tuple[ImageModule, ImageDrawModule, ImageFontModule]:
+    """Import Pillow lazily and provide an actionable missing-extra error."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ModuleNotFoundError as error:
+        if error.name == "PIL" or (error.name and error.name.startswith("PIL.")):
+            raise ModuleNotFoundError(RENDER_DEPENDENCY_MESSAGE) from error
+        raise
+
+    return cast(ImageModule, Image), cast(ImageDrawModule, ImageDraw), cast(ImageFontModule, ImageFont)
+
+
+def host_array(value: object, name: str, *, ndim: int) -> np.ndarray:
+    """Cross the JAX host boundary and reject tracers and batched state fields."""
+    if isinstance(value, core.Tracer):
+        raise RuntimeError("Rendering is host-side and cannot run inside jax.jit, jax.vmap, or lax.scan")
+    array = np.asarray(jax.device_get(value))
+    if array.ndim != ndim:
+        raise ValueError(
+            f"render() accepts an unbatched state; {name} must have {ndim} dimensions, got shape {array.shape}"
+        )
+    return array
+
+
+def scaled_box(box: tuple[float, float, float, float], scale: int) -> tuple[int, int, int, int]:
+    """Scale a logical pixel box to supersampled coordinates."""
+    left, top, right, bottom = box
+    return (
+        round(left * scale),
+        round(top * scale),
+        round(right * scale),
+        round(bottom * scale),
+    )

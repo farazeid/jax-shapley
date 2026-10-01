@@ -33,10 +33,6 @@ class _AgentGradient(Protocol):
     mlp: _MLPGradient
 
 
-def _probe_loss(model: AgentNetwork, observations: Array, probe: Array) -> Array:
-    return jnp.sum(model(observations)[0] * probe)
-
-
 def test_fixture_provenance() -> None:
     metadata = json.loads(FIXTURE.with_suffix(".json").read_text())
     assert metadata["fastsverl_commit"] == "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
@@ -138,3 +134,7 @@ def test_invalid_contracts_fail_before_execution() -> None:
     for dtype in (jnp.bool_, jnp.float16, jnp.bfloat16):
         with pytest.raises(TypeError, match="int32 or float32"):
             nnx.jit(lambda model, inputs: model(inputs)).trace(model, jax.ShapeDtypeStruct((2,), dtype))
+
+
+def _probe_loss(model: AgentNetwork, observations: Array, probe: Array) -> Array:
+    return jnp.sum(model(observations)[0] * probe)

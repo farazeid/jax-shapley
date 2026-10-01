@@ -10,14 +10,6 @@ import pytest
 from jax_shapley.replay import TransitionBatch, append, empty_replay, gather, sample
 
 
-def batch(start: int, count: int, features: int = 2) -> TransitionBatch:
-    ids = jnp.arange(start, start + count, dtype=jnp.int32)
-    observations = jnp.broadcast_to(ids[:, None], (count, features))
-    return TransitionBatch(
-        observations, ids, ids.astype(jnp.float32), observations + 1, ids % 2 == 0, -ids.astype(jnp.float32)
-    )
-
-
 def test_partial_wraparound_and_oversized_insertion() -> None:
     replay = append(empty_replay(5, 2), batch(0, 3))
     assert (int(replay.pointer), int(replay.size)) == (3, 3)
@@ -60,3 +52,11 @@ def test_storage_contract_errors_and_dtypes() -> None:
         append(replay, replace(batch(0, 2), rewards=jnp.zeros((2, 1), jnp.float32)))
     with pytest.raises(TypeError):
         gather(replay, jnp.zeros(1, jnp.float32))
+
+
+def batch(start: int, count: int, features: int = 2) -> TransitionBatch:
+    ids = jnp.arange(start, start + count, dtype=jnp.int32)
+    observations = jnp.broadcast_to(ids[:, None], (count, features))
+    return TransitionBatch(
+        observations, ids, ids.astype(jnp.float32), observations + 1, ids % 2 == 0, -ids.astype(jnp.float32)
+    )

@@ -41,13 +41,6 @@ class Mastermind222(TypedEnvironment[Mastermind222State, Mastermind222Params]):
     num_guesses = 2
     num_pegs = 2
 
-    @staticmethod
-    def decode_action(action: float | jax.Array) -> Position2:
-        """Decode actions exactly like FastSVERL's least-significant-first table."""
-        action = jnp.asarray(action, dtype=jnp.int32)
-        powers = jnp.asarray([1, 2], dtype=jnp.int32)
-        return ((action // powers) % 2 + 1).astype(jnp.int32)
-
     @property
     def default_params(self) -> Mastermind222Params:
         return Mastermind222Params()
@@ -110,6 +103,48 @@ class Mastermind222(TypedEnvironment[Mastermind222State, Mastermind222Params]):
         }
         return self.get_obs(next_state), next_state, reward, terminated, info
 
+    def render(
+        self,
+        state: Mastermind222State,
+        params: Mastermind222Params | None = None,
+        render_config: "RenderConfig | None" = None,
+    ) -> "np.ndarray":
+        """Render the public board as a host-side RGB array."""
+        del params
+        from jax_shapley.envs.render.mastermind import render_mastermind
+
+        return render_mastermind(
+            state,
+            num_guesses=self.num_guesses,
+            code_size=self.code_size,
+            config=render_config,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Mastermind-222-v0"
+
+    @property
+    def num_actions(self) -> int:
+        return 4
+
+    def action_space(self, params: Mastermind222Params | None = None) -> spaces.Discrete:
+        del params
+        return spaces.Discrete(4)
+
+    def observation_space(self, params: Mastermind222Params) -> spaces.Box:
+        del params
+        return spaces.Box(low=-1, high=2, shape=(8,), dtype=jnp.int32)
+
+    def state_space(self, params: Mastermind222Params) -> spaces.Dict:
+        return spaces.Dict({
+            "board": spaces.Box(low=-1, high=2, shape=(2, 4), dtype=jnp.int32),
+            "goal": spaces.Box(low=1, high=2, shape=(2,), dtype=jnp.int32),
+            "guess_index": spaces.Discrete(3),
+            "terminated": spaces.Discrete(2),
+            "time": spaces.Discrete(params.max_steps_in_episode + 1),
+        })
+
     @overload
     def get_obs(self, state: Mastermind222State) -> Observation: ...
 
@@ -138,44 +173,9 @@ class Mastermind222(TypedEnvironment[Mastermind222State, Mastermind222Params]):
         del params
         return state.terminated
 
-    @property
-    def name(self) -> str:
-        return "Mastermind-222-v0"
-
-    @property
-    def num_actions(self) -> int:
-        return 4
-
-    def action_space(self, params: Mastermind222Params | None = None) -> spaces.Discrete:
-        del params
-        return spaces.Discrete(4)
-
-    def observation_space(self, params: Mastermind222Params) -> spaces.Box:
-        del params
-        return spaces.Box(low=-1, high=2, shape=(8,), dtype=jnp.int32)
-
-    def render(
-        self,
-        state: Mastermind222State,
-        params: Mastermind222Params | None = None,
-        render_config: "RenderConfig | None" = None,
-    ) -> "np.ndarray":
-        """Render the public board as a host-side RGB array."""
-        del params
-        from jax_shapley.envs.render.mastermind import render_mastermind
-
-        return render_mastermind(
-            state,
-            num_guesses=self.num_guesses,
-            code_size=self.code_size,
-            config=render_config,
-        )
-
-    def state_space(self, params: Mastermind222Params) -> spaces.Dict:
-        return spaces.Dict({
-            "board": spaces.Box(low=-1, high=2, shape=(2, 4), dtype=jnp.int32),
-            "goal": spaces.Box(low=1, high=2, shape=(2,), dtype=jnp.int32),
-            "guess_index": spaces.Discrete(3),
-            "terminated": spaces.Discrete(2),
-            "time": spaces.Discrete(params.max_steps_in_episode + 1),
-        })
+    @staticmethod
+    def decode_action(action: float | jax.Array) -> Position2:
+        """Decode actions exactly like FastSVERL's least-significant-first table."""
+        action = jnp.asarray(action, dtype=jnp.int32)
+        powers = jnp.asarray([1, 2], dtype=jnp.int32)
+        return ((action // powers) % 2 + 1).astype(jnp.int32)

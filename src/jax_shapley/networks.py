@@ -75,72 +75,6 @@ class MLPConfig:
         return self.layers[-1].features
 
 
-def dqn_config(input_features: int, num_actions: int, *, hidden_widths: tuple[int, ...] = (64, 64)) -> MLPConfig:
-    """Source Gridworld/Mastermind-222 architecture; use (128, 128) for Hypercube.
-
-    Larger Mastermind experiments also use (128, 128). Widths are explicit so a
-    caller cannot silently infer a paper configuration from observation count.
-    """
-    return MLPConfig(
-        input_features, (*tuple(LayerConfig(width, "relu") for width in hidden_widths), LayerConfig(num_actions))
-    )
-
-
-def _activate(inputs: Features, activation: Activation) -> Features:
-    if activation == "relu":
-        return jax.nn.relu(inputs)
-    if activation == "tanh":
-        return jnp.tanh(inputs)
-    if activation == "softmax":
-        return jax.nn.softmax(inputs, axis=-1)
-    return inputs
-
-
-class Linear(nnx.Module):
-    """NNX affine layer with explicit, upstream-compatible initialization."""
-
-    def __init__(self, input_features: int, config: LayerConfig, *, rngs: nnx.Rngs) -> None:
-        kernel_key, bias_key = rngs.params(), rngs.params()
-        shape = (input_features, config.features)
-        if isinstance(config.initialization, OrthogonalInit):
-            # Torch initializes (out, in); retain that orientation before transposing.
-            kernel = jax.nn.initializers.orthogonal(config.initialization.gain)(
-                kernel_key, (config.features, input_features), jnp.float32
-            ).T
-            bias = jnp.full((config.features,), config.initialization.bias, dtype=jnp.float32)
-        else:
-            bound = 1.0 / sqrt(input_features)
-            kernel = jax.random.uniform(kernel_key, shape, jnp.float32, minval=-bound, maxval=bound)
-            bias = jax.random.uniform(bias_key, (config.features,), jnp.float32, minval=-bound, maxval=bound)
-        self.kernel: nnx.Param[Array] = nnx.Param(kernel)
-        self.bias: nnx.Param[Array] = nnx.Param(bias)
-
-    def __call__(self, inputs: Features) -> Features:
-        return inputs @ self.kernel[...] + self.bias[...]
-
-
-class MLP(nnx.Module):
-    """Per-layer configurable MLP; preserves arbitrary leading batch axes."""
-
-    def __init__(self, config: MLPConfig, *, rngs: nnx.Rngs) -> None:
-        self.config = config
-        widths = (config.input_features, *(layer.features for layer in config.layers))
-        self.layers: nnx.List[Linear] = nnx.List(
-            Linear(width, layer, rngs=rngs) for width, layer in zip(widths[:-1], config.layers, strict=True)
-        )
-
-    def __call__(self, observations: ModelInput) -> Features:
-        # Shapes/dtypes are static under tracing; fail before any expensive run.
-        if observations.ndim < 1 or observations.shape[-1] != self.config.input_features:
-            raise ValueError(f"expected final observation axis of size {self.config.input_features}")
-        if observations.dtype not in (jnp.dtype("int32"), jnp.dtype("float32")):
-            raise TypeError("model observations must use int32 or float32")
-        outputs = observations.astype(jnp.float32)
-        for layer, config in zip(self.layers, self.config.layers, strict=True):
-            outputs = _activate(layer(outputs), config.activation)
-        return outputs
-
-
 class QOutput(NamedTuple):
     """DQN values for every action; no policy or value reduction is implied."""
 
@@ -193,3 +127,69 @@ class PPOCritic(nnx.Module):
 
     def __call__(self, observations: ModelInput) -> ValueOutput:
         return ValueOutput(self.mlp(observations))
+
+
+class MLP(nnx.Module):
+    """Per-layer configurable MLP; preserves arbitrary leading batch axes."""
+
+    def __init__(self, config: MLPConfig, *, rngs: nnx.Rngs) -> None:
+        self.config = config
+        widths = (config.input_features, *(layer.features for layer in config.layers))
+        self.layers: nnx.List[Linear] = nnx.List(
+            Linear(width, layer, rngs=rngs) for width, layer in zip(widths[:-1], config.layers, strict=True)
+        )
+
+    def __call__(self, observations: ModelInput) -> Features:
+        # Shapes/dtypes are static under tracing; fail before any expensive run.
+        if observations.ndim < 1 or observations.shape[-1] != self.config.input_features:
+            raise ValueError(f"expected final observation axis of size {self.config.input_features}")
+        if observations.dtype not in (jnp.dtype("int32"), jnp.dtype("float32")):
+            raise TypeError("model observations must use int32 or float32")
+        outputs = observations.astype(jnp.float32)
+        for layer, config in zip(self.layers, self.config.layers, strict=True):
+            outputs = _activate(layer(outputs), config.activation)
+        return outputs
+
+
+class Linear(nnx.Module):
+    """NNX affine layer with explicit, upstream-compatible initialization."""
+
+    def __init__(self, input_features: int, config: LayerConfig, *, rngs: nnx.Rngs) -> None:
+        kernel_key, bias_key = rngs.params(), rngs.params()
+        shape = (input_features, config.features)
+        if isinstance(config.initialization, OrthogonalInit):
+            # Torch initializes (out, in); retain that orientation before transposing.
+            kernel = jax.nn.initializers.orthogonal(config.initialization.gain)(
+                kernel_key, (config.features, input_features), jnp.float32
+            ).T
+            bias = jnp.full((config.features,), config.initialization.bias, dtype=jnp.float32)
+        else:
+            bound = 1.0 / sqrt(input_features)
+            kernel = jax.random.uniform(kernel_key, shape, jnp.float32, minval=-bound, maxval=bound)
+            bias = jax.random.uniform(bias_key, (config.features,), jnp.float32, minval=-bound, maxval=bound)
+        self.kernel: nnx.Param[Array] = nnx.Param(kernel)
+        self.bias: nnx.Param[Array] = nnx.Param(bias)
+
+    def __call__(self, inputs: Features) -> Features:
+        return inputs @ self.kernel[...] + self.bias[...]
+
+
+def dqn_config(input_features: int, num_actions: int, *, hidden_widths: tuple[int, ...] = (64, 64)) -> MLPConfig:
+    """Source Gridworld/Mastermind-222 architecture; use (128, 128) for Hypercube.
+
+    Larger Mastermind experiments also use (128, 128). Widths are explicit so a
+    caller cannot silently infer a paper configuration from observation count.
+    """
+    return MLPConfig(
+        input_features, (*tuple(LayerConfig(width, "relu") for width in hidden_widths), LayerConfig(num_actions))
+    )
+
+
+def _activate(inputs: Features, activation: Activation) -> Features:
+    if activation == "relu":
+        return jax.nn.relu(inputs)
+    if activation == "tanh":
+        return jnp.tanh(inputs)
+    if activation == "softmax":
+        return jax.nn.softmax(inputs, axis=-1)
+    return inputs

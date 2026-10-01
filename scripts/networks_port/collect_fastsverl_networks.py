@@ -65,57 +65,6 @@ class SourceModule(Protocol):
     def SimpleNN(self, name: str, output_shape: tuple[int, ...], **kwargs: object) -> SourceNetwork: ...  # ruff: ignore[invalid-function-name]
 
 
-def capture(
-    source: SourceModule,
-    torch: TorchModule,
-    name: str,
-    widths: tuple[int, ...],
-    *,
-    ppo: bool = False,
-    actor: bool = False,
-) -> dict[str, FloatArray]:
-    architecture: dict[str, object] = {}
-    for index, (input_width, output_width) in enumerate(pairwise(widths)):
-        last = index == len(widths) - 2
-        architecture["output" if last else f"linear{index}"] = ["Linear", [input_width, output_width]]
-        if ppo:
-            gain = (0.01 if actor else 1.0) if last else 2**0.5
-            architecture[f"init{index}"] = ["layer_init", [gain, 0.0]]
-        if not last:
-            architecture[f"activation{index}"] = ["Tanh" if ppo else "ReLU", []]
-        elif actor:
-            architecture["softmax"] = ["Softmax", [-1]]
-    model = source.SimpleNN("reference", (widths[-1],), **architecture)
-    inputs = torch.from_numpy(np.arange(3 * widths[0], dtype=np.float32).reshape(3, widths[0]) % 5 - 1)
-    inputs.requires_grad_(True)
-    output = model(inputs).reference
-    # A nonuniform upstream-output probe checks the full Jacobian contraction;
-    # summing softmax alone would produce trivially zero actor gradients.
-    output_array = output.detach().numpy()
-    probe_array = np.linspace(-0.7, 0.9, output_array.size, dtype=np.float32).reshape(output_array.shape)
-    probe = torch.from_numpy(probe_array)
-    loss = (output * probe).sum()
-    loss.backward()
-    if inputs.grad is None:
-        raise RuntimeError("missing reference input gradient")
-    arrays = {
-        f"{name}_inputs": inputs.detach().numpy(),
-        f"{name}_outputs": output_array,
-        f"{name}_probe": probe_array,
-        f"{name}_loss": loss.detach().numpy(),
-        f"{name}_input_grad": inputs.grad.numpy(),
-    }
-    parameters = list(model.parameters())
-    for index, (weight, bias) in enumerate(zip(parameters[::2], parameters[1::2], strict=True)):
-        if weight.grad is None or bias.grad is None:
-            raise RuntimeError("missing reference parameter gradients")
-        arrays[f"{name}_kernel{index}"] = weight.detach().numpy().T
-        arrays[f"{name}_bias{index}"] = bias.detach().numpy()
-        arrays[f"{name}_kernel_grad{index}"] = weight.grad.numpy().T
-        arrays[f"{name}_bias_grad{index}"] = bias.grad.numpy()
-    return arrays
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_root", type=Path)
@@ -168,6 +117,57 @@ def main() -> None:
         "ppo_scope": "representative configurable SimpleNN architectures; no paper-specific PPO presets",
     }
     output_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def capture(
+    source: SourceModule,
+    torch: TorchModule,
+    name: str,
+    widths: tuple[int, ...],
+    *,
+    ppo: bool = False,
+    actor: bool = False,
+) -> dict[str, FloatArray]:
+    architecture: dict[str, object] = {}
+    for index, (input_width, output_width) in enumerate(pairwise(widths)):
+        last = index == len(widths) - 2
+        architecture["output" if last else f"linear{index}"] = ["Linear", [input_width, output_width]]
+        if ppo:
+            gain = (0.01 if actor else 1.0) if last else 2**0.5
+            architecture[f"init{index}"] = ["layer_init", [gain, 0.0]]
+        if not last:
+            architecture[f"activation{index}"] = ["Tanh" if ppo else "ReLU", []]
+        elif actor:
+            architecture["softmax"] = ["Softmax", [-1]]
+    model = source.SimpleNN("reference", (widths[-1],), **architecture)
+    inputs = torch.from_numpy(np.arange(3 * widths[0], dtype=np.float32).reshape(3, widths[0]) % 5 - 1)
+    inputs.requires_grad_(True)
+    output = model(inputs).reference
+    # A nonuniform upstream-output probe checks the full Jacobian contraction;
+    # summing softmax alone would produce trivially zero actor gradients.
+    output_array = output.detach().numpy()
+    probe_array = np.linspace(-0.7, 0.9, output_array.size, dtype=np.float32).reshape(output_array.shape)
+    probe = torch.from_numpy(probe_array)
+    loss = (output * probe).sum()
+    loss.backward()
+    if inputs.grad is None:
+        raise RuntimeError("missing reference input gradient")
+    arrays = {
+        f"{name}_inputs": inputs.detach().numpy(),
+        f"{name}_outputs": output_array,
+        f"{name}_probe": probe_array,
+        f"{name}_loss": loss.detach().numpy(),
+        f"{name}_input_grad": inputs.grad.numpy(),
+    }
+    parameters = list(model.parameters())
+    for index, (weight, bias) in enumerate(zip(parameters[::2], parameters[1::2], strict=True)):
+        if weight.grad is None or bias.grad is None:
+            raise RuntimeError("missing reference parameter gradients")
+        arrays[f"{name}_kernel{index}"] = weight.detach().numpy().T
+        arrays[f"{name}_bias{index}"] = bias.detach().numpy()
+        arrays[f"{name}_kernel_grad{index}"] = weight.grad.numpy().T
+        arrays[f"{name}_bias_grad{index}"] = bias.grad.numpy()
+    return arrays
 
 
 if __name__ == "__main__":

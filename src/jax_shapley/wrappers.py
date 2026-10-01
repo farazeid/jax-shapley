@@ -16,6 +16,25 @@ from jax_shapley.envs.contracts import Counter, EpisodeInfo, EpisodeStepInfo, Fl
 __all__ = ["EnvironmentProtocol", "EpisodeInfo", "EpisodeStatisticsState", "EpisodeStatisticsWrapper"]
 
 
+@dataclass(frozen=True, slots=True)
+class EpisodeSummary:
+    """Typed episode metadata produced by the wrapper around each step."""
+
+    return_value: Reward
+    length: Counter
+    completed: Flag
+
+
+@struct.dataclass
+class EpisodeStatisticsState[EnvState]:
+    """Wrapped environment state and per-environment episode accumulators."""
+
+    env_state: EnvState
+    episode_return: Reward
+    episode_length: Counter
+    episode_count: Counter
+
+
 class EnvironmentProtocol[EnvState, EnvParams](Protocol):
     """Minimal typed interface expected by the episode-statistics wrapper."""
 
@@ -49,25 +68,6 @@ class EnvironmentProtocol[EnvState, EnvParams](Protocol):
     def num_actions(self) -> int: ...
 
 
-@dataclass(frozen=True, slots=True)
-class EpisodeSummary:
-    """Typed episode metadata produced by the wrapper around each step."""
-
-    return_value: Reward
-    length: Counter
-    completed: Flag
-
-
-@struct.dataclass
-class EpisodeStatisticsState[EnvState]:
-    """Wrapped environment state and per-environment episode accumulators."""
-
-    env_state: EnvState
-    episode_return: Reward
-    episode_length: Counter
-    episode_count: Counter
-
-
 class EpisodeStatisticsWrapper[EnvState, EnvParams]:
     """Record fixed-shape episode statistics around an auto-resetting environment."""
 
@@ -97,25 +97,6 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
     @property
     def name(self) -> str:
         return self._env.name
-
-    @staticmethod
-    def _defaulted_params(
-        env: EnvironmentProtocol[EnvState, EnvParams],
-        params: EnvParams | None,
-    ) -> EnvParams:
-        return env.default_params if params is None else params
-
-    @staticmethod
-    def _as_episode_info(
-        completed: Flag,
-        episode_return: Reward,
-        episode_length: Counter,
-    ) -> EpisodeInfo:
-        return {
-            "return": episode_return,
-            "length": episode_length,
-            "completed": completed,
-        }
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(
@@ -183,3 +164,22 @@ class EpisodeStatisticsWrapper[EnvState, EnvParams]:
             done,
             wrapped_info,
         )
+
+    @staticmethod
+    def _defaulted_params(
+        env: EnvironmentProtocol[EnvState, EnvParams],
+        params: EnvParams | None,
+    ) -> EnvParams:
+        return env.default_params if params is None else params
+
+    @staticmethod
+    def _as_episode_info(
+        completed: Flag,
+        episode_return: Reward,
+        episode_length: Counter,
+    ) -> EpisodeInfo:
+        return {
+            "return": episode_return,
+            "length": episode_length,
+            "completed": completed,
+        }

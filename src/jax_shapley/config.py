@@ -143,16 +143,16 @@ class DQNRunConfig[EnvConfig: EnvironmentConfig]:
         return network_config(self.env, self.hidden_widths)
 
 
-def _network_for_env[State, Params](env: EnvironmentProtocol[State, Params], widths: tuple[int, ...]) -> MLPConfig:
-    shape = env.observation_space(env.default_params).shape
-    if len(shape) != 1:
-        raise ValueError("DQN requires flat observations")
-    return dqn_config(shape[0], env.num_actions, hidden_widths=widths)
-
-
 def network_config(config: EnvironmentConfig, widths: tuple[int, ...]) -> MLPConfig:
     if isinstance(config, GridworldConfig):
         return _network_for_env(config.make(), widths)
     if isinstance(config, Mastermind222Config):
         return _network_for_env(config.make(), widths)
     return _network_for_env(config.make(), widths)
+
+
+def _network_for_env[State, Params](env: EnvironmentProtocol[State, Params], widths: tuple[int, ...]) -> MLPConfig:
+    shape = env.observation_space(env.default_params).shape
+    if len(shape) != 1:
+        raise ValueError("DQN requires flat observations")
+    return dqn_config(shape[0], env.num_actions, hidden_widths=widths)
