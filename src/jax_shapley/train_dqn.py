@@ -190,7 +190,7 @@ def checkpoint_due(vector_step: int, num_envs: int, total_timesteps: int) -> boo
 
 def _active_steps[Config: EnvironmentConfig](current: int, config: DQNRunConfig[Config]) -> int:
     active = min(config.chunk_steps, config.train.vector_steps - current)
-    if config.save_model or config.save_replay:
+    if config.checkpoint_mode != "none":
         for offset in range(1, active + 1):
             if checkpoint_due(current + offset, config.train.num_envs, config.train.total_timesteps):
                 return offset
