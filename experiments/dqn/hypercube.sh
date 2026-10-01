@@ -22,14 +22,27 @@ while read -r side dimension timesteps; do
     matched=$((matched + 1))
     for seed in "${seeds[@]}"; do
         uv run python -m jax_shapley.train_dqn hypercube \
-            --env.side-length "$side" --env.dimension "$dimension" --seed "$seed" \
-            --hidden-widths 128 128 --train.num-envs 16 \
-            --train.total-timesteps "$timesteps" --train.buffer-size "$timesteps" \
-            --train.learning-rate 0.00025 --train.gamma 1 --train.tau 0.01 \
-            --train.target-network-frequency 1 --train.batch-size 64 \
-            --train.start-e 1 --train.end-e 0.05 --train.exploration-fraction 0.5 \
-            --train.learning-starts "$((timesteps / 50))" --train.train-frequency 10 --train.eval-episodes 0 \
-            --train.adam.beta1 0.9 --train.adam.beta2 0.999 --train.adam.epsilon 0.00000001 \
+            --env.side-length "$side" \
+            --env.dimension "$dimension" \
+            --seed "$seed" \
+            --hidden-widths 128 128 \
+            --train.num-envs 16 \
+            --train.total-timesteps "$timesteps" \
+            --train.buffer-size "$timesteps" \
+            --train.learning-rate 0.00025 \
+            --train.gamma 1 \
+            --train.tau 0.01 \
+            --train.target-network-frequency 1 \
+            --train.batch-size 64 \
+            --train.start-e 1 \
+            --train.end-e 0.05 \
+            --train.exploration-fraction 0.5 \
+            --train.learning-starts "$((timesteps / 50))" \
+            --train.train-frequency 10 \
+            --train.eval-episodes 0 \
+            --train.adam.beta1 0.9 \
+            --train.adam.beta2 0.999 \
+            --train.adam.epsilon 0.00000001 \
             "$@"
     done
 done <<'TABLE'
