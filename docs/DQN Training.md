@@ -192,8 +192,11 @@ execution and prevent a success summary.
 NPZ checkpoint loading has been removed; offline numerical NPZ fixtures remain.
 Loaders validate the schema/reference, saved settings, architecture, original
 shapes/dtypes, finite values, phase/counters and replay invariants before use.
-Arrays restore onto an explicitly selected local device. Loading agent or replay
-items does not read unrelated numerical items.
+Arrays preserve the destination template's sharding. Select a local device with
+`jax.default_device(device)` when loading agents/replay or constructing a run
+restoration template. Full restoration preserves that template's placement even
+when called outside the device context, including replay and PRNG data. Loading
+agent or replay items does not read unrelated numerical items.
 
 ```python
 from pathlib import Path
