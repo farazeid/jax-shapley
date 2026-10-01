@@ -8,14 +8,14 @@ from pathlib import Path
 from time import perf_counter
 from typing import BinaryIO
 
-import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from jax_shapley.algorithms.dqn import StepMetrics
 from jax_shapley.artifacts import MetricRow, describe, host_array, record_metrics, write_metric_rows
 from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore
 from jax_shapley.config import DQNRunConfig, EnvironmentConfig
-from jax_shapley.execution import Snapshot
+from jax_shapley.execution import CallbackToken, Snapshot
 
 
 class ArtifactSink[Config: EnvironmentConfig]:
@@ -51,13 +51,13 @@ class ArtifactSink[Config: EnvironmentConfig]:
         self.started = clock()
         self.prior_elapsed = 0.0 if metadata is None else metadata.elapsed_seconds
 
-    def training(self, metrics: tuple[Array, ...], count: Array) -> Array:
+    def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken:
         active = int(host_array(count))
         rows = StepMetrics(*(value[:active] for value in metrics))
         record_metrics(self.folder / "metrics.csv", rows, self.config.train.num_envs, self.elapsed())
-        return jnp.asarray(0, jnp.int32)
+        return np.asarray(0, np.int32)
 
-    def evaluation(self, returns: Array, completed: Array, first_index: Array) -> Array:
+    def evaluation(self, returns: Array, completed: Array, first_index: Array) -> CallbackToken:
         values, flags = host_array(returns), host_array(completed)
         first = int(host_array(first_index))
         selected = [float(value) for value, flag in zip(values, flags, strict=True) if bool(flag)]
@@ -65,9 +65,9 @@ class ArtifactSink[Config: EnvironmentConfig]:
             self.folder / "metrics.csv",
             [MetricRow("evaluation", first + index, episode_return=value) for index, value in enumerate(selected)],
         )
-        return jnp.asarray(0, jnp.int32)
+        return np.asarray(0, np.int32)
 
-    def checkpoint(self, snapshot: Snapshot) -> Array:
+    def checkpoint(self, snapshot: Snapshot) -> CallbackToken:
         if self.store is not None:
             self.store.wait()
             path = self.folder / "metrics.csv"
@@ -88,7 +88,7 @@ class ArtifactSink[Config: EnvironmentConfig]:
             # The pre-evaluation snapshot must commit before evaluation can emit rows.
             if metadata.phase == 1:
                 self.store.wait()
-        return jnp.asarray(0, jnp.int32)
+        return np.asarray(0, np.int32)
 
     def elapsed(self) -> float:
         return self.prior_elapsed + self.clock() - self.started

@@ -8,8 +8,10 @@ import jax.numpy as jnp
 import optax
 from flax import nnx, struct
 from jax import Array
+from jax.experimental import io_callback
 
-from jax_shapley.config import DQNTrainConfig
+from jax_shapley.config import CheckpointMode, DQNTrainConfig, ExecutionPhase
+from jax_shapley.execution import EventSink, Snapshot
 from jax_shapley.networks import MLPConfig, ModelInput, QNetwork
 from jax_shapley.replay import ReplayState, TransitionBatch, append, empty_replay, sample
 from jax_shapley.wrappers import EpisodeStatisticsState, EpisodeStatisticsWrapper
@@ -48,6 +50,15 @@ class StepMetrics:
     episode_length: Array
     completed: Array
     active: Array
+
+
+@struct.dataclass
+class WholeRunState[EnvState]:
+    run: RunState[EnvState]
+    pending: StepMetrics
+    pending_count: Array
+    phase: Array
+    evaluation_episodes: Array
 
 
 @struct.dataclass
@@ -175,6 +186,254 @@ def evaluate_dqn[State, Params](
 
     final = jax.lax.while_loop(lambda state: state.count < episodes, step, initial)
     return EvaluationResult(final.returns, final.count, final.key)
+
+
+def whole_run[State, Params](
+    key: Array,
+    *,
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+    network: MLPConfig,
+    config: DQNTrainConfig,
+    chunk_steps: int,
+    checkpoint_mode: CheckpointMode,
+    sink: EventSink,
+) -> WholeRunState[State]:
+    """Initialization, training, evaluation and ordered events in one numerical call."""
+    state = initialize_run(env, params, network, config, key)
+    return continue_run(
+        state,
+        jnp.asarray(ExecutionPhase.TRAINING, jnp.int32),
+        jnp.asarray(0, jnp.int32),
+        env=env,
+        params=params,
+        config=config,
+        chunk_steps=chunk_steps,
+        checkpoint_mode=checkpoint_mode,
+        sink=sink,
+    )
+
+
+def continue_run[State, Params](
+    state: RunState[State],
+    phase: Array,
+    evaluation_episodes: Array,
+    *,
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+    config: DQNTrainConfig,
+    chunk_steps: int,
+    checkpoint_mode: CheckpointMode,
+    sink: EventSink,
+) -> WholeRunState[State]:
+    """Continue a validated snapshot; inactive tail steps preserve numerical state."""
+    _, empty = _inactive_step(state, config)
+    pending = cast(StepMetrics, jax.tree.map(lambda value: jnp.broadcast_to(value, (chunk_steps, *value.shape)), empty))
+    initial = WholeRunState(state, pending, jnp.asarray(0, jnp.int32), phase, evaluation_episodes)
+
+    def block(carry: WholeRunState[State]) -> WholeRunState[State]:
+        def step(current: WholeRunState[State], index: Array) -> tuple[WholeRunState[State], Array]:
+            del index
+            next_state = nnx.cond(
+                current.run.vector_step < config.vector_steps,
+                lambda value: _whole_training_step(value, env, params, config, checkpoint_mode, sink),
+                lambda value: value,
+                current,
+            )
+            return cast(WholeRunState[State], next_state), jnp.asarray(
+                0, jnp.int32
+            )  # NNX cond retains the carry topology.
+
+        result, _ = nnx.scan(step, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+            carry, jnp.arange(chunk_steps, dtype=jnp.int32)
+        )
+        return result
+
+    trained = nnx.while_loop(
+        lambda carry: (carry.phase == ExecutionPhase.TRAINING) & (carry.run.vector_step < config.vector_steps),
+        block,
+        initial,
+    )
+    prepared = nnx.cond(
+        trained.phase == ExecutionPhase.TRAINING,
+        lambda carry: _finish_training(carry, config, checkpoint_mode, sink),
+        lambda carry: carry,
+        trained,
+    )
+    evaluated = nnx.cond(
+        prepared.phase == ExecutionPhase.EVALUATION,
+        lambda carry: _whole_evaluation(carry, env, params, config, sink),
+        lambda carry: carry,
+        prepared,
+    )
+    if checkpoint_mode != "none":
+        jax.lax.cond(
+            phase != ExecutionPhase.COMPLETE,
+            lambda: _emit_checkpoint(evaluated, config, checkpoint_mode, sink),
+            lambda: jnp.asarray(0, jnp.int32),
+        )
+    return cast(WholeRunState[State], evaluated)  # NNX transforms retain the explicit carry topology.
+
+
+def make_snapshot[State](
+    state: RunState[State],
+    phase: Array,
+    evaluation_episodes: Array,
+    config: DQNTrainConfig,
+    mode: CheckpointMode,
+) -> Snapshot:
+    """Extract numerical state only; NNX graph definitions stay outside callbacks."""
+    agent = _array_leaves(nnx.state((state.model, state.target)))
+    optimizer = _array_leaves(nnx.state(state.optimizer)) if mode == "run" else ()
+    runtime = (
+        _array_leaves((
+            state.observations,
+            state.env_state,
+            state.vector_step,
+            state.updates,
+            state.target_updates,
+            jax.random.key_data(state.key),
+        ))
+        if mode == "run"
+        else ()
+    )
+    replay = state.replay if mode in ("agent-replay", "run") else None
+    epsilon = epsilon_at(config, jnp.maximum(state.vector_step - 1, 0) * config.num_envs)
+    return Snapshot(agent, replay, optimizer, runtime, state.vector_step, phase, evaluation_episodes, epsilon)
+
+
+def _whole_training_step[State, Params](
+    carry: WholeRunState[State],
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+    config: DQNTrainConfig,
+    mode: CheckpointMode,
+    sink: EventSink,
+) -> WholeRunState[State]:
+    run, metrics = training_step(carry.run, env, params, config)
+    pending = cast(
+        StepMetrics,
+        jax.tree.map(lambda storage, value: storage.at[carry.pending_count].set(value), carry.pending, metrics),
+    )
+    current = WholeRunState(run, pending, carry.pending_count + 1, carry.phase, carry.evaluation_episodes)
+    checkpoint = (run.vector_step * config.num_envs) % max(1, config.total_timesteps // 10) < config.num_envs
+    selected_loss = metrics.updated & (metrics.global_step % 100 < config.num_envs)
+    flush = (current.pending_count == pending.active.shape[0]) | selected_loss
+    if mode != "none":
+        flush = flush | checkpoint
+    current = nnx.cond(flush, lambda value: _flush_training(value, sink), lambda value: value, current)
+    if mode != "none":
+        jax.lax.cond(
+            checkpoint, lambda: _emit_checkpoint(current, config, mode, sink), lambda: jnp.asarray(0, jnp.int32)
+        )
+    return cast(WholeRunState[State], current)  # NNX cond retains the explicit carry topology.
+
+
+def _flush_training[State](carry: WholeRunState[State], sink: EventSink) -> WholeRunState[State]:
+    jax.lax.cond(
+        carry.pending_count > 0,
+        lambda: io_callback(
+            sink.training,
+            jax.ShapeDtypeStruct((), jnp.int32),
+            _array_leaves(carry.pending),
+            carry.pending_count,
+            ordered=True,
+        ),
+        lambda: jnp.asarray(0, jnp.int32),
+    )
+    return WholeRunState(carry.run, carry.pending, jnp.asarray(0, jnp.int32), carry.phase, carry.evaluation_episodes)
+
+
+def _finish_training[State](
+    carry: WholeRunState[State], config: DQNTrainConfig, mode: CheckpointMode, sink: EventSink
+) -> WholeRunState[State]:
+    flushed = _flush_training(carry, sink)
+    prepared = WholeRunState(
+        flushed.run,
+        flushed.pending,
+        flushed.pending_count,
+        jnp.asarray(ExecutionPhase.EVALUATION, jnp.int32),
+        flushed.evaluation_episodes,
+    )
+    if mode != "none":
+        _emit_checkpoint(prepared, config, mode, sink)
+    return prepared
+
+
+def _whole_evaluation[State, Params](
+    carry: WholeRunState[State],
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+    config: DQNTrainConfig,
+    sink: EventSink,
+) -> WholeRunState[State]:
+    run = carry.run
+    count = jnp.asarray(0, jnp.int32)
+    key = run.key
+    if config.eval_episodes:
+        keys: Array = jax.random.split(key, config.num_envs + 1)
+        observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(keys[1:], params)
+        initial = EvaluationState(observations, env_state, jnp.zeros(config.num_envs, jnp.float32), count, keys[0])
+
+        def step(state: EvaluationState[State]) -> EvaluationState[State]:
+            transition, next_key = evaluation_step(
+                run.model, state.observations, state.env_state, state.key, env=env, params=params
+            )
+            jax.lax.cond(
+                jnp.any(transition.completed),
+                lambda: io_callback(
+                    sink.evaluation,
+                    jax.ShapeDtypeStruct((), jnp.int32),
+                    transition.episode_return,
+                    transition.completed,
+                    state.count,
+                    ordered=True,
+                ),
+                lambda: jnp.asarray(0, jnp.int32),
+            )
+            return EvaluationState(
+                transition.observations,
+                transition.state,
+                state.returns,
+                state.count + jnp.sum(transition.completed, dtype=jnp.int32),
+                next_key,
+            )
+
+        final = jax.lax.while_loop(lambda state: state.count < config.eval_episodes, step, initial)
+        count, key = final.count, final.key
+    final_run = RunState(
+        run.model,
+        run.target,
+        run.optimizer,
+        run.replay,
+        run.observations,
+        run.env_state,
+        run.vector_step,
+        run.updates,
+        run.target_updates,
+        key,
+    )
+    return WholeRunState(
+        final_run, carry.pending, carry.pending_count, jnp.asarray(ExecutionPhase.COMPLETE, jnp.int32), count
+    )
+
+
+def _emit_checkpoint[State](
+    carry: WholeRunState[State], config: DQNTrainConfig, mode: CheckpointMode, sink: EventSink
+) -> Array:
+    return cast(
+        Array,
+        io_callback(
+            sink.checkpoint,
+            jax.ShapeDtypeStruct((), jnp.int32),
+            make_snapshot(carry.run, carry.phase, carry.evaluation_episodes, config, mode),
+            ordered=True,
+        ),
+    )  # Callback result has the declared scalar int32 specification.
+
+
+def _array_leaves(tree: object) -> tuple[Array, ...]:
+    return tuple(cast(list[Array], jax.tree.leaves(tree)))  # Only numerical structs and NNX state cross this boundary.
 
 
 def initialize_models(
