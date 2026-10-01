@@ -15,6 +15,9 @@ class RecordingSink:
     checkpoints: list[tuple[int, int]] = field(default_factory=list)
     largest_batch: int = 0
 
+    def training_complete(self) -> CallbackToken:
+        return np.asarray(0, np.int32)
+
     def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken:
         size = int(count)
         self.largest_batch = max(self.largest_batch, size)

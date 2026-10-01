@@ -1,9 +1,12 @@
-"""Shell-driven DQN CLI: resolve, compile abstract state, then run host orchestration."""
+"""Shell-driven DQN: compile a complete numerical run before creating host writers."""
+
+from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
 from functools import partial
-from time import perf_counter, time_ns
+from pathlib import Path
+from time import time_ns
 from typing import Annotated, Protocol, cast
 
 import jax
@@ -12,35 +15,22 @@ import tyro
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import (
-    EvaluationResult,
-    RunState,
-    StepMetrics,
-    evaluate_dqn,
-    initialize_run,
-    run_chunk,
-)
-from jax_shapley.artifacts import (
-    MetricRow,
-    describe,
-    host_array,
-    initialize_metrics,
-    record_metrics,
-    save_checkpoint,
-    write_metric_rows,
-)
+from jax_shapley.algorithms.dqn import RunState, WholeRunState, continue_run, initialize_run, whole_run
+from jax_shapley.artifacts import describe, initialize_metrics
+from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, restore_run
 from jax_shapley.config import (
     DQNRunConfig,
     EnvironmentConfig,
     GridworldConfig,
     HypercubeConfig,
     Mastermind222Config,
+    ResumeConfig,
 )
-from jax_shapley.networks import QNetwork
+from jax_shapley.execution import CallbackToken, EventSink, Snapshot
+from jax_shapley.logging import ArtifactSink, verify_log
+from jax_shapley.settings import load_settings
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsWrapper
 
-# The selected subcommand owns the whole run schema, avoiding argument-order
-# surprises from a nested environment subcommand followed by root options.
 type CLIConfig = (
     Annotated[
         DQNRunConfig[GridworldConfig], tyro.conf.subcommand(name="gridworld", default=DQNRunConfig(GridworldConfig()))
@@ -52,26 +42,15 @@ type CLIConfig = (
     | Annotated[
         DQNRunConfig[HypercubeConfig], tyro.conf.subcommand(name="hypercube", default=DQNRunConfig(HypercubeConfig()))
     ]
+    | Annotated[ResumeConfig, tyro.conf.subcommand(name="resume")]
 )
-
-
-class Initializer[State](Protocol):
-    def __call__(self, key: Array) -> RunState[State]: ...
-
-
-class ChunkRunner[State](Protocol):
-    def __call__(self, state: RunState[State], active_steps: Array) -> tuple[RunState[State], StepMetrics]: ...
-
-
-class Evaluator(Protocol):
-    def __call__(self, model: QNetwork, key: Array) -> EvaluationResult: ...
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledProgram[State]:
-    initialize: Initializer[State]
-    chunk: ChunkRunner[State]
-    evaluate: Evaluator | None
+    fresh: FreshRunner[State] | None
+    resume: ResumeRunner[State] | None
+    router: CallbackRouter
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,66 +65,112 @@ class RunSummary:
     backend: str
 
 
+class FreshRunner[State](Protocol):
+    def __call__(self, key: Array) -> WholeRunState[State]: ...
+
+
+class ResumeRunner[State](Protocol):
+    def __call__(self, state: RunState[State], phase: Array, evaluation_episodes: Array) -> WholeRunState[State]: ...
+
+
+class CallbackRouter:
+    """Bind the writer only after compilation; preflight cannot perform host I/O."""
+
+    def __init__(self) -> None:
+        self.sink: EventSink | None = None
+
+    def training_complete(self) -> CallbackToken:
+        return self._sink().training_complete()
+
+    def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken:
+        return self._sink().training(metrics, count)
+
+    def evaluation(self, returns: Array, completed: Array, first_index: Array) -> CallbackToken:
+        return self._sink().evaluation(returns, completed, first_index)
+
+    def checkpoint(self, snapshot: Snapshot) -> CallbackToken:
+        return self._sink().checkpoint(snapshot)
+
+    def _sink(self) -> EventSink:
+        if self.sink is None:
+            raise RuntimeError("callback invoked before writer binding")
+        return self.sink
+
+
 def main(args: list[str] | None = None) -> RunSummary | None:
-    config = parse_args(args)
+    options = parse_args(args)
+    resume: ResumeConfig | None = options if isinstance(options, ResumeConfig) else None
+    config = load_settings(resume.run / "config.json") if resume is not None else options
+    assert isinstance(config, DQNRunConfig)
     if config.validate_only:
         print(describe(config), end="")
         return None
-    # Narrow the closed union before coupling each environment to its own params.
     if isinstance(config.env, GridworldConfig):
-        return run_experiment(config.env.make(), config)
+        return run_experiment(config.env.make(), config, resume=resume)
     if isinstance(config.env, Mastermind222Config):
-        return run_experiment(config.env.make(), config)
-    return run_experiment(config.env.make(), config)
+        return run_experiment(config.env.make(), config, resume=resume)
+    return run_experiment(config.env.make(), config, resume=resume)
 
 
 def run_experiment[State, Params, Config: EnvironmentConfig](
-    environment: EnvironmentProtocol[State, Params], config: DQNRunConfig[Config]
+    environment: EnvironmentProtocol[State, Params],
+    config: DQNRunConfig[Config],
+    *,
+    resume: ResumeConfig | None = None,
 ) -> RunSummary | None:
     env = EpisodeStatisticsWrapper(environment)
-    program = compile_program(env, env.default_params, config)
-    if config.compile_only:
+    metadata: CheckpointMetadata | None = None
+    restored: RunState[State] | None = None
+    if resume is not None:
+        store = CheckpointStore(resume.run, read_only=True)
+        try:
+            template = initialize_run(
+                env, env.default_params, config.network, config.train, jax.random.key(config.seed)
+            )
+            restored, metadata = restore_run(store, template, config)
+            verify_log(resume.run / "metrics.csv", metadata)
+        finally:
+            store.close()
+        if resume.validate_only:
+            print(describe(config), end="")
+            return None
+    program = compile_program(env, env.default_params, config, resume_state=restored)
+    if config.compile_only or (resume is not None and resume.compile_only):
         print(f"Compiled {env.name} DQN on {jax.default_backend()}; no run artifacts created.")
         return None
-    state = program.initialize(jax.random.key(config.seed))
-    folder = config.output / f"{env.name}-{config.seed}-{time_ns()}"
-    folder.mkdir(parents=True, exist_ok=False)
-    (folder / "config.json").write_text(describe(config))
-    metrics_path = folder / "metrics.csv"
-    initialize_metrics(metrics_path)
-    started = perf_counter()
-    current = 0
-    while current < config.train.vector_steps:
-        active = _active_steps(current, config)
-        state, metrics = program.chunk(state, jnp.asarray(active, jnp.int32))
-        record_metrics(metrics_path, metrics, config.train.num_envs)
-        current += active
-        if checkpoint_due(current, config.train.num_envs, config.train.total_timesteps):
-            save_checkpoint(folder, state, config)
-    # Keep a final artifact even when floor division misses an upstream save event.
-    save_checkpoint(folder, state, config)
-    jax.block_until_ready(state.replay.size)
-    training_seconds = perf_counter() - started
-    evaluation_count = 0
-    if program.evaluate is not None:
-        evaluation = program.evaluate(state.model, state.key)
-        evaluation_count = int(evaluation.count)
-        returns = host_array(evaluation.returns)
-        rows = [
-            MetricRow("evaluation", index, episode_return=float(returns[index])) for index in range(evaluation_count)
-        ]
-        write_metric_rows(metrics_path, rows)
-    summary = RunSummary(
-        str(folder),
-        current,
-        current * config.train.num_envs,
-        int(state.updates),
-        int(state.target_updates),
-        evaluation_count,
-        training_seconds,
-        jax.default_backend(),
-    )
-    (folder / "summary.json").write_text(json.dumps(asdict(summary), indent=2) + "\n")
+    folder = resume.run.resolve() if resume is not None else config.output / f"{env.name}-{config.seed}-{time_ns()}"
+    if resume is None:
+        folder.mkdir(parents=True, exist_ok=False)
+        (folder / "config.json").write_text(describe(config))
+        initialize_metrics(folder / "metrics.csv")
+    sink = ArtifactSink(folder, config, metadata=metadata)
+    program.router.sink = sink
+    try:
+        if program.fresh is not None:
+            result = program.fresh(jax.random.key(config.seed))
+        else:
+            assert program.resume is not None and restored is not None and metadata is not None
+            result = program.resume(
+                restored, jnp.asarray(metadata.phase, jnp.int32), jnp.asarray(metadata.evaluation_episodes, jnp.int32)
+            )
+        jax.block_until_ready(result.run.vector_step)
+        jax.effects_barrier()
+        if sink.store is not None:
+            sink.store.wait()
+        summary = RunSummary(
+            str(folder),
+            int(result.run.vector_step),
+            int(result.run.vector_step) * config.train.num_envs,
+            int(result.run.updates),
+            int(result.run.target_updates),
+            int(result.evaluation_episodes),
+            sink.training_seconds,
+            jax.default_backend(),
+        )
+        _write_summary(folder, summary)
+    finally:
+        sink.close()
+        program.router.sink = None
     print(
         f"Trained {env.name}: {summary.environment_steps} transitions, {summary.updates} updates. Artifacts: {folder}"
     )
@@ -157,44 +182,55 @@ def parse_args(args: list[str] | None = None) -> CLIConfig:
 
 
 def compile_program[State, Params, Config: EnvironmentConfig](
-    env: EpisodeStatisticsWrapper[State, Params], params: Params, config: DQNRunConfig[Config]
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+    config: DQNRunConfig[Config],
+    *,
+    resume_state: RunState[State] | None = None,
 ) -> CompiledProgram[State]:
+    router = CallbackRouter()
     key_spec = jax.ShapeDtypeStruct((), jax.random.key(config.seed).dtype)
-    initialize = nnx.jit(partial(initialize_run, env, params, config.network, config.train))
-    # NNX eval_shape retains graph semantics while leaving replay/model arrays abstract.
-    abstract = nnx.eval_shape(initialize, key_spec)
-    initialized = cast(Initializer[State], initialize.trace(key_spec).lower().compile())
-    chunk = nnx.jit(partial(run_chunk, env=env, params=params, config=config.train, chunk_steps=config.chunk_steps))
-    compiled = cast(ChunkRunner[State], chunk.trace(abstract, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile())
-    evaluate: Evaluator | None = None
-    if config.train.eval_episodes:
-        evaluation = nnx.jit(
+    if resume_state is not None:
+        # Retain the restored optimizer's static Optax functions in the compiled graph.
+        abstract = nnx.eval_shape(lambda state: state, resume_state)
+        runner = nnx.jit(
             partial(
-                evaluate_dqn,
+                continue_run,
                 env=env,
                 params=params,
-                num_envs=config.train.num_envs,
-                episodes=config.train.eval_episodes,
+                config=config.train,
+                chunk_steps=config.chunk_steps,
+                checkpoint_mode=config.checkpoint_mode,
+                sink=router,
             )
         )
-        evaluate = cast(Evaluator, evaluation.trace(abstract.model, key_spec).lower().compile())
-    return CompiledProgram(initialized, compiled, evaluate)
+        scalar = jax.ShapeDtypeStruct((), jnp.int32)
+        compiled = cast(ResumeRunner[State], runner.trace(abstract, scalar, scalar).lower().compile())
+        return CompiledProgram(None, compiled, router)
+    runner = nnx.jit(
+        partial(
+            whole_run,
+            env=env,
+            params=params,
+            network=config.network,
+            config=config.train,
+            chunk_steps=config.chunk_steps,
+            checkpoint_mode=config.checkpoint_mode,
+            sink=router,
+        )
+    )
+    fresh = cast(FreshRunner[State], runner.trace(key_spec).lower().compile())
+    return CompiledProgram(fresh, None, router)
 
 
 def checkpoint_due(vector_step: int, num_envs: int, total_timesteps: int) -> bool:
-    # Upstream divides by total_timesteps // 10. Guard only its host save cadence
-    # for tiny smoke runs (<10 transitions), leaving learning semantics unchanged.
-    interval = max(1, total_timesteps // 10)
-    return (vector_step * num_envs) % interval < num_envs
+    return (vector_step * num_envs) % max(1, total_timesteps // 10) < num_envs
 
 
-def _active_steps[Config: EnvironmentConfig](current: int, config: DQNRunConfig[Config]) -> int:
-    active = min(config.chunk_steps, config.train.vector_steps - current)
-    if config.checkpoint_mode != "none":
-        for offset in range(1, active + 1):
-            if checkpoint_due(current + offset, config.train.num_envs, config.train.total_timesteps):
-                return offset
-    return active
+def _write_summary(folder: Path, summary: RunSummary) -> None:
+    staged = folder / "summary.json.tmp"
+    staged.write_text(json.dumps(asdict(summary), indent=2) + "\n")
+    staged.replace(folder / "summary.json")
 
 
 if __name__ == "__main__":

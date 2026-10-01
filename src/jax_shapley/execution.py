@@ -5,6 +5,7 @@ from typing import Protocol
 import numpy as np
 from flax import struct
 from jax import Array
+from numpy.typing import NDArray
 
 from jax_shapley.replay import ReplayState
 
@@ -21,10 +22,12 @@ class Snapshot:
     epsilon: Array
 
 
-type CallbackToken = np.ndarray[tuple[()], np.dtype[np.int32]]
+type CallbackToken = NDArray[np.int32]
 
 
 class EventSink(Protocol):
+    def training_complete(self) -> CallbackToken: ...
+
     def training(self, metrics: tuple[Array, ...], count: Array) -> CallbackToken: ...
 
     def evaluation(self, returns: Array, completed: Array, first_index: Array) -> CallbackToken: ...

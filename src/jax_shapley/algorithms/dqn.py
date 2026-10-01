@@ -302,6 +302,189 @@ def make_snapshot[State](
     return Snapshot(agent, replay, optimizer, runtime, state.vector_step, phase, evaluation_episodes, epsilon)
 
 
+def initialize_models(
+    config: MLPConfig, training: DQNTrainConfig, key: Array
+) -> tuple[QNetwork, QNetwork, nnx.Optimizer[QNetwork], Array]:
+    keys: Array = jax.random.split(key)
+    model = QNetwork(config, rngs=nnx.Rngs(keys[1]))
+    target = nnx.clone(model)
+    return model, target, make_optimizer(model, training), keys[0]
+
+
+def training_step[State, Params](
+    state: RunState[State], env: EpisodeStatisticsWrapper[State, Params], params: Params, config: DQNTrainConfig
+) -> tuple[RunState[State], StepMetrics]:
+    global_step = state.vector_step * config.num_envs
+    epsilon = epsilon_at(config, global_step)
+    actions, key = choose_action(state.model, state.observations, epsilon, state.key)
+    keys: Array = jax.random.split(key, config.num_envs + 1)
+    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+        keys[1:], state.env_state, actions.actions, params
+    )
+    replay = append(
+        state.replay,
+        TransitionBatch(
+            state.observations,
+            actions.actions,
+            transition.rewards,
+            transition.raw_observations,
+            transition.terminated,
+            actions.log_probabilities,
+        ),
+    )
+    ready = global_step > config.learning_starts
+    should_learn = ready & (global_step % config.train_frequency < config.num_envs)
+    should_target = ready & (global_step % config.target_network_frequency < config.num_envs)
+    # Sampling outside the condition is safe after insertion. Advance its stream
+    # only on actual updates, so grouping steps into chunks cannot change samples.
+    batch, sampled_key = sample(replay, config.batch_size, keys[0])
+    key = jnp.where(should_learn, sampled_key, keys[0])
+    learning = UpdateState(state.model, state.target, state.optimizer, batch)
+    loss = nnx.cond(should_learn, _learn, _skip_learn, learning, config.gamma)
+    nnx.cond(should_target, _target_update, _target_skip, state.model, state.target, config.tau)
+    next_state = RunState(
+        state.model,
+        state.target,
+        state.optimizer,
+        replay,
+        transition.observations,
+        transition.state,
+        state.vector_step + 1,
+        state.updates + should_learn.astype(jnp.int32),
+        state.target_updates + should_target.astype(jnp.int32),
+        key,
+    )
+    metrics = StepMetrics(
+        global_step,
+        epsilon,
+        loss.loss,
+        should_learn,
+        should_target,
+        transition.episode_return,
+        transition.episode_length,
+        transition.completed,
+        jnp.asarray(True),
+    )
+    return next_state, metrics
+
+
+def evaluation_step[State, Params](
+    model: QNetwork,
+    observations: Array,
+    state: EpisodeStatisticsState[State],
+    key: Array,
+    *,
+    env: EpisodeStatisticsWrapper[State, Params],
+    params: Params,
+) -> tuple[EnvironmentStep[State], Array]:
+    actions, key = choose_action(model, observations, jnp.asarray(0.0, jnp.float32), key)
+    keys: Array = jax.random.split(key, observations.shape[0] + 1)
+    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+        keys[1:], state, actions.actions, params
+    )
+    return transition, keys[0]
+
+
+def environment_step[State, Params](
+    env: EpisodeStatisticsWrapper[State, Params],
+    key: Array,
+    state: EpisodeStatisticsState[State],
+    action: Array,
+    params: Params,
+) -> EnvironmentStep[State]:
+    """Keep Gymnax auto-reset and expose its pre-reset observation with the same step key.
+
+    This narrow adapter calls pure step_env with Gymnax's key_step. The repeated
+    raw transition is eligible for compiler common-subexpression elimination.
+    """
+    keys: Array = jax.random.split(key)
+    raw_observations, _, _, _, _ = env.env.step_env(keys[0], state.env_state, action, params)
+    observation, next_state, reward, _, info = env.step(key, state, action, params)
+    episode = info["episode"]
+    return EnvironmentStep(
+        observation,
+        next_state,
+        raw_observations,
+        reward,
+        info["terminated"],
+        info["truncated"],
+        episode["return"],
+        episode["length"],
+        episode["completed"],
+    )
+
+
+def choose_action(model: QNetwork, observations: ModelInput, epsilon: Array, key: Array) -> tuple[ActionOutput, Array]:
+    probabilities = exploration_probabilities(model(observations).q_values, epsilon)
+    keys: Array = jax.random.split(key)
+    # Sampling uses true zero-probability logits; the clamp applies only to reported log probabilities.
+    actions: Array = jax.random.categorical(keys[1], jnp.log(probabilities), axis=-1).astype(jnp.int32)
+    return ActionOutput(actions, action_log_probabilities(probabilities, actions)), keys[0]
+
+
+def make_optimizer(model: QNetwork, config: DQNTrainConfig) -> nnx.Optimizer[QNetwork]:
+    adam = config.adam
+    return nnx.Optimizer(
+        model,
+        optax.adam(config.learning_rate, b1=adam.beta1, b2=adam.beta2, eps=adam.epsilon, eps_root=0.0),
+        wrt=nnx.Param,
+    )
+
+
+def update(
+    model: QNetwork, target: QNetwork, optimizer: nnx.Optimizer[QNetwork], batch: TransitionBatch, gamma: float
+) -> LossMetrics:
+    # NNX transformation has a dynamic return signature; assert its known loss/state boundary.
+    result = cast(
+        tuple[tuple[Array, LossMetrics], nnx.State[str | int, nnx.Param[Array]]],
+        nnx.value_and_grad(dqn_loss, has_aux=True)(model, target, batch, gamma),
+    )
+    (_, metrics), gradients = result
+    optimizer.update(model, gradients)
+    return metrics
+
+
+def update_target(model: QNetwork, target: QNetwork, tau: float) -> None:
+    for source, destination in zip(model.mlp.layers, target.mlp.layers, strict=True):
+        destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
+        destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
+
+
+def epsilon_at(config: DQNTrainConfig, global_step: Array) -> Array:
+    fraction = global_step.astype(jnp.float32) / (config.exploration_fraction * config.total_timesteps)
+    return jnp.maximum(config.start_e + (config.end_e - config.start_e) * fraction, config.end_e).astype(jnp.float32)
+
+
+def exploration_probabilities(q_values: Array, epsilon: Array) -> Array:
+    return epsilon / q_values.shape[-1] + (1 - epsilon) * greedy_probabilities(q_values)
+
+
+def action_log_probabilities(probabilities: Array, actions: Array) -> Array:
+    # Torch Categorical renormalizes probabilities and clamps before converting to logits.
+    probabilities = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
+    epsilon = jnp.finfo(jnp.float32).eps
+    logits = jnp.log(jnp.clip(probabilities, epsilon, 1 - epsilon))
+    return jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0]
+
+
+def dqn_loss(model: QNetwork, target: QNetwork, batch: TransitionBatch, gamma: float) -> tuple[Array, LossMetrics]:
+    batch.validate()
+    targets = td_targets(target, batch, gamma)
+    values = jnp.take_along_axis(model(batch.observations).q_values, batch.actions[:, None], axis=-1)[:, 0]
+    loss = jnp.mean(jnp.square(targets - values))
+    return loss, LossMetrics(loss, jnp.mean(targets), jnp.mean(values))
+
+
+def greedy_probabilities(q_values: Array) -> Array:
+    ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
+    return ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
+
+
+def td_targets(target: QNetwork, batch: TransitionBatch, gamma: float) -> Array:
+    values = jnp.max(target(batch.next_observations).q_values, axis=-1)
+    return jax.lax.stop_gradient(batch.rewards + gamma * values * (~batch.terminated).astype(jnp.float32))
+
+
 def _whole_training_step[State, Params](
     carry: WholeRunState[State],
     env: EpisodeStatisticsWrapper[State, Params],
@@ -348,6 +531,7 @@ def _finish_training[State](
     carry: WholeRunState[State], config: DQNTrainConfig, mode: CheckpointMode, sink: EventSink
 ) -> WholeRunState[State]:
     flushed = _flush_training(carry, sink)
+    io_callback(sink.training_complete, jax.ShapeDtypeStruct((), jnp.int32), ordered=True)
     prepared = WholeRunState(
         flushed.run,
         flushed.pending,
@@ -436,89 +620,6 @@ def _array_leaves(tree: object) -> tuple[Array, ...]:
     return tuple(cast(list[Array], jax.tree.leaves(tree)))  # Only numerical structs and NNX state cross this boundary.
 
 
-def initialize_models(
-    config: MLPConfig, training: DQNTrainConfig, key: Array
-) -> tuple[QNetwork, QNetwork, nnx.Optimizer[QNetwork], Array]:
-    keys: Array = jax.random.split(key)
-    model = QNetwork(config, rngs=nnx.Rngs(keys[1]))
-    target = nnx.clone(model)
-    return model, target, make_optimizer(model, training), keys[0]
-
-
-def training_step[State, Params](
-    state: RunState[State], env: EpisodeStatisticsWrapper[State, Params], params: Params, config: DQNTrainConfig
-) -> tuple[RunState[State], StepMetrics]:
-    global_step = state.vector_step * config.num_envs
-    epsilon = epsilon_at(config, global_step)
-    actions, key = choose_action(state.model, state.observations, epsilon, state.key)
-    keys: Array = jax.random.split(key, config.num_envs + 1)
-    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
-        keys[1:], state.env_state, actions.actions, params
-    )
-    replay = append(
-        state.replay,
-        TransitionBatch(
-            state.observations,
-            actions.actions,
-            transition.rewards,
-            transition.raw_observations,
-            transition.terminated,
-            actions.log_probabilities,
-        ),
-    )
-    ready = global_step > config.learning_starts
-    should_learn = ready & (global_step % config.train_frequency < config.num_envs)
-    should_target = ready & (global_step % config.target_network_frequency < config.num_envs)
-    # Sampling outside the condition is safe after insertion. Advance its stream
-    # only on actual updates, so grouping steps into chunks cannot change samples.
-    batch, sampled_key = sample(replay, config.batch_size, keys[0])
-    key = jnp.where(should_learn, sampled_key, keys[0])
-    learning = UpdateState(state.model, state.target, state.optimizer, batch)
-    loss = nnx.cond(should_learn, _learn, _skip_learn, learning, config.gamma)
-    nnx.cond(should_target, _target_update, _target_skip, state.model, state.target, config.tau)
-    next_state = RunState(
-        state.model,
-        state.target,
-        state.optimizer,
-        replay,
-        transition.observations,
-        transition.state,
-        state.vector_step + 1,
-        state.updates + should_learn.astype(jnp.int32),
-        state.target_updates + should_target.astype(jnp.int32),
-        key,
-    )
-    metrics = StepMetrics(
-        global_step,
-        epsilon,
-        loss.loss,
-        should_learn,
-        should_target,
-        transition.episode_return,
-        transition.episode_length,
-        transition.completed,
-        jnp.asarray(True),
-    )
-    return next_state, metrics
-
-
-def evaluation_step[State, Params](
-    model: QNetwork,
-    observations: Array,
-    state: EpisodeStatisticsState[State],
-    key: Array,
-    *,
-    env: EpisodeStatisticsWrapper[State, Params],
-    params: Params,
-) -> tuple[EnvironmentStep[State], Array]:
-    actions, key = choose_action(model, observations, jnp.asarray(0.0, jnp.float32), key)
-    keys: Array = jax.random.split(key, observations.shape[0] + 1)
-    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
-        keys[1:], state, actions.actions, params
-    )
-    return transition, keys[0]
-
-
 def _inactive_step[State](state: RunState[State], config: DQNTrainConfig) -> tuple[RunState[State], StepMetrics]:
     zero = jnp.asarray(0.0, jnp.float32)
     flags = jnp.zeros(config.num_envs, jnp.bool_)
@@ -533,43 +634,6 @@ def _inactive_step[State](state: RunState[State], config: DQNTrainConfig) -> tup
         flags,
         jnp.asarray(False),
     )
-
-
-def environment_step[State, Params](
-    env: EpisodeStatisticsWrapper[State, Params],
-    key: Array,
-    state: EpisodeStatisticsState[State],
-    action: Array,
-    params: Params,
-) -> EnvironmentStep[State]:
-    """Keep Gymnax auto-reset and expose its pre-reset observation with the same step key.
-
-    This narrow adapter calls pure step_env with Gymnax's key_step. The repeated
-    raw transition is eligible for compiler common-subexpression elimination.
-    """
-    keys: Array = jax.random.split(key)
-    raw_observations, _, _, _, _ = env.env.step_env(keys[0], state.env_state, action, params)
-    observation, next_state, reward, _, info = env.step(key, state, action, params)
-    episode = info["episode"]
-    return EnvironmentStep(
-        observation,
-        next_state,
-        raw_observations,
-        reward,
-        info["terminated"],
-        info["truncated"],
-        episode["return"],
-        episode["length"],
-        episode["completed"],
-    )
-
-
-def choose_action(model: QNetwork, observations: ModelInput, epsilon: Array, key: Array) -> tuple[ActionOutput, Array]:
-    probabilities = exploration_probabilities(model(observations).q_values, epsilon)
-    keys: Array = jax.random.split(key)
-    # Sampling uses true zero-probability logits; the clamp applies only to reported log probabilities.
-    actions: Array = jax.random.categorical(keys[1], jnp.log(probabilities), axis=-1).astype(jnp.int32)
-    return ActionOutput(actions, action_log_probabilities(probabilities, actions)), keys[0]
 
 
 def _learn(state: UpdateState, gamma: float) -> LossMetrics:
@@ -588,66 +652,3 @@ def _target_update(model: QNetwork, target: QNetwork, tau: float) -> None:
 
 def _target_skip(model: QNetwork, target: QNetwork, tau: float) -> None:
     del model, target, tau
-
-
-def make_optimizer(model: QNetwork, config: DQNTrainConfig) -> nnx.Optimizer[QNetwork]:
-    adam = config.adam
-    return nnx.Optimizer(
-        model,
-        optax.adam(config.learning_rate, b1=adam.beta1, b2=adam.beta2, eps=adam.epsilon, eps_root=0.0),
-        wrt=nnx.Param,
-    )
-
-
-def update(
-    model: QNetwork, target: QNetwork, optimizer: nnx.Optimizer[QNetwork], batch: TransitionBatch, gamma: float
-) -> LossMetrics:
-    # NNX transformation has a dynamic return signature; assert its known loss/state boundary.
-    result = cast(
-        tuple[tuple[Array, LossMetrics], nnx.State[str | int, nnx.Param[Array]]],
-        nnx.value_and_grad(dqn_loss, has_aux=True)(model, target, batch, gamma),
-    )
-    (_, metrics), gradients = result
-    optimizer.update(model, gradients)
-    return metrics
-
-
-def update_target(model: QNetwork, target: QNetwork, tau: float) -> None:
-    for source, destination in zip(model.mlp.layers, target.mlp.layers, strict=True):
-        destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
-        destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
-
-
-def epsilon_at(config: DQNTrainConfig, global_step: Array) -> Array:
-    fraction = global_step.astype(jnp.float32) / (config.exploration_fraction * config.total_timesteps)
-    return jnp.maximum(config.start_e + (config.end_e - config.start_e) * fraction, config.end_e).astype(jnp.float32)
-
-
-def exploration_probabilities(q_values: Array, epsilon: Array) -> Array:
-    return epsilon / q_values.shape[-1] + (1 - epsilon) * greedy_probabilities(q_values)
-
-
-def action_log_probabilities(probabilities: Array, actions: Array) -> Array:
-    # Torch Categorical renormalizes probabilities and clamps before converting to logits.
-    probabilities = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
-    epsilon = jnp.finfo(jnp.float32).eps
-    logits = jnp.log(jnp.clip(probabilities, epsilon, 1 - epsilon))
-    return jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0]
-
-
-def dqn_loss(model: QNetwork, target: QNetwork, batch: TransitionBatch, gamma: float) -> tuple[Array, LossMetrics]:
-    batch.validate()
-    targets = td_targets(target, batch, gamma)
-    values = jnp.take_along_axis(model(batch.observations).q_values, batch.actions[:, None], axis=-1)[:, 0]
-    loss = jnp.mean(jnp.square(targets - values))
-    return loss, LossMetrics(loss, jnp.mean(targets), jnp.mean(values))
-
-
-def greedy_probabilities(q_values: Array) -> Array:
-    ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
-    return ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
-
-
-def td_targets(target: QNetwork, batch: TransitionBatch, gamma: float) -> Array:
-    values = jnp.max(target(batch.next_observations).q_values, axis=-1)
-    return jax.lax.stop_gradient(batch.rewards + gamma * values * (~batch.terminated).astype(jnp.float32))

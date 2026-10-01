@@ -13,12 +13,13 @@ import orbax.checkpoint as ocp
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import RunState
+from jax_shapley.algorithms.dqn import RunState, epsilon_at
 from jax_shapley.artifacts import REFERENCE_COMMIT, LoadedAgent, describe, host_array
 from jax_shapley.config import DQNRunConfig, EnvironmentConfig
 from jax_shapley.execution import Snapshot
 from jax_shapley.networks import MLPConfig, QNetwork
 from jax_shapley.replay import ReplayState, empty_replay
+from jax_shapley.settings import parse_settings
 from jax_shapley.wrappers import EpisodeStatisticsState
 
 
@@ -31,6 +32,7 @@ class CheckpointMetadata:
     csv_bytes: int = 0
     csv_digest: str = ""
     elapsed_seconds: float = 0.0
+    training_seconds: float = 0.0
     key_implementation: str = "threefry2x32"
     schema: int = 1
     reference_commit: str = REFERENCE_COMMIT
@@ -42,8 +44,14 @@ class CheckpointMetadata:
             raise ValueError("invalid checkpoint counters or phase")
         if self.csv_bytes < 0 or not isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
             raise ValueError("invalid checkpoint log boundary or timing")
+        if not isfinite(self.training_seconds) or not 0 <= self.training_seconds <= self.elapsed_seconds:
+            raise ValueError("invalid training timing")
         if self.key_implementation != "threefry2x32":
             raise ValueError("unsupported checkpoint PRNG implementation")
+        config = parse_settings(self.settings)
+        _validate_phase(self, config.train.eval_episodes, config.train.num_envs, config.train.vector_steps)
+        if self.vector_step > config.train.vector_steps:
+            raise ValueError("checkpoint exceeds saved training duration")
 
 
 class CheckpointStore:
@@ -86,6 +94,7 @@ class CheckpointStore:
             csv_bytes=_integer(value, "csv_bytes"),
             csv_digest=_string(value, "csv_digest"),
             elapsed_seconds=_number(value, "elapsed_seconds"),
+            training_seconds=_number(value, "training_seconds"),
             key_implementation=_string(value, "key_implementation"),
             schema=_integer(value, "schema"),
             reference_commit=_string(value, "reference_commit"),
@@ -94,18 +103,23 @@ class CheckpointStore:
         return metadata
 
     def arrays(self, item: str, template: tuple[Array, ...]) -> tuple[Array, ...]:
-        target = _targets(template)
-        result = self._restore({item: ocp.args.StandardRestore(target)})
-        data = cast(dict[str, Array], result[item])  # Orbax dynamic boundary; validate against exact target below.
-        if set(data) != set(target):
+        # Read the saved NumPy dtypes before destination placement. Target-driven
+        # restoration could silently coerce a corrupt/wrong-precision checkpoint.
+        result = self._restore({item: ocp.args.StandardRestore()})
+        data = cast(dict[str, object], result[item])  # Orbax mapping boundary, narrowed below.
+        names = tuple(f"array_{index:04d}" for index in range(len(template)))
+        if set(data) != set(names):
             raise ValueError(f"invalid checkpoint {item} topology")
-        values = tuple(data[name] for name in target)
-        for actual, expected in zip(values, template, strict=True):
-            if actual.shape != expected.shape or actual.dtype != expected.dtype:
+        values: list[Array] = []
+        sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+        for name, expected in zip(names, template, strict=True):
+            actual = data[name]
+            if not isinstance(actual, np.ndarray) or actual.shape != expected.shape or actual.dtype != expected.dtype:
                 raise ValueError(f"invalid checkpoint {item} shape or dtype")
-            if jnp.issubdtype(actual.dtype, jnp.floating) and not bool(jnp.all(jnp.isfinite(actual))):
+            if np.issubdtype(actual.dtype, np.floating) and not bool(np.all(np.isfinite(actual))):
                 raise ValueError(f"nonfinite checkpoint {item}")
-        return values
+            values.append(jax.device_put(actual, sharding))
+        return tuple(values)
 
     def wait(self) -> None:
         self.manager.wait_until_finished()
@@ -140,6 +154,16 @@ def load_agent(folder: Path, network: MLPConfig, *, load_replay: bool = True) ->
         store.close()
 
 
+def load_replay(folder: Path) -> ReplayState:
+    """Read replay independently; neither parameters nor optimizer arrays are loaded."""
+    store = CheckpointStore(folder, read_only=True)
+    try:
+        config = parse_settings(store.metadata().settings)
+        return load_replay_state(store, config.network.input_features, config.train.buffer_size)
+    finally:
+        store.close()
+
+
 def load_replay_state(store: CheckpointStore, features: int, capacity: int) -> ReplayState:
     template = empty_replay(capacity, features)
     replay = cast(
@@ -159,7 +183,14 @@ def restore_run[State, Config: EnvironmentConfig](
         raise ValueError("resume requires identical saved settings and a run checkpoint")
     agent = nnx.state((template.model, template.target))
     values = store.arrays("agent", (*_leaves(agent), jnp.asarray(0.0, jnp.float32), template.vector_step))
+    if int(values[-1]) != metadata.vector_step or not 0 <= float(values[-2]) <= 1:
+        raise ValueError("invalid checkpoint agent step or epsilon")
     nnx.update((template.model, template.target), jax.tree.unflatten(jax.tree.structure(agent), values[:-2]))
+    expected_epsilon = float(
+        epsilon_at(config.train, jnp.asarray(max(metadata.vector_step - 1, 0) * config.train.num_envs, jnp.int32))
+    )
+    if not np.isclose(float(values[-2]), expected_epsilon, rtol=0, atol=1e-7):
+        raise ValueError("checkpoint epsilon disagrees with training progress")
     optimizer = nnx.state(template.optimizer)
     runtime = (
         template.observations,
@@ -180,8 +211,6 @@ def restore_run[State, Config: EnvironmentConfig](
         raise ValueError("invalid checkpoint vector step")
     if not 0 <= int(updates) <= int(step) or not 0 <= int(targets) <= int(step):
         raise ValueError("invalid checkpoint update counters")
-    if metadata.phase != 0 and int(step) != config.train.vector_steps:
-        raise ValueError("checkpoint phase disagrees with training progress")
     replay = load_replay_state(store, config.network.input_features, config.train.buffer_size)
     # Preserve the environment's concrete generic structure through the validated tree restoration.
     restored_env = cast(EpisodeStatisticsState[State], env_state)
@@ -197,6 +226,11 @@ def restore_run[State, Config: EnvironmentConfig](
         targets,
         jax.random.wrap_key_data(key_data, impl=metadata.key_implementation),
     )
+    if int(template.optimizer.step[...]) != int(updates):
+        raise ValueError("optimizer step disagrees with update counter")
+    inserted = int(step) * min(config.train.num_envs, config.train.buffer_size)
+    if int(replay.pointer) != inserted % replay.capacity or int(replay.size) != min(inserted, replay.capacity):
+        raise ValueError("replay counters disagree with training progress")
     return restored, metadata
 
 
@@ -206,14 +240,6 @@ def _leaves(tree: object) -> tuple[Array, ...]:
 
 def _pack(values: tuple[Array, ...]) -> dict[str, np.ndarray[tuple[int, ...], np.dtype[np.generic]]]:
     return {f"array_{index:04d}": host_array(value).copy() for index, value in enumerate(values)}
-
-
-def _targets(values: tuple[Array, ...]) -> dict[str, jax.ShapeDtypeStruct]:
-    sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
-    return {
-        f"array_{index:04d}": jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=sharding)
-        for index, value in enumerate(values)
-    }
 
 
 def _replay_capacity(metadata: CheckpointMetadata) -> int:
@@ -242,3 +268,13 @@ def _number(value: dict[str, object], name: str) -> float:
     if not isinstance(field, (int, float)):
         raise ValueError(f"invalid metadata {name}")
     return float(field)
+
+
+def _validate_phase(metadata: CheckpointMetadata, episodes: int, num_envs: int, vector_steps: int) -> None:
+    if metadata.phase != 0 and metadata.vector_step != vector_steps:
+        raise ValueError("checkpoint phase disagrees with training progress")
+    limit = episodes + num_envs - 1 if episodes else 0
+    if metadata.phase != 2 and metadata.evaluation_episodes != 0:
+        raise ValueError("checkpoint phase disagrees with evaluation progress")
+    if metadata.phase == 2 and not episodes <= metadata.evaluation_episodes <= limit:
+        raise ValueError("invalid completed evaluation count")
