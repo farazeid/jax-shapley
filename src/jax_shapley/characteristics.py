@@ -23,6 +23,9 @@ from jax_shapley.networks import MLP, ActionValues, LayerConfig, MLPConfig
 from jax_shapley.train_dqn import exploration_probabilities, greedy_probabilities
 
 type Kind = Literal["behaviour", "prediction"]
+
+# Rows per exact-loss evaluation chunk; padding beyond the valid entries is never evaluated.
+EXACT_CHUNK = 512
 type Policy = Literal["greedy", "explore"]
 type Values = Float[Array, "... outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 type Output = Float[Array, "outputs"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
@@ -72,6 +75,8 @@ class ExactCharacteristic:
     `keys`/`values`/`valid` hold each coalition's unique masked observations, padded
     to a static size. `states` are the buffer's unique full observations (sorted,
     padded) and `at_states` gives every coalition's value at each of them.
+    `compact_keys`/`compact_values` list the valid entries first (`count` of them),
+    padded to whole chunks, so the per-epoch exact loss evaluates only those chunks.
     """
 
     keys: UniqueKeys
@@ -80,6 +85,9 @@ class ExactCharacteristic:
     states: States
     state_valid: StateFlags
     at_states: UniqueValues
+    compact_keys: RowObservations
+    compact_values: RowValues
+    count: Array
 
     @property
     def null(self) -> Output:
@@ -219,14 +227,43 @@ def exact_characteristic(
         return keys, values, counts > 0, values[segments[state_rows]]
 
     keys, values, valid, at_states = jax.lax.map(evaluate, coalitions)
-    return ExactCharacteristic(keys, values, valid, states, state_counts > 0, at_states)
+    flat_valid = valid.reshape(-1)
+    entries = flat_valid.shape[0]
+    padded = -(-entries // EXACT_CHUNK) * EXACT_CHUNK
+    # Stable order: valid entries first, in coalition-major order, then padding.
+    order = jnp.argsort(~flat_valid, stable=True)
+    compact_keys = jnp.zeros((padded, keys.shape[-1]), jnp.int32).at[:entries].set(keys.reshape(entries, -1)[order])
+    compact_values = (
+        jnp.zeros((padded, values.shape[-1]), jnp.float32).at[:entries].set(values.reshape(entries, -1)[order])
+    )
+    count = jnp.sum(flat_valid, dtype=jnp.int32)
+    return ExactCharacteristic(
+        keys, values, valid, states, state_counts > 0, at_states, compact_keys, compact_values, count
+    )
 
 
 def exact_characteristic_loss(model: CharacteristicModel, exact: ExactCharacteristic) -> Array:
-    """MSE over every valid unique masked observation of every coalition, equally weighted."""
-    errors = jnp.square(model(exact.keys).values - exact.values)
-    valid = exact.valid.astype(jnp.float32)
-    return jnp.sum(errors * valid[..., None]) / (jnp.sum(valid) * exact.values.shape[-1])
+    """MSE over every valid unique masked observation of every coalition, equally weighted.
+
+    Only the chunks holding valid entries are evaluated: their number varies at run
+    time, while the padded arrays keep static shapes.
+    """
+    outputs = exact.compact_values.shape[-1]
+    chunks = (exact.count + EXACT_CHUNK - 1) // EXACT_CHUNK
+
+    def body(state: tuple[Array, Array]) -> tuple[Array, Array]:
+        index, total = state
+        start = index * EXACT_CHUNK
+        keys = jax.lax.dynamic_slice_in_dim(exact.compact_keys, start, EXACT_CHUNK)
+        values = jax.lax.dynamic_slice_in_dim(exact.compact_values, start, EXACT_CHUNK)
+        valid = (start + jnp.arange(EXACT_CHUNK)) < exact.count
+        errors = jnp.square(model(keys).values - values)
+        return index + 1, total + jnp.sum(jnp.where(valid[:, None], errors, 0.0))
+
+    _, total = jax.lax.while_loop(
+        lambda state: state[0] < chunks, body, (jnp.asarray(0, jnp.int32), jnp.asarray(0.0, jnp.float32))
+    )
+    return total / (exact.count.astype(jnp.float32) * outputs)
 
 
 def max_unique_states(low: ArrayLike, high: ArrayLike, features: int, rows: int) -> int:

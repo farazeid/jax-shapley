@@ -3,6 +3,7 @@
 from math import inf
 from typing import cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ from flax import nnx
 from jax import Array
 
 from jax_shapley.characteristics import (
+    EXACT_CHUNK,
     CharacteristicConfig,
     CharacteristicModel,
     Kind,
@@ -167,6 +169,21 @@ def test_exact_values_weight_rows_by_frequency() -> None:
     np.testing.assert_allclose(exact.at_states[2, :3, 0], [2.0, 2.0, 9.0])
     np.testing.assert_array_equal(exact.valid[0], [True, False, False, False])
     np.testing.assert_array_equal(exact.state_valid, [True, True, True, False])
+
+
+def test_chunked_exact_loss_equals_the_dense_masked_mean() -> None:
+    observations = jax.random.randint(jax.random.key(0), (600, 5), 0, 3, jnp.int32)
+    targets = jax.random.uniform(jax.random.key(1), (600, 1))
+    exact = exact_characteristic(observations, targets, all_coalitions(5), max_unique=243)
+    assert int(exact.count) > EXACT_CHUNK  # Valid entries span more than one chunk.
+    model = CharacteristicModel(
+        characteristic_network(5, 1, CharacteristicConfig("prediction", hidden_widths=(8,))), rngs=nnx.Rngs(0)
+    )
+    errors = jnp.square(model(exact.keys).values - exact.values)
+    valid = exact.valid.astype(jnp.float32)
+    dense = jnp.sum(errors * valid[..., None]) / jnp.sum(valid)
+    np.testing.assert_allclose(exact_characteristic_loss(model, exact), dense, rtol=1e-5)
+    np.testing.assert_allclose(nnx.jit(exact_characteristic_loss)(model, exact), dense, rtol=1e-5)
 
 
 def test_static_unique_bound() -> None:

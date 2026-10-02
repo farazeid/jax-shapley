@@ -2,6 +2,7 @@
 # Pinned experiments/hypercube/{hypercube_policy,hypercube_value}.py and run.py: each seed trains
 # its own DQN agent, then a characteristic, then a Shapley model on the characteristic's buffers.
 # Selectors: --kind behaviour|prediction, --seed N, --env.side-length N, --env.dimension N.
+# --output-root DIR places runs under DIR (default runs/explanations/hypercube).
 # Inspection: --validate-only validates every stage; --compile-only compiles the agent stage only,
 # because later stages compile against artifacts that do not exist yet.
 set -euo pipefail
@@ -9,13 +10,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 dqn_gates "$@"
 kinds=(behaviour prediction)
 seeds=({1..20})
-selected_side="" selected_dimension="" inspection=()
+selected_side="" selected_dimension="" inspection=() output_root=runs/explanations/hypercube
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --kind) kinds=("$2"); shift 2 ;;
         --seed) seeds=("$2"); shift 2 ;;
         --env.side-length) selected_side=$2; shift 2 ;;
         --env.dimension) selected_dimension=$2; shift 2 ;;
+        --output-root) output_root=$2; shift 2 ;;
         --validate-only|--compile-only) inspection=("$1"); shift ;;
         *) echo "unsupported option $1" >&2; exit 2 ;;
     esac
@@ -37,9 +39,14 @@ while read -r side dimension timesteps; do
     if [[ -n "$selected_dimension" && "$dimension" != "$selected_dimension" ]]; then continue; fi
     matched=$((matched + 1))
     for kind in "${kinds[@]}"; do
-        if [[ "$kind" == behaviour ]]; then shapley_kind=behaviour; else shapley_kind=prediction; fi
+        # hypercube_policy.py stops Shapley training at exact loss 0.001; hypercube_value.py at 0.01.
+        if [[ "$kind" == behaviour ]]; then
+            shapley_kind=behaviour shapley_condition=0.001
+        else
+            shapley_kind=prediction shapley_condition=0.01
+        fi
         for seed in "${seeds[@]}"; do
-            root="runs/explanations/hypercube/$shapley_kind/${side}x${dimension}/seed-$seed"
+            root="$output_root/$shapley_kind/${side}x${dimension}/seed-$seed"
             uv run python -m jax_shapley.train_dqn hypercube \
                 --env.side-length "$side" \
                 --env.dimension "$dimension" \
@@ -97,7 +104,7 @@ while read -r side dimension timesteps; do
                 --characteristic "$characteristic" \
                 --no-with-exact-char \
                 --buffers characteristic \
-                --train.exact-condition 0.001 \
+                --train.exact-condition "$shapley_condition" \
                 --output "$root/shapley" \
                 "${common[@]}" \
                 ${inspection[@]+"${inspection[@]}"}
