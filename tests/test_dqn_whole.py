@@ -10,7 +10,7 @@ from flax import nnx
 
 from jax_shapley.envs import Mastermind222
 from jax_shapley.networks import dqn_config
-from jax_shapley.train_dqn import DQNTrainConfig, evaluate_dqn, initialize_run, run_chunk, whole_run
+from jax_shapley.train_dqn import DQNTrainConfig, evaluate_dqn, initialize_run, run, run_chunk
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.dqn_support import RecordingSink
 
@@ -30,20 +30,19 @@ def test_whole_run_matches_chunk_helpers(seed: int, block_size: int) -> None:
     network = dqn_config(8, 4, hidden_widths=(4,))
     env = EpisodeStatisticsWrapper(Mastermind222())
     sink = RecordingSink()
-    run = nnx.jit(
+    runner = nnx.jit(
         partial(
-            whole_run,
-            env=env,
-            params=env.default_params,
-            network=network,
+            run,
+            environment_factory=Mastermind222,
+            hidden_widths=(4,),
             config=config,
             chunk_steps=block_size,
             sink=sink,
         )
     )
-    compiled = run.trace(jax.ShapeDtypeStruct((), jax.random.key(seed).dtype)).lower().compile()
+    compiled = runner.trace(jax.ShapeDtypeStruct((), jax.random.key(seed).dtype), None, None, None).lower().compile()
     assert not sink.training_steps and not sink.checkpoints
-    result = compiled(jax.random.key(seed))
+    result = compiled(jax.random.key(seed), None, None, None)
     jax.block_until_ready(result.run.vector_step)
     jax.effects_barrier()
     reference = initialize_run(env, env.default_params, network, config, jax.random.key(seed))
@@ -87,3 +86,32 @@ def test_whole_run_matches_chunk_helpers(seed: int, block_size: int) -> None:
     assert sink.largest_batch <= block_size
     assert sink.checkpoints[-2:] == [(16, 1), (16, 2)]
     assert int(result.pending_count) == 0
+
+
+@pytest.mark.parametrize("missing", ["phase", "evaluation_episodes"])
+def test_restored_run_requires_saved_execution_counters(missing: str) -> None:
+    config = DQNTrainConfig(total_timesteps=2, buffer_size=2, batch_size=1)
+    env = EpisodeStatisticsWrapper(Mastermind222())
+    key = jax.random.key(1)
+    state = initialize_run(env, env.default_params, dqn_config(8, 4, hidden_widths=(4,)), config, key)
+    sink = RecordingSink()
+    runner = nnx.jit(
+        partial(
+            run,
+            environment_factory=Mastermind222,
+            hidden_widths=(4,),
+            config=config,
+            chunk_steps=2,
+            sink=sink,
+        )
+    )
+    abstract = nnx.eval_shape(lambda value: value, state)
+    scalar = jax.ShapeDtypeStruct((), jnp.int32)
+    with pytest.raises(ValueError, match="restored state requires saved phase and evaluation counters"):
+        runner.trace(
+            jax.ShapeDtypeStruct((), key.dtype),
+            abstract,
+            None if missing == "phase" else scalar,
+            None if missing == "evaluation_episodes" else scalar,
+        )
+    assert not sink.training_steps and not sink.checkpoints and not sink.evaluation_returns

@@ -7,6 +7,7 @@ host callbacks and artifacts.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import partial
@@ -22,13 +23,20 @@ from flax import nnx, struct
 from jax import Array
 from jax.experimental import io_callback
 
-from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
+from jax_shapley.envs import (
+    Gridworld,
+    GridworldState,
+    Hypercube,
+    HypercubeState,
+    Mastermind222,
+    Mastermind222State,
+)
 from jax_shapley.networks import MLPConfig, ModelInput, QNetwork, dqn_config
 from jax_shapley.replay import ReplayState, TransitionBatch, append, empty_replay, sample
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 if TYPE_CHECKING:
-    from jax_shapley.run_io import CallbackRouter, CheckpointMetadata, EventSink, Snapshot
+    from jax_shapley.run_io import CheckpointMetadata, EventSink, Snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,13 +253,6 @@ class LossMetrics:
 
 
 @dataclass(frozen=True, slots=True)
-class CompiledProgram[State]:
-    fresh: FreshRunner[State] | None
-    resume: ResumeRunner[State] | None
-    router: CallbackRouter
-
-
-@dataclass(frozen=True, slots=True)
 class RunSummary:
     folder: str
     vector_steps: int
@@ -278,12 +279,20 @@ type CLIConfig = (
 )
 
 
-class FreshRunner[State](Protocol):
-    def __call__(self, key: Array) -> WholeRunState[State]: ...
+type SupportedRunState = RunState[GridworldState] | RunState[Mastermind222State] | RunState[HypercubeState]
+type SupportedRunResult = (
+    WholeRunState[GridworldState] | WholeRunState[Mastermind222State] | WholeRunState[HypercubeState]
+)
 
 
-class ResumeRunner[State](Protocol):
-    def __call__(self, state: RunState[State], phase: Array, evaluation_episodes: Array) -> WholeRunState[State]: ...
+class Runner(Protocol):
+    def __call__(
+        self,
+        key: Array,
+        state: SupportedRunState | None,
+        phase: Array | None,
+        evaluation_episodes: Array | None,
+    ) -> SupportedRunResult: ...
 
 
 class ActionOutput(NamedTuple):
@@ -292,45 +301,38 @@ class ActionOutput(NamedTuple):
 
 
 def main(args: list[str] | None = None) -> RunSummary | None:
-    from jax_shapley.run_io import describe, load_settings
-
-    options = parse_args(args)
-    resume: ResumeConfig | None = options if isinstance(options, ResumeConfig) else None
-    config = load_settings(resume.run / "config.json") if resume is not None else options
-    assert isinstance(config, DQNRunConfig)
-    if config.validate_only:
-        print(describe(config), end="")
-        return None
-    if isinstance(config.env, GridworldConfig):
-        return run_experiment(config.env.make(), config, resume=resume)
-    if isinstance(config.env, Mastermind222Config):
-        return run_experiment(config.env.make(), config, resume=resume)
-    return run_experiment(config.env.make(), config, resume=resume)
-
-
-def run_experiment[State, Params, Config: EnvironmentConfig](
-    environment: EnvironmentProtocol[State, Params],
-    config: DQNRunConfig[Config],
-    *,
-    resume: ResumeConfig | None = None,
-) -> RunSummary | None:
+    """Validate, restore, compile, execute once and finalize host artifacts."""
     from jax_shapley.run_io import (
+        CallbackRouter,
         CheckpointStore,
         RunWriter,
         create_run,
         describe,
+        load_settings,
         restore_run,
         verify_log,
         write_summary,
     )
 
-    env = EpisodeStatisticsWrapper(environment)
+    options = parse_args(args)
+    resume = options if isinstance(options, ResumeConfig) else None
+    config = load_settings(resume.run / "config.json") if resume is not None else options
+    assert isinstance(config, DQNRunConfig)
+    if config.validate_only:
+        print(describe(config), end="")
+        return None
+    factory = config.env.make
     metadata: CheckpointMetadata | None = None
     checkpoint_sequence: int | None = None
-    restored: RunState[State] | None = None
+    restored: SupportedRunState | None = None
+    phase: Array | None = None
+    episodes: Array | None = None
     if resume is not None:
         store = CheckpointStore(resume.run, read_only=True)
         try:
+            # This host template validates destination graph/shapes; run() never
+            # reinitializes restored state during numerical execution.
+            env = EpisodeStatisticsWrapper(factory())
             template = initialize_run(
                 env, env.default_params, config.network, config.train, jax.random.key(config.seed)
             )
@@ -342,23 +344,59 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
         if resume.validate_only:
             print(describe(config), end="")
             return None
-    program = compile_program(env, env.default_params, config, resume_state=restored)
+        phase = jnp.asarray(metadata.phase, jnp.int32)
+        episodes = jnp.asarray(metadata.evaluation_episodes, jnp.int32)
+    router = CallbackRouter()
+    # Preserve each environment's state/parameter types when binding the transform.
+    if isinstance(config.env, GridworldConfig):
+        runner = nnx.jit(
+            partial(
+                run,
+                environment_factory=Gridworld,
+                config=config.train,
+                hidden_widths=config.hidden_widths,
+                chunk_steps=config.chunk_steps,
+                sink=router,
+            )
+        )
+    elif isinstance(config.env, Mastermind222Config):
+        runner = nnx.jit(
+            partial(
+                run,
+                environment_factory=Mastermind222,
+                config=config.train,
+                hidden_widths=config.hidden_widths,
+                chunk_steps=config.chunk_steps,
+                sink=router,
+            )
+        )
+    else:
+        runner = nnx.jit(
+            partial(
+                run,
+                environment_factory=config.env.make,
+                config=config.train,
+                hidden_widths=config.hidden_widths,
+                chunk_steps=config.chunk_steps,
+                sink=router,
+            )
+        )
+    key = jax.random.key(config.seed)
+    key_spec = jax.ShapeDtypeStruct((), key.dtype)
+    # Retain restored optimizer static functions. None selects the fresh graph;
+    # arrays select the resume graph, with all phases compiled before execution.
+    abstract = nnx.eval_shape(lambda state: state, restored) if restored is not None else None
+    scalar = jax.ShapeDtypeStruct((), jnp.int32) if restored is not None else None
+    compiled = cast(Runner, runner.trace(key_spec, abstract, scalar, scalar).lower().compile())
+    environment_name = factory().name  # Host metadata only; run() owns numerical initialization.
     if config.compile_only or (resume is not None and resume.compile_only):
-        print(f"Compiled {env.name} DQN on {jax.default_backend()}; no run artifacts created.")
+        print(f"Compiled {environment_name} DQN on {jax.default_backend()}; no run artifacts created.")
         return None
-    folder = resume.run.resolve() if resume is not None else create_run(config, env.name)
+    folder = resume.run.resolve() if resume is not None else create_run(config, environment_name)
     try:
         with RunWriter(folder, config, metadata=metadata, checkpoint_sequence=checkpoint_sequence) as sink:
-            program.router.sink = sink
-            if program.fresh is not None:
-                result = program.fresh(jax.random.key(config.seed))
-            else:
-                assert program.resume is not None and restored is not None and metadata is not None
-                result = program.resume(
-                    restored,
-                    jnp.asarray(metadata.phase, jnp.int32),
-                    jnp.asarray(metadata.evaluation_episodes, jnp.int32),
-                )
+            router.sink = sink
+            result = compiled(key, restored, phase, episodes)
             jax.block_until_ready(result.run.vector_step)
             jax.effects_barrier()
             sink.store.wait()
@@ -374,49 +412,36 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
             )
             write_summary(folder, summary)
     finally:
-        program.router.sink = None
+        router.sink = None
     print(
-        f"Trained {env.name}: {summary.environment_steps} transitions, {summary.updates} updates. Artifacts: {folder}"
+        f"Trained {environment_name}: {summary.environment_steps} transitions, {summary.updates} updates. Artifacts: {folder}"
     )
     return summary
 
 
-def whole_run[State, Params](
+def run[State, Params](
     key: Array,
+    state: RunState[State] | None = None,
+    phase: Array | None = None,
+    evaluation_episodes: Array | None = None,
     *,
-    env: EpisodeStatisticsWrapper[State, Params],
-    params: Params,
-    network: MLPConfig,
+    environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
     config: DQNTrainConfig,
+    hidden_widths: tuple[int, ...],
     chunk_steps: int,
     sink: EventSink,
 ) -> WholeRunState[State]:
-    """Initialization, training, evaluation and ordered events in one numerical call."""
-    state = initialize_run(env, params, network, config, key)
-    return continue_run(
-        state,
-        jnp.asarray(ExecutionPhase.TRAINING, jnp.int32),
-        jnp.asarray(0, jnp.int32),
-        env=env,
-        params=params,
-        config=config,
-        chunk_steps=chunk_steps,
-        sink=sink,
-    )
-
-
-def continue_run[State, Params](
-    state: RunState[State],
-    phase: Array,
-    evaluation_episodes: Array,
-    *,
-    env: EpisodeStatisticsWrapper[State, Params],
-    params: Params,
-    config: DQNTrainConfig,
-    chunk_steps: int,
-    sink: EventSink,
-) -> WholeRunState[State]:
-    """Continue a validated snapshot; inactive tail steps preserve numerical state."""
+    """Construct static environment metadata and initialize or resume one compiled run."""
+    env = EpisodeStatisticsWrapper(environment_factory())
+    params = env.default_params
+    if state is None:
+        network = _network_for_env(env.env, hidden_widths)
+        state = initialize_run(env, params, network, config, key)
+        phase = jnp.asarray(ExecutionPhase.TRAINING, jnp.int32)
+        evaluation_episodes = jnp.asarray(0, jnp.int32)
+    elif phase is None or evaluation_episodes is None:
+        raise ValueError("restored state requires saved phase and evaluation counters")
+    assert phase is not None and evaluation_episodes is not None
     _, empty = _inactive_step(state, config)
     pending = cast(StepMetrics, jax.tree.map(lambda value: jnp.broadcast_to(value, (chunk_steps, *value.shape)), empty))
     initial = WholeRunState(state, pending, jnp.asarray(0, jnp.int32), phase, evaluation_episodes)
@@ -552,48 +577,6 @@ def evaluate_dqn[State, Params](
 
 def parse_args(args: list[str] | None = None) -> CLIConfig:
     return tyro.cli(CLIConfig, args=args)
-
-
-def compile_program[State, Params, Config: EnvironmentConfig](
-    env: EpisodeStatisticsWrapper[State, Params],
-    params: Params,
-    config: DQNRunConfig[Config],
-    *,
-    resume_state: RunState[State] | None = None,
-) -> CompiledProgram[State]:
-    from jax_shapley.run_io import CallbackRouter
-
-    router = CallbackRouter()
-    key_spec = jax.ShapeDtypeStruct((), jax.random.key(config.seed).dtype)
-    if resume_state is not None:
-        # Retain the restored optimizer's static Optax functions in the compiled graph.
-        abstract = nnx.eval_shape(lambda state: state, resume_state)
-        runner = nnx.jit(
-            partial(
-                continue_run,
-                env=env,
-                params=params,
-                config=config.train,
-                chunk_steps=config.chunk_steps,
-                sink=router,
-            )
-        )
-        scalar = jax.ShapeDtypeStruct((), jnp.int32)
-        compiled = cast(ResumeRunner[State], runner.trace(abstract, scalar, scalar).lower().compile())
-        return CompiledProgram(None, compiled, router)
-    runner = nnx.jit(
-        partial(
-            whole_run,
-            env=env,
-            params=params,
-            network=config.network,
-            config=config.train,
-            chunk_steps=config.chunk_steps,
-            sink=router,
-        )
-    )
-    fresh = cast(FreshRunner[State], runner.trace(key_spec).lower().compile())
-    return CompiledProgram(fresh, None, router)
 
 
 def checkpoint_due(vector_step: int | Array, num_envs: int, total_timesteps: int) -> bool | Array:

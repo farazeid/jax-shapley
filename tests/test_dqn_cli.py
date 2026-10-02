@@ -85,7 +85,7 @@ def test_preflight_failure_stops_before_artifacts(tmp_path: Path, monkeypatch: p
         del args, kwargs
         raise RuntimeError("compiler failure")
 
-    monkeypatch.setattr(train_dqn, "compile_program", fail)
+    monkeypatch.setattr(train_dqn.nnx, "jit", fail)
     output = tmp_path / "absent"
     with pytest.raises(RuntimeError, match="compiler failure"):
         main(["gridworld", "--output", str(output)])

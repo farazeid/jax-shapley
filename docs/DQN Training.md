@@ -17,10 +17,13 @@ The DQN experiment is implemented in one script with separate replay, network an
 | `src/jax_shapley/run_io.py` | Callback contracts/router, `RunWriter`, saved-settings parsing, selective CSV records, Orbax checkpoints and recovery |
 
 Environment implementations and their episode-statistics wrapper remain shared components.
-Read `main()` and `run_experiment()` first: they prepare the settings/state, compile
-before creating artifacts, bind a host writer, execute once, synchronize and write
-the summary. Then read `whole_run()` and `continue_run()` for initialization,
-training blocks, optional evaluation and final events. `training_step()` exposes
+Read `main()` first: it parses settings, restores saved state when requested, compiles
+before creating artifacts, binds a host writer, executes once, synchronizes and writes
+the summary. Then read `run()`: it constructs the environment, initializes a fresh
+run or accepts restored state, trains, evaluates and emits checkpoint events.
+The environment factory and configuration are static compilation inputs; environment
+construction happens during tracing. Resume also constructs a host-side template to
+validate and restore checkpoint arrays before compilation. `training_step()` exposes
 action selection, environment interaction, replay insertion, online learning and
 target updating in their execution order. Secondary numerical helpers follow the
 primary operations. `run_chunk()` and `evaluate_dqn()` remain standalone numerical
@@ -36,7 +39,9 @@ their contracts and numerical functions from `jax_shapley.train_dqn`. Replay
 contracts and operations live in `jax_shapley.replay`. The former
 `artifacts`, `execution`, `logging`, `checkpoints` and `settings` modules have also
 been removed; import their host APIs from `jax_shapley.run_io`. The host writer is
-now named `RunWriter`. The numerical checkpoint schema remains compatible with earlier full-run
+now named `RunWriter`. The former `run_experiment()`, `whole_run()`,
+`continue_run()` and `compile_program()` entry points have been replaced by
+`main()` and `run()`. The numerical checkpoint schema remains compatible with earlier full-run
 snapshots. Checkpointing is now unconditional; the CLI no longer accepts a
 checkpoint-mode selector.
 
