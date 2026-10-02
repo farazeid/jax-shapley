@@ -725,10 +725,14 @@ def choose_action(model: QNetwork, observations: ModelInput, epsilon: Array, key
 
 
 def make_optimizer(model: QNetwork, config: DQNTrainConfig) -> nnx.Optimizer[QNetwork]:
-    adam = config.adam
+    return make_adam(model, config.learning_rate, config.adam)
+
+
+def make_adam[Model: nnx.Module](model: Model, learning_rate: float, adam: AdamConfig) -> nnx.Optimizer[Model]:
+    """Torch Adam: constant rate, epsilon outside the square root, no root epsilon."""
     return nnx.Optimizer(
         model,
-        optax.adam(config.learning_rate, b1=adam.beta1, b2=adam.beta2, eps=adam.epsilon, eps_root=0.0),
+        optax.adam(learning_rate, b1=adam.beta1, b2=adam.beta2, eps=adam.epsilon, eps_root=0.0),
         wrt=nnx.Param,
     )
 
