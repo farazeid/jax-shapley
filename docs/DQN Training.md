@@ -5,6 +5,38 @@ JAX and Flax NNX. The behavioral sources are `dqn.py`, `utils.py::Buffer`, and
 `training.py::train_dqn/evaluate_dqn`. Baxtub supplies the explicit-state,
 small-function organization; FastSVERL supplies the algorithm and settings.
 
+## Source layout and reading order
+
+The DQN experiment is implemented in one script with separate network and host-I/O modules:
+
+| File | Responsibility |
+| --- | --- |
+| `src/jax_shapley/train_dqn.py` | Validated configuration, numerical state, CLI orchestration, replay, policies, learning, training and evaluation |
+| `src/jax_shapley/networks.py` | Network configuration, layer initialization and forward passes |
+| `src/jax_shapley/run_io.py` | Callback contracts/router, `RunWriter`, saved-settings parsing, selective CSV records, Orbax checkpoints and recovery |
+
+Environment implementations and their episode-statistics wrapper remain shared components.
+Read `main()` and `run_experiment()` first: they prepare the settings/state, compile
+before creating artifacts, bind a host writer, execute once, synchronize and write
+the summary. Then read `whole_run()` and `continue_run()` for initialization,
+training blocks, optional evaluation and final events. `training_step()` exposes
+action selection, environment interaction, replay insertion, online learning and
+target updating in their execution order. Secondary numerical helpers follow the
+primary operations. `run_chunk()` and `evaluate_dqn()` remain standalone numerical
+operations used by compilation and equivalence tests; the CLI uses the whole-run path.
+
+Host operations are imported at their boundaries after the trainer's declarations
+exist. `run_io.py` shares those typed contracts, and module execution delegates to
+the canonical trainer module so CLI and restored configurations have the same
+Python class identities. Importing either module starts no writer or experiment.
+
+The former `config`, `replay` and `algorithms.dqn` modules have been removed; import
+their contracts and numerical functions from `jax_shapley.train_dqn`. The former
+`artifacts`, `execution`, `logging`, `checkpoints` and `settings` modules have also
+been removed; import their host APIs from `jax_shapley.run_io`. The host writer is
+now named `RunWriter`. CLI arguments, shell recipes, checkpoint schema and artifact
+formats are unchanged, including loading snapshots created before this refactor.
+
 ## Shell experiments and CLI
 
 Experiment values live in `experiments/dqn/*.sh`, not YAML or Python preset files.
@@ -200,7 +232,7 @@ agent or replay items does not read unrelated numerical items.
 
 ```python
 from pathlib import Path
-from jax_shapley.checkpoints import load_agent, load_replay
+from jax_shapley.run_io import load_agent, load_replay
 from jax_shapley.networks import dqn_config
 
 folder = Path("runs/<run-name>")

@@ -13,10 +13,15 @@ import numpy as np
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import initialize_run, make_snapshot, run_chunk
-from jax_shapley.artifacts import describe
-from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, load_agent, load_replay, restore_run
-from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
+from jax_shapley.run_io import CheckpointMetadata, CheckpointStore, describe, load_agent, load_replay, restore_run
+from jax_shapley.train_dqn import (
+    DQNRunConfig,
+    DQNTrainConfig,
+    GridworldConfig,
+    initialize_run,
+    make_snapshot,
+    run_chunk,
+)
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 

@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jax_shapley.replay import TransitionBatch, append, empty_replay, gather, sample
+from jax_shapley.train_dqn import TransitionBatch, append, empty_replay, gather, sample
 
 
 def test_partial_wraparound_and_oversized_insertion() -> None:

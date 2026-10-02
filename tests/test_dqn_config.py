@@ -1,10 +1,12 @@
 """Static host contracts fail before allocating replay or compiling a run."""
 
+import json
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from jax_shapley.config import (
+from jax_shapley.run_io import describe, parse_settings
+from jax_shapley.train_dqn import (
     AdamConfig,
     DQNRunConfig,
     DQNTrainConfig,
@@ -86,7 +88,7 @@ def test_network_dimensions_come_from_environments() -> None:
 def test_checkpoint_modes_and_resume_contracts() -> None:
     from pathlib import Path
 
-    from jax_shapley.config import ResumeConfig
+    from jax_shapley.train_dqn import ResumeConfig
 
     assert DQNRunConfig(GridworldConfig()).checkpoint_mode == "run"
     for mode in ("none", "agent", "agent-replay", "run"):
@@ -96,3 +98,14 @@ def test_checkpoint_modes_and_resume_contracts() -> None:
     resume = ResumeConfig(Path("runs/example"))
     with pytest.raises(FrozenInstanceError):
         resume.__setattr__("run", Path("other"))
+
+
+def test_saved_settings_preserve_numeric_types_and_reject_boolean_numbers() -> None:
+    # Coalescing JSON accessors must preserve the existing exact settings schema.
+    config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(gamma=1))
+    text = describe(config)
+    assert describe(parse_settings(text)) == text
+    saved = json.loads(text)
+    saved["config"]["train"]["gamma"] = True
+    with pytest.raises(ValueError, match="numerical"):
+        parse_settings(json.dumps(saved))

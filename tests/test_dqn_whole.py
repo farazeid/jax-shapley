@@ -8,10 +8,9 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from jax_shapley.algorithms.dqn import evaluate_dqn, initialize_run, run_chunk, whole_run
-from jax_shapley.config import DQNTrainConfig
 from jax_shapley.envs import Mastermind222
 from jax_shapley.networks import dqn_config
+from jax_shapley.train_dqn import DQNTrainConfig, evaluate_dqn, initialize_run, run_chunk, whole_run
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.dqn_support import RecordingSink
 

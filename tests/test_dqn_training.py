@@ -11,7 +11,11 @@ from flax import nnx, struct
 from gymnax.environments import spaces
 from jax import Array
 
-from jax_shapley.algorithms.dqn import (
+from jax_shapley.envs import Gridworld, Mastermind222
+from jax_shapley.envs.contracts import StepInfo
+from jax_shapley.networks import dqn_config
+from jax_shapley.train_dqn import (
+    DQNTrainConfig,
     RunState,
     environment_step,
     evaluate_dqn,
@@ -20,10 +24,6 @@ from jax_shapley.algorithms.dqn import (
     td_targets,
     training_step,
 )
-from jax_shapley.config import DQNTrainConfig
-from jax_shapley.envs import Gridworld, Mastermind222
-from jax_shapley.envs.contracts import StepInfo
-from jax_shapley.networks import dqn_config
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
