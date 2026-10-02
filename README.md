@@ -143,4 +143,6 @@ bash experiments/dqn/mastermind222.sh --compile-only
 bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
 ```
 
+`main()` handles parsing, restoration, compilation, writers and finalization. `run()` constructs the environment, initializes or accepts restored state, then trains, evaluates and emits checkpoints.
+
 Normal recipes run the required gates, compile initialization/training/evaluation into one numerical invocation, and save selective CSV metrics plus Orbax checkpoints. Every run saves full-state checkpoints; resume with `uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>`. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
