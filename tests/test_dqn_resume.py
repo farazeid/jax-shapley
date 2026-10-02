@@ -3,9 +3,11 @@
 import csv
 import json
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
@@ -27,6 +29,7 @@ from jax_shapley.train_dqn import (
     ResumeConfig,
     initialize_run,
     main,
+    make_snapshot,
     parse_args,
 )
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
@@ -67,7 +70,6 @@ def test_interruption_restores_without_duplicate_events(
 
     def checkpoint(self: RunWriter[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
         token = original_checkpoint(self, snapshot)
-        assert self.store is not None
         self.store.wait()
         if stage == "training" and int(snapshot.vector_step) == 3 and int(snapshot.phase) == 0:
             raise OSError("injected interruption after committed training checkpoint")
@@ -187,7 +189,6 @@ def test_resume_uses_saved_prng_after_default_changes(
     def interrupt(self: RunWriter[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
         token = original(self, snapshot)
         assert snapshot.key_implementation == implementation
-        assert self.store is not None
         self.store.wait()
         if int(snapshot.vector_step) == 2 and int(snapshot.phase) == 0:
             raise OSError("injected PRNG interruption")
@@ -226,6 +227,62 @@ def test_resume_uses_saved_prng_after_default_changes(
         assert store.metadata().key_implementation == implementation
     finally:
         store.close()
+
+
+def test_legacy_full_run_settings_restore_without_rewriting_config(tmp_path: Path) -> None:
+    baseline = main([*_args(tmp_path), "--train.total-timesteps", "8"])
+    assert baseline is not None
+    folder = Path(baseline.folder)
+    config = load_settings(folder / "config.json")
+    env = EpisodeStatisticsWrapper(config.env.make())
+    template = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(99))
+    store = CheckpointStore(folder)
+    legacy = json.loads((folder / "config.json").read_text())
+    legacy["config"]["checkpoint_mode"] = "run"
+    legacy_text = json.dumps(legacy, indent=2) + "\n"
+    try:
+        restored, metadata = restore_run(store, template, config)
+        snapshot = make_snapshot(
+            restored,
+            jnp.asarray(metadata.phase, jnp.int32),
+            jnp.asarray(metadata.evaluation_episodes, jnp.int32),
+            config.train,
+        )
+        store.save(snapshot, replace(metadata, settings=legacy_text))
+        store.wait()
+    finally:
+        store.close()
+    (folder / "config.json").write_text(legacy_text)
+    (folder / "summary.json").unlink()
+    before = _files(folder)
+    assert main(["resume", "--run", str(folder), "--validate-only"]) is None
+    assert main(["resume", "--run", str(folder), "--compile-only"]) is None
+    assert _files(folder) == before
+    recovered = main(["resume", "--run", str(folder)])
+    assert recovered == baseline
+    assert (folder / "config.json").read_text() == legacy_text
+    assert (folder / "metrics.csv").read_bytes() == before["metrics.csv"][0]
+
+
+def test_every_run_has_complete_recoverable_snapshot(tmp_path: Path) -> None:
+    result = main([*_args(tmp_path), "--train.total-timesteps", "4", "--train.eval-episodes", "0"])
+    assert result is not None
+    folder = Path(result.folder)
+    config = load_settings(folder / "config.json")
+    store = CheckpointStore(folder, read_only=True)
+    try:
+        env = EpisodeStatisticsWrapper(config.env.make())
+        template = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(99))
+        restored, metadata = restore_run(store, template, config)
+    finally:
+        store.close()
+    assert int(restored.vector_step) == 2
+    assert int(restored.replay.size) == 4
+    assert metadata.phase == 2
+    metrics = (folder / "metrics.csv").read_bytes()
+    recovered = main(["resume", "--run", str(folder)])
+    assert recovered is not None and recovered.environment_steps == 4
+    assert (folder / "metrics.csv").read_bytes() == metrics
 
 
 def _args(output: Path) -> list[str]:
@@ -271,32 +328,3 @@ def _clear_failed_effects() -> None:
     # Clear the expected failed callback effect, already asserted by its test.
     with suppress(RuntimeError):
         jax.effects_barrier()
-
-
-@pytest.mark.parametrize("mode", ["none", "agent", "agent-replay", "run"])
-def test_checkpoint_modes_and_resume_requirement(tmp_path: Path, mode: str) -> None:
-    result = main([
-        *_args(tmp_path),
-        "--train.total-timesteps",
-        "4",
-        "--train.eval-episodes",
-        "0",
-        "--checkpoint-mode",
-        mode,
-    ])
-    assert result is not None
-    folder = Path(result.folder)
-    config = load_settings(folder / "config.json")
-    if mode == "none":
-        assert not (folder / "checkpoints").exists()
-        return
-    assert load_agent(folder, config.network, load_replay=False).vector_step == 2
-    if mode in ("agent-replay", "run"):
-        from jax_shapley.run_io import load_replay
-
-        assert int(load_replay(folder).size) == 4
-    if mode != "run":
-        before = _files(folder)
-        with pytest.raises(ValueError, match="run checkpoint"):
-            main(["resume", "--run", str(folder)])
-        assert _files(folder) == before

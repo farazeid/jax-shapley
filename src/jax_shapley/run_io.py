@@ -31,7 +31,6 @@ from jax_shapley.networks import MLPConfig, QNetwork
 from jax_shapley.replay import ReplayState, empty_replay
 from jax_shapley.train_dqn import (
     AdamConfig,
-    CheckpointMode,
     DQNRunConfig,
     DQNTrainConfig,
     EnvironmentConfig,
@@ -85,7 +84,7 @@ METRIC_COLUMNS = ("kind", "step", "epsilon", "loss", "episode_return", "episode_
 @struct.dataclass
 class Snapshot:
     agent: tuple[Array, ...]
-    replay: ReplayState | None
+    replay: ReplayState
     optimizer: tuple[Array, ...]
     runtime: tuple[Array, ...]
     vector_step: Array
@@ -182,7 +181,6 @@ class RunWriter[Config: EnvironmentConfig]:
         except OSError:
             self.lock.close()
             raise RuntimeError("run folder already has an active writer") from None
-        self.store: CheckpointStore | None = None
         try:
             if metadata is not None:
                 # Preflight restoration/compilation runs without the writer lock.
@@ -198,7 +196,7 @@ class RunWriter[Config: EnvironmentConfig]:
                     log.truncate(metadata.csv_bytes)
                     log.flush()
                     os.fsync(log.fileno())
-            self.store = CheckpointStore(folder) if config.checkpoint_mode != "none" else None
+            self.store = CheckpointStore(folder)
         except BaseException:
             self.lock.close()
             raise
@@ -238,28 +236,27 @@ class RunWriter[Config: EnvironmentConfig]:
         return np.asarray(0, np.int32)
 
     def checkpoint(self, snapshot: Snapshot) -> CallbackToken:
-        if self.store is not None:
+        self.store.wait()
+        path = self.folder / "metrics.csv"
+        with path.open("a+b") as log:
+            log.flush()
+            os.fsync(log.fileno())
+            boundary = log.tell()
+        metadata = CheckpointMetadata(
+            describe(self.config),
+            int(host_array(snapshot.vector_step)),
+            int(host_array(snapshot.phase)),
+            int(host_array(snapshot.evaluation_episodes)),
+            boundary,
+            prefix_digest(path, boundary),
+            self.elapsed(),
+            training_seconds=self.training_seconds,
+            key_implementation=snapshot.key_implementation,
+        )
+        self.store.save(snapshot, metadata)
+        # The pre-evaluation snapshot must commit before evaluation can emit rows.
+        if metadata.phase == 1:
             self.store.wait()
-            path = self.folder / "metrics.csv"
-            with path.open("a+b") as log:
-                log.flush()
-                os.fsync(log.fileno())
-                boundary = log.tell()
-            metadata = CheckpointMetadata(
-                describe(self.config),
-                int(host_array(snapshot.vector_step)),
-                int(host_array(snapshot.phase)),
-                int(host_array(snapshot.evaluation_episodes)),
-                boundary,
-                prefix_digest(path, boundary),
-                self.elapsed(),
-                training_seconds=self.training_seconds,
-                key_implementation=snapshot.key_implementation,
-            )
-            self.store.save(snapshot, metadata)
-            # The pre-evaluation snapshot must commit before evaluation can emit rows.
-            if metadata.phase == 1:
-                self.store.wait()
         return np.asarray(0, np.int32)
 
     def elapsed(self) -> float:
@@ -267,8 +264,7 @@ class RunWriter[Config: EnvironmentConfig]:
 
     def close(self) -> None:
         try:
-            if self.store is not None:
-                self.store.close()
+            self.store.close()
         finally:
             self.lock.close()
 
@@ -290,16 +286,16 @@ class CheckpointStore:
         metadata.validate()
         if metadata.key_implementation != snapshot.key_implementation:
             raise ValueError("checkpoint PRNG metadata disagrees with snapshot")
+        if not snapshot.optimizer or not snapshot.runtime:
+            raise ValueError("checkpoint requires complete optimizer and run state")
         self.manager.wait_until_finished()
         sequence = 0 if self.sequence is None else self.sequence + 1
         items: dict[str, object] = {
             "agent": ocp.args.StandardSave(_pack((*snapshot.agent, snapshot.epsilon, snapshot.vector_step))),
+            "replay": ocp.args.StandardSave(_pack(_leaves(snapshot.replay))),
+            "run_state": ocp.args.StandardSave(_pack((*snapshot.optimizer, *snapshot.runtime))),
             "metadata": ocp.args.JsonSave(asdict(metadata)),
         }
-        if snapshot.replay is not None:
-            items["replay"] = ocp.args.StandardSave(_pack(_leaves(snapshot.replay)))
-        if snapshot.runtime:
-            items["run_state"] = ocp.args.StandardSave(_pack((*snapshot.optimizer, *snapshot.runtime)))
         if not self.manager.save(sequence, args=ocp.args.Composite(**items)):
             raise OSError("Orbax declined a required checkpoint")
         self.sequence = sequence
@@ -397,7 +393,7 @@ def restore_run[State, Config: EnvironmentConfig](
     store: CheckpointStore, template: RunState[State], config: DQNRunConfig[Config]
 ) -> tuple[RunState[State], CheckpointMetadata]:
     metadata = store.metadata()
-    if config.checkpoint_mode != "run" or metadata.settings != describe(config):
+    if describe(parse_settings(metadata.settings)) != describe(config):
         raise ValueError("resume requires identical saved settings and a run checkpoint")
     agent = nnx.state((template.model, template.target))
     values = store.arrays("agent", (*_leaves(agent), jnp.asarray(0.0, jnp.float32), template.vector_step))
@@ -463,6 +459,10 @@ def load_settings(path: Path) -> DQNRunConfig[EnvironmentConfig]:
 def parse_settings(text: str) -> DQNRunConfig[EnvironmentConfig]:
     envelope = _mapping(json.loads(text))
     config = _mapping(envelope["config"])
+    # Older full-run settings carried a mode selector. Normalize that one field;
+    # partial/no-checkpoint formats remain unsupported.
+    if "checkpoint_mode" in config and config.pop("checkpoint_mode") != "run":
+        raise ValueError("saved settings require a full run checkpoint")
     if set(config) != {field.name for field in fields(DQNRunConfig)}:
         raise ValueError("saved run settings have an invalid schema")
     train = _training(_mapping(config["train"]))
@@ -480,9 +480,6 @@ def parse_settings(text: str) -> DQNRunConfig[EnvironmentConfig]:
     widths = config["hidden_widths"]
     if not isinstance(widths, list) or any(type(width) is not int for width in widths):
         raise ValueError("invalid saved hidden widths")
-    mode = _string(config, "checkpoint_mode")
-    if mode not in ("none", "agent", "agent-replay", "run"):
-        raise ValueError("invalid saved checkpoint mode")
     result = DQNRunConfig(
         env,
         train,
@@ -490,7 +487,6 @@ def parse_settings(text: str) -> DQNRunConfig[EnvironmentConfig]:
         _integer(config, "seed"),
         _integer(config, "chunk_steps"),
         Path(_string(config, "output")),
-        cast(CheckpointMode, mode),
         _boolean(config, "validate_only"),
         _boolean(config, "compile_only"),
     )

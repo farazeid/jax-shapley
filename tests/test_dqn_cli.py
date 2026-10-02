@@ -50,6 +50,8 @@ def test_help_and_invalid_settings(capsys: pytest.CaptureFixture[str]) -> None:
         parse_args(["gridworld", "--train.gamma", "nan"])
     with pytest.raises(SystemExit):
         parse_args(["gridworld", "--unknown"])
+    with pytest.raises(SystemExit):
+        parse_args(["gridworld", "--checkpoint-mode", "none"])
 
 
 def test_validate_and_compile_only_create_no_artifacts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -129,7 +131,7 @@ def test_tiny_training_artifacts_and_evaluation(tmp_path: Path) -> None:
     assert settings["network"]["input_features"] == 8
 
 
-def test_optional_artifacts_and_checkpoint_cadence(tmp_path: Path) -> None:
+def test_full_artifacts_and_checkpoint_cadence(tmp_path: Path) -> None:
     result = main([
         "gridworld",
         "--train.total-timesteps",
@@ -142,13 +144,11 @@ def test_optional_artifacts_and_checkpoint_cadence(tmp_path: Path) -> None:
         "4",
         "--chunk-steps",
         "3",
-        "--checkpoint-mode",
-        "none",
         "--output",
         str(tmp_path),
     ])
     assert result is not None
-    assert not (Path(result.folder) / "checkpoints").exists()
+    assert (Path(result.folder) / "checkpoints").is_dir()
     assert checkpoint_due(1, 1, 4)
     assert checkpoint_due(5_000, 1, 50_000)
     assert not checkpoint_due(4_999, 1, 50_000)

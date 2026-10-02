@@ -95,14 +95,13 @@ def test_stale_resume_preserves_newer_checkpoint_and_committed_log(tmp_path: Pat
     initialize_metrics(path)
     sink = RunWriter(tmp_path, config)
     try:
-        sink.checkpoint(make_snapshot(state, zero, zero, config.train, "run"))
-        assert sink.store is not None
+        sink.checkpoint(make_snapshot(state, zero, zero, config.train))
         sink.store.wait()
         preflight_metadata, preflight_sequence = sink.store.metadata(), sink.store.sequence
         # A writer commits while the other resume is still compiling.
         write_metric_rows(path, [MetricRow("episode", 0, episode_return=1.0, episode_length=1, epsilon=1.0)])
         state, _ = training_step(state, env, env.default_params, config.train)
-        sink.checkpoint(make_snapshot(state, zero, zero, config.train, "run"))
+        sink.checkpoint(make_snapshot(state, zero, zero, config.train))
         sink.store.wait()
         latest_metadata, latest_sequence = sink.store.metadata(), sink.store.sequence
     finally:

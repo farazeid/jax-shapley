@@ -38,7 +38,6 @@ def test_whole_run_matches_chunk_helpers(seed: int, block_size: int) -> None:
             network=network,
             config=config,
             chunk_steps=block_size,
-            checkpoint_mode="run",
             sink=sink,
         )
     )

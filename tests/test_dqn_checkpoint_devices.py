@@ -57,7 +57,7 @@ def _verify_placement(folder: Path) -> None:
             state, jnp.asarray(2, jnp.int32)
         )
         zero = jnp.asarray(0, jnp.int32)
-        snapshot = make_snapshot(state, zero, zero, config.train, "run")
+        snapshot = make_snapshot(state, zero, zero, config.train)
     store = CheckpointStore(folder)
     try:
         store.save(snapshot, CheckpointMetadata(describe(config), 2, 0, 0, key_implementation="rbg"))
