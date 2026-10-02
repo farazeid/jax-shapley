@@ -1,0 +1,51 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": {
+    "characteristics.py": "39929f25b23af9416cd79c21f0a7532522eb8295f64e7339f6bb751fbf165ec0",
+    "shapley.py": "1bb823165546d39140b1fa8d64a7b4f15aee40ab0df88c1048ce65b3210a5490",
+    "utils.py": "2a0b8c35b5d62ca9dea0a74da7d5e1d2abba7f16302a6c98b288678e103ecc75",
+    "models.py": "ad427b514e460a03b36e69699ed8d7d4a892e9aa3a3e6a308b5b24e777bae62a",
+    "dqn.py": "e6aa5ee1213ea20a0a06f6002b97d657c623d5fb25d280ad9e21bb4505035a92"
+  },
+  "transitions_sha256": "1c8637568704afaa463ff6b6d20735ba9634a0da5fa51f1e55edf180f352a611",
+  "fixture_sha256": "a955d0fab667780772b75cdcaebcc3ca140c19b1d90c178c9ece3ab9e0f7571d",
+  "torch_version": "2.6.0",
+  "seed": 1729,
+  "epsilon": 0.2,
+  "learning_rate": 0.00025,
+  "steps": 3,
+  "batch_size": 8,
+  "mask": -2,
+  "off_policy_variants": {
+    "weighted": {
+      "weighting": true,
+      "clip_coef": "inf"
+    },
+    "unweighted": {
+      "weighting": false,
+      "clip_coef": "inf"
+    },
+    "weighted_clipped": {
+      "weighting": true,
+      "clip_coef": 0.99
+    }
+  },
+  "cases": {
+    "gridworld": {
+      "features": 2,
+      "actions": 4,
+      "width": 64
+    },
+    "mastermind222": {
+      "features": 8,
+      "actions": 4,
+      "width": 64
+    },
+    "hypercube": {
+      "features": 5,
+      "actions": 10,
+      "width": 128
+    }
+  },
+  "collector": "unchanged characteristic/Shapley/sampler/DQN ASTs, CPU, fixed coalitions and batches"
+}
