@@ -66,10 +66,13 @@ def test_hypercube_chain_settings(tmp_path: Path) -> None:
     explained = parse_args(shapley[4:])
     assert isinstance(explained, ShapleyRunConfig)
     assert (explained.with_exact_char, explained.buffers) == (False, "characteristic")
-    assert explained.train.exact_condition == pytest.approx(0.001)
+    # Source hypercube_value.py stops prediction Shapley models at 0.01; behaviour uses 0.001.
+    assert explained.train.exact_condition == pytest.approx(0.01)
     assert explained.characteristic.parent == char.output and explained.agent.parent == dqn.output
     sweep = _capture(tmp_path, "hypercube.sh", ("--kind", "behaviour", "--seed", "1"))
     assert len(sweep) == 20 * 3
+    behaviour = parse_args(sweep[2][4:])
+    assert isinstance(behaviour, ShapleyRunConfig) and behaviour.train.exact_condition == pytest.approx(0.001)
 
 
 def test_smoke_recipe_chains_three_short_stages(tmp_path: Path) -> None:
