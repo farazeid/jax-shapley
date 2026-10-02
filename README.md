@@ -135,7 +135,7 @@ Quick alias:
 
 ## DQN experiments
 
-Experiment settings live in shell recipes, parsed by Tyro into validated Python dataclasses. The experiment flow, configuration, replay and learning code live together in [train_dqn.py](src/jax_shapley/train_dqn.py); [networks.py](src/jax_shapley/networks.py) defines the models and [run_io.py](src/jax_shapley/run_io.py) handles callbacks, CSV and Orbax recovery.
+Experiment settings live in shell recipes, parsed by Tyro into validated Python dataclasses. The experiment flow, configuration and learning code live together in [train_dqn.py](src/jax_shapley/train_dqn.py); [replay.py](src/jax_shapley/replay.py) defines the buffer; [networks.py](src/jax_shapley/networks.py) defines the models and [run_io.py](src/jax_shapley/run_io.py) handles callbacks, CSV and Orbax recovery.
 
 ```bash
 bash experiments/dqn/gridworld.sh --validate-only

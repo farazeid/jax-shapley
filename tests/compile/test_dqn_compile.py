@@ -10,17 +10,8 @@ from flax import nnx
 
 from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
 from jax_shapley.networks import dqn_config
-from jax_shapley.train_dqn import (
-    DQNTrainConfig,
-    append,
-    empty_replay,
-    evaluate_dqn,
-    initialize_run,
-    run_chunk,
-    sample,
-    update,
-    update_target,
-)
+from jax_shapley.replay import append, empty_replay, sample
+from jax_shapley.train_dqn import DQNTrainConfig, evaluate_dqn, initialize_run, run_chunk, update, update_target
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsWrapper
 from tests.test_replay import batch
 
