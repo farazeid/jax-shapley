@@ -4,7 +4,9 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 dqn_gates() {
-    # Inspection modes do not launch training jobs; honor the last toggle.
+    # Inspection modes do not launch training jobs; honor the last toggle. Orchestrators that
+    # already ran ./check.sh for this checkout set JAX_SHAPLEY_GATES_PASSED=1.
+    if [[ "${JAX_SHAPLEY_GATES_PASSED:-}" == 1 ]]; then return 0; fi
     local validate=false compile=false argument
     for argument in "$@"; do
         case "$argument" in

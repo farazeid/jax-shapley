@@ -157,4 +157,4 @@ bash experiments/explanations/gridworld.sh characteristic --kind behaviour --age
 bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --characteristic runs/<characteristic-run>
 ```
 
-Runs compile before creating artifacts, checkpoint complete state, and resume exactly with `uv run python -m jax_shapley.train_explanations resume --run runs/<run>`. See the [explanations guide](docs/Explanations.md).
+Runs compile before creating artifacts, checkpoint complete state, and resume exactly with `uv run python -m jax_shapley.train_explanations resume --run runs/<run>`. See the [explanations guide](docs/Explanations.md). Against the unchanged PyTorch code, outcomes match statistically and steady-state CPU training epochs are 2.7–4.7× faster; see the [explanation port report](docs/Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md).

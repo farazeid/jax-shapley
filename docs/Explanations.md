@@ -47,9 +47,11 @@ The Gridworld and Mastermind recipes run seeds 1–20, or the one given by `--se
 | Mastermind-222 behaviour characteristic | 50 | 10,000 | |
 | Mastermind-222 prediction characteristic | 80 | 10,000 | |
 | Mastermind-222 Shapley | 50 | 10,000 | |
-| Hypercube (all stages) | 10,000 | = epochs | validation fraction 0.016 (160 rows), exact buffer 100,000, exact condition 0.01 (characteristic) / 0.001 (Shapley), `--no-with-exact-char`, `--train.track-batch` |
+| Hypercube (all stages) | 10,000 | = epochs | validation fraction 0.016 (160 rows), exact buffer 100,000, exact condition 0.01 (characteristic) and 0.001 (behaviour Shapley) or 0.01 (prediction Shapley), `--no-with-exact-char`, `--train.track-batch` |
 
 All runs use learning rate 2.5e-4, batch 128, a 10,000-observation buffer split into train and validation sets, 16 collection environments, and the greedy explained policy. Networks are 2×64 ReLU, or 2×128 for Hypercube.
+
+The [PyTorch/JAX comparison report](Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md) validates these recipes end to end against the unchanged upstream code. 29 of 32 statistical comparisons pass, and the 3 exceptions are a protocol confound that the matched protocol resolves. Steady-state training epochs are 2.7–4.7× faster on CPU.
 
 ## Execution, artifacts and resume
 
@@ -60,6 +62,8 @@ A run folder holds `config.json`, `metrics.csv` (`epoch, step, train_loss, valid
 `resume` restores that state, truncates `metrics.csv` to the committed boundary and continues to a result identical to an uninterrupted run. Exact values are recomputed rather than saved. Saved settings record a digest of the explained agent (and characteristic); resuming refuses changed models or settings.
 
 **XLA CPU workaround.** With jax 0.11.0 on CPU, a jitted network applied to a broadcast-constant batch (for example `full_like(observations, MASK)`) can return wrong values from about 64 rows. The null value is therefore computed from one all-masked row and broadcast. `tests/test_jit_equivalence.py` checks compiled results against eager evaluation at production batch sizes.
+
+**Exact-loss cost.** The exact characteristic table is padded to a static bound on unique observations. Its valid entries are compacted once per run, and each epoch evaluates only the 512-row chunks that hold them.
 
 ## Reference fixture
 
