@@ -99,7 +99,7 @@ The default DQN hidden widths are `(64, 64)` for Gridworld and Mastermind-222. P
 
 Offline matched-weight tests compare outputs and input/parameter gradients against the pinned source builder, in eager and compiled execution. Abstract NNX compilation tests cover single observations, batches, rollout axes, int32/float32 inputs, gradients, `vmap`, and `scan`; GPU coverage skips explicitly when unavailable.
 
-See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). PPO training, FastSVERL explanation models, and paper evaluation reproduction remain deferred.
+See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). PPO training, FastSVERL explanation models, and paper evaluation reproduction remain deferred; the [explanations guide](docs/Explanations.md) documents the captured behaviour/prediction reference fixture and the planned modules.
 
 ## Typed contracts and compile-first checks
 
