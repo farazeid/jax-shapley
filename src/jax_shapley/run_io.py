@@ -28,6 +28,7 @@ from jax import Array
 from numpy.typing import NDArray
 
 from jax_shapley.networks import MLPConfig, QNetwork
+from jax_shapley.replay import ReplayState, empty_replay
 from jax_shapley.train_dqn import (
     AdamConfig,
     CheckpointMode,
@@ -37,11 +38,9 @@ from jax_shapley.train_dqn import (
     GridworldConfig,
     HypercubeConfig,
     Mastermind222Config,
-    ReplayState,
     RunState,
     RunSummary,
     StepMetrics,
-    empty_replay,
     epsilon_at,
 )
 from jax_shapley.wrappers import EpisodeStatisticsState

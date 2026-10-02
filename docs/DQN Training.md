@@ -7,11 +7,12 @@ small-function organization; FastSVERL supplies the algorithm and settings.
 
 ## Source layout and reading order
 
-The DQN experiment is implemented in one script with separate network and host-I/O modules:
+The DQN experiment is implemented in one script with separate replay, network and host-I/O modules:
 
 | File | Responsibility |
 | --- | --- |
-| `src/jax_shapley/train_dqn.py` | Validated configuration, numerical state, CLI orchestration, replay, policies, learning, training and evaluation |
+| `src/jax_shapley/train_dqn.py` | Validated configuration, numerical state, CLI orchestration, policies, learning, training and evaluation |
+| `src/jax_shapley/replay.py` | Transition batches, fixed-capacity storage, insertion and sampling |
 | `src/jax_shapley/networks.py` | Network configuration, layer initialization and forward passes |
 | `src/jax_shapley/run_io.py` | Callback contracts/router, `RunWriter`, saved-settings parsing, selective CSV records, Orbax checkpoints and recovery |
 
@@ -30,8 +31,9 @@ exist. `run_io.py` shares those typed contracts, and module execution delegates 
 the canonical trainer module so CLI and restored configurations have the same
 Python class identities. Importing either module starts no writer or experiment.
 
-The former `config`, `replay` and `algorithms.dqn` modules have been removed; import
-their contracts and numerical functions from `jax_shapley.train_dqn`. The former
+The former `config` and `algorithms.dqn` modules have been removed; import
+their contracts and numerical functions from `jax_shapley.train_dqn`. Replay
+contracts and operations live in `jax_shapley.replay`. The former
 `artifacts`, `execution`, `logging`, `checkpoints` and `settings` modules have also
 been removed; import their host APIs from `jax_shapley.run_io`. The host writer is
 now named `RunWriter`. CLI arguments, shell recipes, checkpoint schema and artifact

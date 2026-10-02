@@ -11,10 +11,10 @@ from flax import nnx
 from jax import Array
 
 from jax_shapley.networks import QNetwork, dqn_config
+from jax_shapley.replay import TransitionBatch
 from jax_shapley.train_dqn import (
     DQNTrainConfig,
     LossMetrics,
-    TransitionBatch,
     action_log_probabilities,
     choose_action,
     dqn_loss,
