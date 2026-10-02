@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from jax import Array
 
-from jax_shapley.execution import CallbackToken, Snapshot
+from jax_shapley.run_io import CallbackToken, Snapshot
 
 
 @dataclass

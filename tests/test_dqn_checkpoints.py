@@ -11,13 +11,26 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import epsilon_at, initialize_run, make_snapshot, run_chunk
-from jax_shapley.artifacts import describe, initialize_metrics
-from jax_shapley.checkpoints import CheckpointMetadata, CheckpointStore, load_agent, restore_run
-from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
 from jax_shapley.envs import Gridworld
-from jax_shapley.execution import Snapshot
-from jax_shapley.logging import ArtifactSink
+from jax_shapley.run_io import (
+    CheckpointMetadata,
+    CheckpointStore,
+    RunWriter,
+    Snapshot,
+    describe,
+    initialize_metrics,
+    load_agent,
+    restore_run,
+)
+from jax_shapley.train_dqn import (
+    DQNRunConfig,
+    DQNTrainConfig,
+    GridworldConfig,
+    epsilon_at,
+    initialize_run,
+    make_snapshot,
+    run_chunk,
+)
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
@@ -120,7 +133,7 @@ def test_restoration_preserves_prng_across_different_defaults(tmp_path: Path, im
     snapshot = make_snapshot(state, zero, zero, config.train, "run")
     assert snapshot.key_implementation == implementation
     initialize_metrics(tmp_path / "metrics.csv")
-    sink = ArtifactSink(tmp_path, config)
+    sink = RunWriter(tmp_path, config)
     try:
         sink.checkpoint(snapshot)
     finally:
@@ -172,7 +185,7 @@ def test_save_rejects_inconsistent_prng_metadata(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("corruption", ["shape", "dtype", "nonfinite"])
 def test_agent_loading_rejects_corrupt_arrays(tmp_path: Path, corruption: str) -> None:
-    from jax_shapley.algorithms.dqn import make_snapshot
+    from jax_shapley.train_dqn import make_snapshot
 
     config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(total_timesteps=8, buffer_size=3), hidden_widths=(4,))
     env = EpisodeStatisticsWrapper(Gridworld())

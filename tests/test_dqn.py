@@ -10,8 +10,11 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import (
+from jax_shapley.networks import QNetwork, dqn_config
+from jax_shapley.train_dqn import (
+    DQNTrainConfig,
     LossMetrics,
+    TransitionBatch,
     action_log_probabilities,
     choose_action,
     dqn_loss,
@@ -23,9 +26,6 @@ from jax_shapley.algorithms.dqn import (
     update,
     update_target,
 )
-from jax_shapley.config import DQNTrainConfig
-from jax_shapley.networks import QNetwork, dqn_config
-from jax_shapley.replay import TransitionBatch
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_dqn.npz"
 

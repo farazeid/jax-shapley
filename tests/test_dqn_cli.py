@@ -2,12 +2,14 @@
 
 import csv
 import json
+import os
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- fixed local module argv in CLI regression.
+import sys
 from pathlib import Path
 
 import pytest
 
-from jax_shapley.config import DQNRunConfig, HypercubeConfig
-from jax_shapley.train_dqn import checkpoint_due, main, parse_args
+from jax_shapley.train_dqn import DQNRunConfig, HypercubeConfig, checkpoint_due, main, parse_args
 
 
 def test_subcommands_tuple_settings_and_shell_override() -> None:
@@ -151,3 +153,63 @@ def test_optional_artifacts_and_checkpoint_cadence(tmp_path: Path) -> None:
     assert checkpoint_due(5_000, 1, 50_000)
     assert not checkpoint_due(4_999, 1, 50_000)
     assert checkpoint_due(625, 16, 100_000)
+
+
+def test_module_entrypoint_training_and_completed_resume(tmp_path: Path) -> None:
+    # Exercise python -m in fresh interpreters: host adapters must share the
+    # trainer's class identities for CLI parsing and saved-settings restoration.
+    environment = dict(os.environ)
+    environment["JAX_PLATFORMS"] = "cpu"
+    command = [sys.executable, "-m", "jax_shapley.train_dqn"]
+    trained = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed local module argv.
+        [
+            *command,
+            "mastermind222",
+            "--train.total-timesteps",
+            "8",
+            "--train.num-envs",
+            "2",
+            "--train.learning-starts",
+            "0",
+            "--train.train-frequency",
+            "1",
+            "--train.buffer-size",
+            "7",
+            "--train.batch-size",
+            "3",
+            "--train.eval-episodes",
+            "2",
+            "--hidden-widths",
+            "4",
+            "--chunk-steps",
+            "3",
+            "--output",
+            str(tmp_path),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert trained.returncode == 0, trained.stdout + trained.stderr
+    folder = next(tmp_path.iterdir())
+    summary = json.loads((folder / "summary.json").read_text())
+    assert summary["environment_steps"] == 8
+    assert summary["updates"] == 3
+    assert summary["evaluation_episodes"] >= 2
+    original_metrics = (folder / "metrics.csv").read_bytes()
+    (folder / "summary.json").unlink()
+    resumed = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed local module argv.
+        [*command, "resume", "--run", str(folder)],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert json.loads((folder / "summary.json").read_text()) == summary
+    assert (folder / "metrics.csv").read_bytes() == original_metrics

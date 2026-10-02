@@ -7,10 +7,9 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from jax_shapley.algorithms.dqn import continue_run, initialize_run, whole_run
-from jax_shapley.config import CheckpointMode, DQNTrainConfig
 from jax_shapley.envs import Mastermind222
 from jax_shapley.networks import dqn_config
+from jax_shapley.train_dqn import CheckpointMode, DQNTrainConfig, continue_run, initialize_run, whole_run
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.dqn_support import RecordingSink
 

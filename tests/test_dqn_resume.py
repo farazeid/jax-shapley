@@ -11,13 +11,24 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.algorithms.dqn import initialize_run
-from jax_shapley.checkpoints import CheckpointStore, load_agent, restore_run
-from jax_shapley.config import DQNRunConfig, EnvironmentConfig, Mastermind222Config, ResumeConfig
-from jax_shapley.execution import CallbackToken, Snapshot
-from jax_shapley.logging import ArtifactSink
-from jax_shapley.settings import load_settings
-from jax_shapley.train_dqn import main, parse_args
+from jax_shapley.run_io import (
+    CallbackToken,
+    CheckpointStore,
+    RunWriter,
+    Snapshot,
+    load_agent,
+    load_settings,
+    restore_run,
+)
+from jax_shapley.train_dqn import (
+    DQNRunConfig,
+    EnvironmentConfig,
+    Mastermind222Config,
+    ResumeConfig,
+    initialize_run,
+    main,
+    parse_args,
+)
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
@@ -51,10 +62,10 @@ def test_interruption_restores_without_duplicate_events(
 ) -> None:
     baseline = main(_args(tmp_path / "baseline"))
     assert baseline is not None
-    original_checkpoint = ArtifactSink.checkpoint
-    original_evaluation = ArtifactSink.evaluation
+    original_checkpoint = RunWriter.checkpoint
+    original_evaluation = RunWriter.evaluation
 
-    def checkpoint(self: ArtifactSink[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
+    def checkpoint(self: RunWriter[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
         token = original_checkpoint(self, snapshot)
         assert self.store is not None
         self.store.wait()
@@ -63,7 +74,7 @@ def test_interruption_restores_without_duplicate_events(
         return token
 
     def evaluation(
-        self: ArtifactSink[EnvironmentConfig], returns: Array, completed: Array, first_index: Array
+        self: RunWriter[EnvironmentConfig], returns: Array, completed: Array, first_index: Array
     ) -> CallbackToken:
         token = original_evaluation(self, returns, completed, first_index)
         if stage == "evaluation":
@@ -71,8 +82,8 @@ def test_interruption_restores_without_duplicate_events(
         return token
 
     with monkeypatch.context() as patch:
-        patch.setattr(ArtifactSink, "checkpoint", checkpoint)
-        patch.setattr(ArtifactSink, "evaluation", evaluation)
+        patch.setattr(RunWriter, "checkpoint", checkpoint)
+        patch.setattr(RunWriter, "evaluation", evaluation)
         with pytest.raises(Exception, match="injected interruption"):
             main(_args(tmp_path / "interrupted"))
         _clear_failed_effects()
@@ -171,9 +182,9 @@ def test_required_checkpoint_failure_prevents_success(tmp_path: Path, monkeypatc
 def test_resume_uses_saved_prng_after_default_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, implementation: str
 ) -> None:
-    original = ArtifactSink.checkpoint
+    original = RunWriter.checkpoint
 
-    def interrupt(self: ArtifactSink[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
+    def interrupt(self: RunWriter[EnvironmentConfig], snapshot: Snapshot) -> CallbackToken:
         token = original(self, snapshot)
         assert snapshot.key_implementation == implementation
         assert self.store is not None
@@ -186,7 +197,7 @@ def test_resume_uses_saved_prng_after_default_changes(
         baseline = main([*_args(tmp_path / "baseline"), "--train.total-timesteps", "8"])
         assert baseline is not None
         with monkeypatch.context() as patch:
-            patch.setattr(ArtifactSink, "checkpoint", interrupt)
+            patch.setattr(RunWriter, "checkpoint", interrupt)
             with pytest.raises(Exception, match="PRNG interruption"):
                 main([*_args(tmp_path / "interrupted"), "--train.total-timesteps", "8"])
             _clear_failed_effects()
@@ -281,7 +292,7 @@ def test_checkpoint_modes_and_resume_requirement(tmp_path: Path, mode: str) -> N
         return
     assert load_agent(folder, config.network, load_replay=False).vector_step == 2
     if mode in ("agent-replay", "run"):
-        from jax_shapley.checkpoints import load_replay
+        from jax_shapley.run_io import load_replay
 
         assert int(load_replay(folder).size) == 4
     if mode != "run":

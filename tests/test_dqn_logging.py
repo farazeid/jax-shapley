@@ -8,11 +8,25 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from jax_shapley.algorithms.dqn import StepMetrics, initialize_run, make_snapshot, training_step
-from jax_shapley.artifacts import MetricRow, initialize_metrics, record_metrics, write_metric_rows
-from jax_shapley.checkpoints import CheckpointMetadata
-from jax_shapley.config import DQNRunConfig, DQNTrainConfig, GridworldConfig
-from jax_shapley.logging import ArtifactSink, prefix_digest, verify_log
+from jax_shapley.run_io import (
+    CheckpointMetadata,
+    MetricRow,
+    RunWriter,
+    initialize_metrics,
+    prefix_digest,
+    record_metrics,
+    verify_log,
+    write_metric_rows,
+)
+from jax_shapley.train_dqn import (
+    DQNRunConfig,
+    DQNTrainConfig,
+    GridworldConfig,
+    StepMetrics,
+    initialize_run,
+    make_snapshot,
+    training_step,
+)
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 
 
@@ -79,7 +93,7 @@ def test_stale_resume_preserves_newer_checkpoint_and_committed_log(tmp_path: Pat
     zero = jnp.asarray(0, jnp.int32)
     path = tmp_path / "metrics.csv"
     initialize_metrics(path)
-    sink = ArtifactSink(tmp_path, config)
+    sink = RunWriter(tmp_path, config)
     try:
         sink.checkpoint(make_snapshot(state, zero, zero, config.train, "run"))
         assert sink.store is not None
@@ -96,12 +110,12 @@ def test_stale_resume_preserves_newer_checkpoint_and_committed_log(tmp_path: Pat
     committed = path.read_bytes()
     verify_log(path, preflight_metadata)  # Prefix validation alone cannot detect staleness.
     with pytest.raises(RuntimeError, match="checkpoint changed"):
-        ArtifactSink(tmp_path, config, metadata=preflight_metadata, checkpoint_sequence=preflight_sequence)
+        RunWriter(tmp_path, config, metadata=preflight_metadata, checkpoint_sequence=preflight_sequence)
     assert path.read_bytes() == committed
     verify_log(path, latest_metadata)
     # Rejection releases the lock, and a current resume still rolls back only its tail.
     with path.open("a") as output:
         output.write("uncommitted tail\n")
-    current = ArtifactSink(tmp_path, config, metadata=latest_metadata, checkpoint_sequence=latest_sequence)
+    current = RunWriter(tmp_path, config, metadata=latest_metadata, checkpoint_sequence=latest_sequence)
     current.close()
     assert path.read_bytes() == committed

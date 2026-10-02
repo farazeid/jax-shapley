@@ -10,8 +10,7 @@ from typing import cast
 
 import pytest
 
-from jax_shapley.config import DQNRunConfig, HypercubeConfig
-from jax_shapley.train_dqn import parse_args
+from jax_shapley.train_dqn import DQNRunConfig, HypercubeConfig, parse_args
 
 ROOT = Path(__file__).parents[1]
 
