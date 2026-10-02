@@ -25,7 +25,6 @@ while read -r side dimension timesteps; do
             --env.side-length "$side" \
             --env.dimension "$dimension" \
             --seed "$seed" \
-            --checkpoint-mode run \
             --hidden-widths 128 128 \
             --train.num-envs 16 \
             --train.total-timesteps "$timesteps" \

@@ -85,14 +85,11 @@ def test_network_dimensions_come_from_environments() -> None:
     assert tuple(layer.features for layer in cube.layers) == (128, 128, 10)
 
 
-def test_checkpoint_modes_and_resume_contracts() -> None:
+def test_resume_contracts() -> None:
     from pathlib import Path
 
     from jax_shapley.train_dqn import ResumeConfig
 
-    assert DQNRunConfig(GridworldConfig()).checkpoint_mode == "run"
-    for mode in ("none", "agent", "agent-replay", "run"):
-        assert replace(DQNRunConfig(GridworldConfig()), checkpoint_mode=mode).checkpoint_mode == mode
     with pytest.raises(ValueError, match="mutually exclusive"):
         ResumeConfig(Path("runs/example"), validate_only=True, compile_only=True)
     resume = ResumeConfig(Path("runs/example"))
@@ -108,4 +105,12 @@ def test_saved_settings_preserve_numeric_types_and_reject_boolean_numbers() -> N
     saved = json.loads(text)
     saved["config"]["train"]["gamma"] = True
     with pytest.raises(ValueError, match="numerical"):
+        parse_settings(json.dumps(saved))
+
+
+@pytest.mark.parametrize("legacy_mode", ["none", "agent", "agent-replay"])
+def test_saved_partial_checkpoint_modes_are_rejected(legacy_mode: str) -> None:
+    saved = json.loads(describe(DQNRunConfig(GridworldConfig())))
+    saved["config"]["checkpoint_mode"] = legacy_mode
+    with pytest.raises(ValueError, match="full run checkpoint"):
         parse_settings(json.dumps(saved))

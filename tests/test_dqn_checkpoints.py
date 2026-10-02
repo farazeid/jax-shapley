@@ -1,5 +1,6 @@
 """Orbax commits, typed partial loading and complete numerical continuation."""
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -130,7 +131,7 @@ def test_restoration_preserves_prng_across_different_defaults(tmp_path: Path, im
     advance = nnx.jit(partial(run_chunk, env=env, params=env.default_params, config=config.train, chunk_steps=2))
     state, _ = advance(state, jnp.asarray(2, jnp.int32))
     zero = jnp.asarray(0, jnp.int32)
-    snapshot = make_snapshot(state, zero, zero, config.train, "run")
+    snapshot = make_snapshot(state, zero, zero, config.train)
     assert snapshot.key_implementation == implementation
     initialize_metrics(tmp_path / "metrics.csv")
     sink = RunWriter(tmp_path, config)
@@ -175,9 +176,7 @@ def test_save_rejects_inconsistent_prng_metadata(tmp_path: Path) -> None:
     store = CheckpointStore(tmp_path)
     try:
         with pytest.raises(ValueError, match="PRNG metadata"):
-            store.save(
-                make_snapshot(state, zero, zero, config.train, "run"), CheckpointMetadata(describe(config), 0, 0, 0)
-            )
+            store.save(make_snapshot(state, zero, zero, config.train), CheckpointMetadata(describe(config), 0, 0, 0))
         assert store.sequence is None
     finally:
         store.close()
@@ -191,7 +190,7 @@ def test_agent_loading_rejects_corrupt_arrays(tmp_path: Path, corruption: str) -
     env = EpisodeStatisticsWrapper(Gridworld())
     state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(0))
     zero = jnp.asarray(0, jnp.int32)
-    snapshot = make_snapshot(state, zero, zero, config.train, "run")
+    snapshot = make_snapshot(state, zero, zero, config.train)
     value = snapshot.agent[0]
     if corruption == "shape":
         value = value[:-1]
@@ -217,3 +216,20 @@ def test_agent_loading_rejects_corrupt_arrays(tmp_path: Path, corruption: str) -
         store.close()
     with pytest.raises(ValueError, match=r"shape or dtype|nonfinite"):
         load_agent(tmp_path, config.network, load_replay=False)
+
+
+@pytest.mark.parametrize("component", ["optimizer", "runtime"])
+def test_checkpoint_save_rejects_incomplete_run_state(tmp_path: Path, component: str) -> None:
+    config = DQNRunConfig(GridworldConfig(), train=DQNTrainConfig(total_timesteps=8, buffer_size=3), hidden_widths=(4,))
+    env = EpisodeStatisticsWrapper(config.env.make())
+    state = initialize_run(env, env.default_params, config.network, config.train, jax.random.key(1))
+    zero = jnp.asarray(0, jnp.int32)
+    snapshot = make_snapshot(state, zero, zero, config.train)
+    incomplete = replace(snapshot, optimizer=()) if component == "optimizer" else replace(snapshot, runtime=())
+    store = CheckpointStore(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="complete optimizer and run state"):
+            store.save(incomplete, CheckpointMetadata(describe(config), 0, 0, 0))
+        assert store.sequence is None
+    finally:
+        store.close()

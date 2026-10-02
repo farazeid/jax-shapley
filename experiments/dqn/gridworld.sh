@@ -4,7 +4,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 dqn_gates "$@"
 uv run python -m jax_shapley.train_dqn gridworld \
     --seed 1 \
-    --checkpoint-mode run \
     --hidden-widths 64 64 \
     --train.num-envs 1 \
     --train.total-timesteps 50000 \

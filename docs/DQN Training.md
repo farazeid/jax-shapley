@@ -36,8 +36,9 @@ their contracts and numerical functions from `jax_shapley.train_dqn`. Replay
 contracts and operations live in `jax_shapley.replay`. The former
 `artifacts`, `execution`, `logging`, `checkpoints` and `settings` modules have also
 been removed; import their host APIs from `jax_shapley.run_io`. The host writer is
-now named `RunWriter`. CLI arguments, shell recipes, checkpoint schema and artifact
-formats are unchanged, including loading snapshots created before this refactor.
+now named `RunWriter`. The numerical checkpoint schema remains compatible with earlier full-run
+snapshots. Checkpointing is now unconditional; the CLI no longer accepts a
+checkpoint-mode selector.
 
 ## Shell experiments and CLI
 
@@ -115,7 +116,6 @@ Network dimensions come from the environment, not user-supplied feature counts.
 | `--hidden-widths` | 64 64 | ReLU hidden layers; use 128 128 for Hypercube |
 | `--seed` | 1 | Explicit JAX PRNG seed |
 | `--chunk-steps` | 64 | Vector steps per internal scan block and pending metrics buffer |
-| `--checkpoint-mode` | `run` | `none`, `agent`, `agent-replay`, or full `run` snapshot |
 | `--output` | `runs` | Parent directory for uniquely named runs |
 
 There is no PPO-style rollout length in DQN. `chunk_steps` groups execution and
@@ -206,14 +206,12 @@ Each run creates `<output>/<environment>-<seed>-<timestamp>/` with:
   sequence. Agent, replay, run-state and metadata are separate items.
 - `.writer.lock`: a POSIX advisory lock preventing concurrent writers in one folder.
 
-Checkpoint modes replace the previous save booleans:
-
-| Mode | Saved data | Resume CLI |
-| --- | --- | --- |
-| `none` | No checkpoints; JSON/CSV remain | Unavailable |
-| `agent` | Online/target parameters, epsilon and step | Unavailable |
-| `agent-replay` | Agent plus complete replay arrays/pointer/size | Unavailable |
-| `run` (default) | Agent/replay plus optimizer, key, observations, environment/episode state, counters and execution phase | Supported |
+Every run saves a complete snapshot: online/target parameters, epsilon, replay,
+optimizer, PRNG key, observations, environment/episode state, counters and execution
+phase. Checkpointing cannot be disabled or restricted to agent/replay components.
+All four Orbax composite items are saved atomically. Partial loading still lets
+subsequent FastSVERL stages extract an agent or replay from a complete snapshot;
+it does not create another checkpoint format.
 
 Periodic saves keep upstream's modulo cadence. Tiny runs guard its division by
 zero with an interval of at least one transition. A post-training save covers
@@ -243,7 +241,7 @@ agent = load_agent(
     dqn_config(input_features=8, num_actions=4, hidden_widths=(64, 64)),
     load_replay=False,
 )
-replay = load_replay(folder)  # Requires agent-replay or run mode.
+replay = load_replay(folder)  # Extract replay from the complete snapshot.
 q_values = agent.model(observations).q_values
 ```
 
@@ -263,6 +261,11 @@ uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --validate-o
 uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --compile-only
 uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>
 ```
+
+Older full-run settings containing `checkpoint_mode: "run"` are normalized on
+read; their numerical arrays and committed logs remain recoverable. Legacy
+agent-only, agent/replay-only and disabled-checkpoint settings are rejected.
+New `config.json` records contain no checkpoint selector.
 
 Resume uses immutable saved settings, without algorithm overrides or duration
 extensions, and writes into the same folder. Each committed snapshot records a CSV
@@ -308,7 +311,7 @@ uv run --script scripts/networks_port/collect_fastsverl_logging.py \
     --source /path/to/pinned/fastsverl/fastsverl/training.py
 ```
 
-Compile gates cover fresh/resumed paths, every checkpoint mode, optional evaluation
+Compile gates cover fresh/resumed full-state paths, optional evaluation
 and callback branches with inert sinks. Integration tests cover training/evaluation
 interruptions, exact same-backend numerical continuation, CSV rollback, inspection
 immutability, completion recovery, corrupt arrays and asynchronous completion errors.

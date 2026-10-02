@@ -6,7 +6,6 @@ uv run python -m jax_shapley.train_dqn mastermind222 \
     --seed 1 \
     --hidden-widths 4 \
     --chunk-steps 4 \
-    --checkpoint-mode run \
     --train.num-envs 2 \
     --train.total-timesteps 32 \
     --train.buffer-size 7 \

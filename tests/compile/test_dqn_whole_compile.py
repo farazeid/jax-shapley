@@ -9,22 +9,21 @@ from flax import nnx
 
 from jax_shapley.envs import Mastermind222
 from jax_shapley.networks import dqn_config
-from jax_shapley.train_dqn import CheckpointMode, DQNTrainConfig, continue_run, initialize_run, whole_run
+from jax_shapley.train_dqn import DQNTrainConfig, continue_run, initialize_run, whole_run
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.dqn_support import RecordingSink
 
 
 @pytest.mark.compile
-@pytest.mark.parametrize("mode", ["none", "agent", "agent-replay", "run"])
 @pytest.mark.parametrize("episodes", [0, 2])
-def test_complete_run_abstract_compile(mode: CheckpointMode, episodes: int) -> None:
-    _compile(mode, episodes)
+def test_complete_run_abstract_compile(episodes: int) -> None:
+    _compile(episodes)
 
 
 @pytest.mark.compile
 @pytest.mark.parametrize("implementation", ["rbg", "unsafe_rbg"])
 def test_complete_run_prng_compile(implementation: str) -> None:
-    _compile("run", 2, implementation=implementation)
+    _compile(2, implementation=implementation)
 
 
 @pytest.mark.compile
@@ -37,11 +36,10 @@ def test_complete_run_gpu_compile() -> None:
     if not devices:
         pytest.skip("whole-run DQN GPU compilation requires an available JAX GPU backend")
     with jax.default_device(devices[0]):
-        for mode in ("none", "agent", "agent-replay", "run"):
-            _compile(mode, 2)
+        _compile(2)
 
 
-def _compile(mode: CheckpointMode, episodes: int, *, implementation: str = "threefry2x32") -> None:
+def _compile(episodes: int, *, implementation: str = "threefry2x32") -> None:
     sink = RecordingSink()
     config = DQNTrainConfig(
         num_envs=2,
@@ -63,7 +61,6 @@ def _compile(mode: CheckpointMode, episodes: int, *, implementation: str = "thre
             network=network,
             config=config,
             chunk_steps=3,
-            checkpoint_mode=mode,
             sink=sink,
         )
     )
@@ -76,7 +73,6 @@ def _compile(mode: CheckpointMode, episodes: int, *, implementation: str = "thre
             params=env.default_params,
             config=config,
             chunk_steps=3,
-            checkpoint_mode=mode,
             sink=sink,
         )
     )

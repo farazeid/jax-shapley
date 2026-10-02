@@ -1,7 +1,8 @@
-"""FastSVERL DQN: configuration, replay, compiled training, evaluation and CLI.
+"""FastSVERL DQN: configuration, compiled training, evaluation and CLI.
 
 Shell recipes provide experiment values. Numerical state and learning live here;
-networks.py owns the models and run_io.py owns host callbacks and artifacts.
+replay.py owns buffer storage, networks.py owns the models, and run_io.py owns
+host callbacks and artifacts.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from enum import IntEnum
 from functools import partial
 from math import isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, NamedTuple, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -118,9 +119,6 @@ class HypercubeConfig:
         return Hypercube(self.side_length, self.dimension)
 
 
-type CheckpointMode = Literal["none", "agent", "agent-replay", "run"]
-
-
 class ExecutionPhase(IntEnum):
     TRAINING = 0
     EVALUATION = 1
@@ -149,13 +147,10 @@ class DQNRunConfig[EnvConfig: EnvironmentConfig]:
     seed: int = 1
     chunk_steps: int = 64
     output: Path = Path("runs")
-    checkpoint_mode: CheckpointMode = "run"
     validate_only: bool = False
     compile_only: bool = False
 
     def __post_init__(self) -> None:
-        if self.checkpoint_mode not in ("none", "agent", "agent-replay", "run"):
-            raise ValueError("invalid checkpoint mode")
         _positive("chunk_steps", self.chunk_steps)
         for width in self.hidden_widths:
             _positive("hidden_width", width)
@@ -366,8 +361,7 @@ def run_experiment[State, Params, Config: EnvironmentConfig](
                 )
             jax.block_until_ready(result.run.vector_step)
             jax.effects_barrier()
-            if sink.store is not None:
-                sink.store.wait()
+            sink.store.wait()
             summary = RunSummary(
                 str(folder),
                 int(result.run.vector_step),
@@ -395,7 +389,6 @@ def whole_run[State, Params](
     network: MLPConfig,
     config: DQNTrainConfig,
     chunk_steps: int,
-    checkpoint_mode: CheckpointMode,
     sink: EventSink,
 ) -> WholeRunState[State]:
     """Initialization, training, evaluation and ordered events in one numerical call."""
@@ -408,7 +401,6 @@ def whole_run[State, Params](
         params=params,
         config=config,
         chunk_steps=chunk_steps,
-        checkpoint_mode=checkpoint_mode,
         sink=sink,
     )
 
@@ -422,7 +414,6 @@ def continue_run[State, Params](
     params: Params,
     config: DQNTrainConfig,
     chunk_steps: int,
-    checkpoint_mode: CheckpointMode,
     sink: EventSink,
 ) -> WholeRunState[State]:
     """Continue a validated snapshot; inactive tail steps preserve numerical state."""
@@ -435,7 +426,7 @@ def continue_run[State, Params](
             del index
             next_state = nnx.cond(
                 current.run.vector_step < config.vector_steps,
-                lambda value: _whole_training_step(value, env, params, config, checkpoint_mode, sink),
+                lambda value: _whole_training_step(value, env, params, config, sink),
                 lambda value: value,
                 current,
             )
@@ -455,7 +446,7 @@ def continue_run[State, Params](
     )
     prepared = nnx.cond(
         trained.phase == ExecutionPhase.TRAINING,
-        lambda carry: _finish_training(carry, config, checkpoint_mode, sink),
+        lambda carry: _finish_training(carry, config, sink),
         lambda carry: carry,
         trained,
     )
@@ -465,12 +456,11 @@ def continue_run[State, Params](
         lambda carry: carry,
         prepared,
     )
-    if checkpoint_mode != "none":
-        jax.lax.cond(
-            phase != ExecutionPhase.COMPLETE,
-            lambda: _emit_checkpoint(evaluated, config, checkpoint_mode, sink),
-            lambda: jnp.asarray(0, jnp.int32),
-        )
+    jax.lax.cond(
+        phase != ExecutionPhase.COMPLETE,
+        lambda: _emit_checkpoint(evaluated, config, sink),
+        lambda: jnp.asarray(0, jnp.int32),
+    )
     return cast(WholeRunState[State], evaluated)  # NNX transforms retain the explicit carry topology.
 
 
@@ -585,7 +575,6 @@ def compile_program[State, Params, Config: EnvironmentConfig](
                 params=params,
                 config=config.train,
                 chunk_steps=config.chunk_steps,
-                checkpoint_mode=config.checkpoint_mode,
                 sink=router,
             )
         )
@@ -600,7 +589,6 @@ def compile_program[State, Params, Config: EnvironmentConfig](
             network=config.network,
             config=config.train,
             chunk_steps=config.chunk_steps,
-            checkpoint_mode=config.checkpoint_mode,
             sink=router,
         )
     )
@@ -821,7 +809,6 @@ def _whole_training_step[State, Params](
     env: EpisodeStatisticsWrapper[State, Params],
     params: Params,
     config: DQNTrainConfig,
-    mode: CheckpointMode,
     sink: EventSink,
 ) -> WholeRunState[State]:
     run, metrics = training_step(carry.run, env, params, config)
@@ -832,14 +819,9 @@ def _whole_training_step[State, Params](
     current = WholeRunState(run, pending, carry.pending_count + 1, carry.phase, carry.evaluation_episodes)
     checkpoint = checkpoint_due(run.vector_step, config.num_envs, config.total_timesteps)
     selected_loss = metrics.updated & (metrics.global_step % 100 < config.num_envs)
-    flush = (current.pending_count == pending.active.shape[0]) | selected_loss
-    if mode != "none":
-        flush = flush | checkpoint
+    flush = (current.pending_count == pending.active.shape[0]) | selected_loss | checkpoint
     current = nnx.cond(flush, lambda value: _flush_training(value, sink), lambda value: value, current)
-    if mode != "none":
-        jax.lax.cond(
-            checkpoint, lambda: _emit_checkpoint(current, config, mode, sink), lambda: jnp.asarray(0, jnp.int32)
-        )
+    jax.lax.cond(checkpoint, lambda: _emit_checkpoint(current, config, sink), lambda: jnp.asarray(0, jnp.int32))
     return cast(WholeRunState[State], current)  # NNX cond retains the explicit carry topology.
 
 
@@ -859,7 +841,7 @@ def _flush_training[State](carry: WholeRunState[State], sink: EventSink) -> Whol
 
 
 def _finish_training[State](
-    carry: WholeRunState[State], config: DQNTrainConfig, mode: CheckpointMode, sink: EventSink
+    carry: WholeRunState[State], config: DQNTrainConfig, sink: EventSink
 ) -> WholeRunState[State]:
     flushed = _flush_training(carry, sink)
     io_callback(sink.training_complete, jax.ShapeDtypeStruct((), jnp.int32), ordered=True)
@@ -870,8 +852,7 @@ def _finish_training[State](
         jnp.asarray(ExecutionPhase.EVALUATION, jnp.int32),
         flushed.evaluation_episodes,
     )
-    if mode != "none":
-        _emit_checkpoint(prepared, config, mode, sink)
+    _emit_checkpoint(prepared, config, sink)
     return prepared
 
 
@@ -933,15 +914,13 @@ def _whole_evaluation[State, Params](
     )
 
 
-def _emit_checkpoint[State](
-    carry: WholeRunState[State], config: DQNTrainConfig, mode: CheckpointMode, sink: EventSink
-) -> Array:
+def _emit_checkpoint[State](carry: WholeRunState[State], config: DQNTrainConfig, sink: EventSink) -> Array:
     return cast(
         Array,
         io_callback(
             sink.checkpoint,
             jax.ShapeDtypeStruct((), jnp.int32),
-            make_snapshot(carry.run, carry.phase, carry.evaluation_episodes, config, mode),
+            make_snapshot(carry.run, carry.phase, carry.evaluation_episodes, config),
             ordered=True,
         ),
     )  # Callback result has the declared scalar int32 specification.
@@ -952,30 +931,24 @@ def make_snapshot[State](
     phase: Array,
     evaluation_episodes: Array,
     config: DQNTrainConfig,
-    mode: CheckpointMode,
 ) -> Snapshot:
     """Extract numerical state only; NNX graph definitions stay outside callbacks."""
     from jax_shapley.run_io import Snapshot
 
     agent = _array_leaves(nnx.state((state.model, state.target)))
-    optimizer = _array_leaves(nnx.state(state.optimizer)) if mode == "run" else ()
-    runtime = (
-        _array_leaves((
-            state.observations,
-            state.env_state,
-            state.vector_step,
-            state.updates,
-            state.target_updates,
-            jax.random.key_data(state.key),
-        ))
-        if mode == "run"
-        else ()
-    )
-    replay = state.replay if mode in ("agent-replay", "run") else None
+    optimizer = _array_leaves(nnx.state(state.optimizer))
+    runtime = _array_leaves((
+        state.observations,
+        state.env_state,
+        state.vector_step,
+        state.updates,
+        state.target_updates,
+        jax.random.key_data(state.key),
+    ))
     epsilon = epsilon_at(config, jnp.maximum(state.vector_step - 1, 0) * config.num_envs)
     return Snapshot(
         agent,
-        replay,
+        state.replay,
         optimizer,
         runtime,
         state.vector_step,
