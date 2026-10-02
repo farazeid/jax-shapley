@@ -99,7 +99,7 @@ The default DQN hidden widths are `(64, 64)` for Gridworld and Mastermind-222. P
 
 Offline matched-weight tests compare outputs and input/parameter gradients against the pinned source builder, in eager and compiled execution. Abstract NNX compilation tests cover single observations, batches, rollout axes, int32/float32 inputs, gradients, `vmap`, and `scan`; GPU coverage skips explicitly when unavailable.
 
-See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). PPO training, FastSVERL explanation models, and paper evaluation reproduction remain deferred; the [explanations guide](docs/Explanations.md) documents the captured behaviour/prediction reference fixture and the planned modules.
+See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). Behaviour and prediction explanations (characteristic and Shapley models) are implemented; see the [explanations guide](docs/Explanations.md). Outcome explanations, PPO training and the remaining paper evaluations are deferred.
 
 ## Typed contracts and compile-first checks
 
@@ -146,3 +146,15 @@ bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
 `main()` handles parsing, restoration, compilation, writers and finalization. `run()` constructs the environment, initializes or accepts restored state, then trains, evaluates and emits checkpoints.
 
 Normal recipes run the required gates, compile initialization/training/evaluation into one numerical invocation, and save selective CSV metrics plus Orbax checkpoints. Every run saves full-state checkpoints; resume with `uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>`. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
+
+## Explanation experiments
+
+Characteristic and Shapley runs explain a completed DQN run; recipes in `experiments/explanations/` hold the upstream settings:
+
+```bash
+bash experiments/explanations/smoke.sh
+bash experiments/explanations/gridworld.sh characteristic --kind behaviour --agent runs/<dqn-run>
+bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --characteristic runs/<characteristic-run>
+```
+
+Runs compile before creating artifacts, checkpoint complete state, and resume exactly with `uv run python -m jax_shapley.train_explanations resume --run runs/<run>`. See the [explanations guide](docs/Explanations.md).

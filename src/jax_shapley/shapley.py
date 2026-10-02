@@ -87,10 +87,15 @@ def update_shapley(
     observations: Observations,
     coalition: Coalition,
 ) -> LossMetrics:
+    def loss(model: ShapleyModel) -> tuple[Array, LossMetrics]:
+        # The frozen characteristic is closed over, not a differentiated argument: inside compiled
+        # loops it belongs to an outer trace, and NNX transforms only split their own arguments.
+        return shapley_loss(model, characteristic, observations, coalition)
+
     # NNX transformation has a dynamic return signature; assert its known loss/state boundary.
     result = cast(
         tuple[tuple[Array, LossMetrics], nnx.State[str | int, nnx.Param[Array]]],
-        nnx.value_and_grad(shapley_loss, has_aux=True)(model, characteristic, observations, coalition),
+        nnx.value_and_grad(loss, has_aux=True)(model),
     )
     (_, metrics), gradients = result
     optimizer.update(model, gradients)
@@ -146,7 +151,14 @@ def exact_shapley_loss(
 
 
 def null_values(characteristic: CharacteristicModel, observations: Observations) -> Values:
-    return characteristic(jnp.full_like(observations, MASK)).values
+    """v(empty) for every row: one all-MASK row, broadcast over the leading axes.
+
+    The value is identical for every row. Evaluating a broadcast-constant batch also
+    miscompiles on XLA CPU (jax 0.11.0) from 64 rows; tests/test_jit_equivalence.py
+    guards the compiled result against eager evaluation.
+    """
+    null = characteristic(jnp.full((1, observations.shape[-1]), MASK, jnp.int32)).values[0]
+    return jnp.broadcast_to(null, (*observations.shape[:-1], null.shape[-1]))
 
 
 def shapley_matrix(features: int) -> ShapleyMatrix:

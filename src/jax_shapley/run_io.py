@@ -175,12 +175,7 @@ class RunWriter[Config: EnvironmentConfig]:
         clock: Callable[[], float] = perf_counter,
     ) -> None:
         self.folder, self.config, self.clock = folder, config, clock
-        self.lock: BinaryIO = (folder / ".writer.lock").open("a+b")
-        try:
-            fcntl.flock(self.lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.lock.close()
-            raise RuntimeError("run folder already has an active writer") from None
+        self.lock = acquire_writer_lock(folder)
         try:
             if metadata is not None:
                 # Preflight restoration/compilation runs without the writer lock.
@@ -269,8 +264,12 @@ class RunWriter[Config: EnvironmentConfig]:
             self.lock.close()
 
 
-class CheckpointStore:
-    """One serialized producer; Orbax owns its asynchronous writer and commit protocol."""
+class OrbaxStore:
+    """One serialized producer; Orbax owns its asynchronous writer and commit protocol.
+
+    Items are named tuples of arrays plus one JSON metadata item, saved atomically
+    as a numbered composite. Only the latest committed checkpoint is kept.
+    """
 
     def __init__(self, folder: Path, *, read_only: bool = False) -> None:
         options = ocp.CheckpointManagerOptions(
@@ -282,42 +281,18 @@ class CheckpointStore:
         self.manager = ocp.CheckpointManager(folder.resolve() / "checkpoints", options=options)
         self.sequence = self.manager.latest_step()
 
-    def save(self, snapshot: Snapshot, metadata: CheckpointMetadata) -> None:
-        metadata.validate()
-        if metadata.key_implementation != snapshot.key_implementation:
-            raise ValueError("checkpoint PRNG metadata disagrees with snapshot")
-        if not snapshot.optimizer or not snapshot.runtime:
-            raise ValueError("checkpoint requires complete optimizer and run state")
+    def save_items(self, items: dict[str, tuple[Array, ...]], metadata: dict[str, object]) -> None:
         self.manager.wait_until_finished()
         sequence = 0 if self.sequence is None else self.sequence + 1
-        items: dict[str, object] = {
-            "agent": ocp.args.StandardSave(_pack((*snapshot.agent, snapshot.epsilon, snapshot.vector_step))),
-            "replay": ocp.args.StandardSave(_pack(_leaves(snapshot.replay))),
-            "run_state": ocp.args.StandardSave(_pack((*snapshot.optimizer, *snapshot.runtime))),
-            "metadata": ocp.args.JsonSave(asdict(metadata)),
-        }
-        if not self.manager.save(sequence, args=ocp.args.Composite(**items)):
+        arguments: dict[str, object] = {name: ocp.args.StandardSave(_pack(values)) for name, values in items.items()}
+        arguments["metadata"] = ocp.args.JsonSave(metadata)
+        if not self.manager.save(sequence, args=ocp.args.Composite(**arguments)):
             raise OSError("Orbax declined a required checkpoint")
         self.sequence = sequence
 
-    def metadata(self) -> CheckpointMetadata:
+    def metadata_json(self) -> dict[str, object]:
         result = self._restore({"metadata": ocp.args.JsonRestore()})
-        value = cast(dict[str, object], result["metadata"])  # JSON is checked field-by-field below.
-        metadata = CheckpointMetadata(
-            settings=_string(value, "settings"),
-            vector_step=_integer(value, "vector_step"),
-            phase=_integer(value, "phase"),
-            evaluation_episodes=_integer(value, "evaluation_episodes"),
-            csv_bytes=_integer(value, "csv_bytes"),
-            csv_digest=_string(value, "csv_digest"),
-            elapsed_seconds=_number(value, "elapsed_seconds"),
-            training_seconds=_number(value, "training_seconds"),
-            key_implementation=_string(value, "key_implementation"),
-            schema=_integer(value, "schema"),
-            reference_commit=_string(value, "reference_commit"),
-        )
-        metadata.validate()
-        return metadata
+        return _mapping(result["metadata"])
 
     def arrays(self, item: str, template: tuple[Array, ...]) -> tuple[Array, ...]:
         # Read the saved NumPy dtypes before destination placement. Target-driven
@@ -348,6 +323,43 @@ class CheckpointStore:
             raise ValueError("no committed checkpoint")
         result = self.manager.restore(self.sequence, args=ocp.args.Composite(**items))
         return {name: result[name] for name in items}  # Dynamic values end at this adapter.
+
+
+class CheckpointStore(OrbaxStore):
+    """DQN snapshots: agent, replay and complete run state with validated DQN metadata."""
+
+    def save(self, snapshot: Snapshot, metadata: CheckpointMetadata) -> None:
+        metadata.validate()
+        if metadata.key_implementation != snapshot.key_implementation:
+            raise ValueError("checkpoint PRNG metadata disagrees with snapshot")
+        if not snapshot.optimizer or not snapshot.runtime:
+            raise ValueError("checkpoint requires complete optimizer and run state")
+        self.save_items(
+            {
+                "agent": (*snapshot.agent, snapshot.epsilon, snapshot.vector_step),
+                "replay": _leaves(snapshot.replay),
+                "run_state": (*snapshot.optimizer, *snapshot.runtime),
+            },
+            asdict(metadata),
+        )
+
+    def metadata(self) -> CheckpointMetadata:
+        value = self.metadata_json()  # JSON is checked field-by-field below.
+        metadata = CheckpointMetadata(
+            settings=_string(value, "settings"),
+            vector_step=_integer(value, "vector_step"),
+            phase=_integer(value, "phase"),
+            evaluation_episodes=_integer(value, "evaluation_episodes"),
+            csv_bytes=_integer(value, "csv_bytes"),
+            csv_digest=_string(value, "csv_digest"),
+            elapsed_seconds=_number(value, "elapsed_seconds"),
+            training_seconds=_number(value, "training_seconds"),
+            key_implementation=_string(value, "key_implementation"),
+            schema=_integer(value, "schema"),
+            reference_commit=_string(value, "reference_commit"),
+        )
+        metadata.validate()
+        return metadata
 
 
 def create_run[Config: EnvironmentConfig](config: DQNRunConfig[Config], environment_name: str) -> Path:
@@ -562,8 +574,23 @@ def write_summary(folder: Path, summary: RunSummary) -> None:
 
 
 def verify_log(path: Path, metadata: CheckpointMetadata) -> None:
-    if path.stat().st_size < metadata.csv_bytes or prefix_digest(path, metadata.csv_bytes) != metadata.csv_digest:
+    verify_prefix(path, metadata.csv_bytes, metadata.csv_digest)
+
+
+def verify_prefix(path: Path, size: int, digest: str) -> None:
+    if path.stat().st_size < size or prefix_digest(path, size) != digest:
         raise ValueError("metrics prefix does not match committed checkpoint")
+
+
+def acquire_writer_lock(folder: Path) -> BinaryIO:
+    """Exclusive non-blocking lock: one active writer per run folder."""
+    lock = (folder / ".writer.lock").open("a+b")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        raise RuntimeError("run folder already has an active writer") from None
+    return lock
 
 
 def prefix_digest(path: Path, boundary: int) -> str:

@@ -1,7 +1,7 @@
 """Load the pinned explanation fixture into NNX models; shared by parity tests."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -10,7 +10,9 @@ import numpy as np
 from flax import nnx
 from jax import Array
 
+from jax_shapley.explanation_io import ExplanationSnapshot
 from jax_shapley.networks import MLP, QNetwork, dqn_config
+from jax_shapley.run_io import CallbackToken
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_explanations.npz"
 CASES = ("gridworld", "mastermind222", "hypercube")
@@ -31,6 +33,31 @@ class CaseLayout:
     batch_size: int
     epsilon: float
     learning_rate: float
+
+
+@dataclass
+class RecordingSink:
+    """Inert explanation sink: records epoch rows and checkpoint (epoch, phase) pairs."""
+
+    rows: list[tuple[int, int, float, float, float, int]] = field(default_factory=list)
+    checkpoints: list[tuple[int, int]] = field(default_factory=list)
+
+    def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken:
+        epoch, step, train_loss, validation_loss, exact_loss, best_epoch, active = (np.asarray(m) for m in metrics)
+        for index in np.flatnonzero(active):
+            self.rows.append((
+                int(epoch[index]),
+                int(step[index]),
+                float(train_loss[index]),
+                float(validation_loss[index]),
+                float(exact_loss[index]),
+                int(best_epoch[index]),
+            ))
+        return np.asarray(0, np.int32)
+
+    def checkpoint(self, snapshot: ExplanationSnapshot) -> CallbackToken:
+        self.checkpoints.append((int(snapshot.epoch), int(snapshot.phase)))
+        return np.asarray(0, np.int32)
 
 
 def load_fixture() -> FixtureArrays:
