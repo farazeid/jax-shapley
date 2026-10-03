@@ -12,13 +12,20 @@ from flax import nnx
 from jax_shapley.characteristics import CharacteristicConfig, CharacteristicModel, Kind, characteristic_network
 from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
 from jax_shapley.networks import QNetwork, dqn_config
+from jax_shapley.outcome import Transitions
+from jax_shapley.tabular import transition_model
+from jax_shapley.train_dqn import EnvironmentConfig, GridworldConfig, Mastermind222Config
 from jax_shapley.train_explanations import (
     Buffers,
     CharacteristicRunConfig,
     ExplanationTrainConfig,
     FrozenAgent,
+    OutcomeInputs,
+    OutcomeRunConfig,
+    OutcomeTrainConfig,
     ShapleyRunConfig,
     run_characteristic,
+    run_outcome,
     run_shapley,
     stack_seeds,
 )
@@ -50,6 +57,68 @@ def test_whole_explanation_runs_compile(case: str, kind: Kind) -> None:
         _compile(Mastermind222, 8, 4, 64, DEFAULT, 8000, kind)
     else:
         _compile(lambda: Hypercube(6, 5), 5, 10, 128, HYPERCUBE, 7776, kind)
+
+
+@pytest.mark.compile
+@pytest.mark.parametrize("case", ["gridworld", "mastermind222"])
+@pytest.mark.parametrize("with_exact_char", [True, False])
+def test_whole_outcome_runs_compile(case: str, with_exact_char: bool) -> None:
+    """Audited dqn_performance_* settings: replay prefixes, 128 epochs with track_batch, batch 64."""
+    if case == "gridworld":
+        training = OutcomeTrainConfig(train_size=50_000, validation_size=8 * 10)
+        config = OutcomeRunConfig(_unused(), _unused(), with_exact_char=with_exact_char, tau=0.001, train=training)
+        _compile_outcome(Gridworld, GridworldConfig(), 2, config)
+    else:
+        training = OutcomeTrainConfig(train_size=100_000, validation_size=16 * 10)
+        config = OutcomeRunConfig(_unused(), _unused(), with_exact_char=with_exact_char, tau=0.01, train=training)
+        _compile_outcome(Mastermind222, Mastermind222Config(), 8, config)
+
+
+def _compile_outcome[State, Params](
+    factory: Callable[[], EnvironmentProtocol[State, Params]],
+    environment: EnvironmentConfig,
+    features: int,
+    config: OutcomeRunConfig,
+) -> None:
+    actions, width = 4, 64
+    explained = CharacteristicConfig("behaviour", "explore", (width, width))
+    agent = FrozenAgent(
+        QNetwork(dqn_config(features, actions, hidden_widths=(width, width)), rngs=nnx.Rngs(0)),
+        jnp.asarray(0.05, jnp.float32),
+    )
+    characteristic = CharacteristicModel(characteristic_network(features, actions, explained), rngs=nnx.Rngs(1))
+    behaviour_buffers = Buffers(
+        jnp.zeros((DEFAULT.train_size, features), jnp.int32),
+        jnp.zeros((DEFAULT.validation_size, features), jnp.int32),
+        jnp.zeros((DEFAULT.exact_size, features), jnp.int32),
+    )
+    training = config.train
+    inputs = OutcomeInputs(
+        behaviour_buffers,
+        _transitions(training.train_size, features),
+        _transitions(training.validation_size, features),
+    )
+    run = partial(
+        run_outcome,
+        environment_factory=factory,
+        config=config,
+        explained=explained,
+        tabular=transition_model(environment),
+        sink=RecordingSink(),
+    )
+    arguments = (stack_seeds([agent] * SEEDS), stack_seeds([characteristic] * SEEDS), stack_seeds([inputs] * SEEDS))
+    nnx.jit(run).trace(KEYS, *arguments, None).lower().compile()
+
+
+def _transitions(rows: int, features: int) -> Transitions:
+    observations = jnp.zeros((rows, features), jnp.int32)
+    return Transitions(
+        observations,
+        jnp.zeros((rows,), jnp.int32),
+        jnp.zeros((rows,), jnp.float32),
+        observations,
+        jnp.zeros((rows,), jnp.bool_),
+    )
 
 
 def _compile[State, Params](
