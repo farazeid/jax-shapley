@@ -2,12 +2,19 @@
 # requires-python = ">=3.12,<3.13"
 # dependencies = ["torch==2.6.0", "numpy<2", "gymnasium==0.29.1", "tqdm"]
 # ///
-"""Capture upstream transition models and value iteration for outcome explanations.
+"""Capture upstream transition models, value iteration and outcome explanation units.
 
 Builds the unchanged `GWB` and `Mastermind` (2, 2, 2) environments, reads their
 transition tables `P` (decoded to observations), and runs the unchanged
 `value_iteration` under a uniform policy and the fixture agent's epsilon-greedy
 policy with gamma = 1, the outcome characteristics' setting.
+
+The outcome units run the unchanged `PerformanceCharacteristicOffPolicy`,
+`PerformanceCharacteristicOnPolicy` and `PerformanceShapley` on fixed batches and
+coalitions, explaining the explanation fixture's epsilon-greedy agent and trained
+behaviour characteristic. (The agent's greedy Gridworld policy loops forever, so
+the source's undiscounted value iteration would never converge under it.) The next actions the off-policy target samples are recorded so
+they can be replayed.
 """
 
 from __future__ import annotations
@@ -34,7 +41,9 @@ type FloatArray = np.ndarray[tuple[int, ...], np.dtype[np.float32]]
 type HostArray = np.ndarray[tuple[int, ...], np.dtype[np.generic]]
 
 REFERENCE_COMMIT = "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b"
-SOURCES = ("utils.py", "models.py", "dqn.py", "envs/gwb.py", "envs/mastermind.py")
+SOURCES = ("utils.py", "models.py", "dqn.py", "characteristics.py", "shapley.py", "envs/gwb.py", "envs/mastermind.py")
+STEPS, BATCH_SIZE, LEARNING_RATE = 3, 8, 2.5e-4
+TAU = 0.01
 SEED = 1729
 EPSILON = 0.2
 CASES = (("gridworld", 2, 4), ("mastermind222", 8, 4))
@@ -42,7 +51,11 @@ CASES = (("gridworld", 2, 4), ("mastermind222", 8, 4))
 
 class Tensor(Protocol):
     data: Tensor
+    grad: Tensor | None
 
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+    def __getitem__(self, index: slice) -> Tensor: ...
     def detach(self) -> Tensor: ...
     def cpu(self) -> Tensor: ...
     def numpy(self) -> FloatArray: ...
@@ -69,6 +82,53 @@ class Agent(Protocol):
     epsilon: float
 
     def pi_explore(self, obs: Tensor) -> Tensor: ...
+
+
+class Sampler(Protocol):
+    sample: Callable[..., Tensor]
+    sample_rand: Callable[..., Tensor]
+
+
+class Learned(Protocol):
+    model: Model
+    sampler: Sampler
+
+
+class Outcome(Learned, Protocol):
+    target_critic: Model
+    with_exact_char: bool
+    exact: dict[tuple[int, ...], dict[tuple[float, ...], Tensor]]
+
+    def update(self, *inputs: Tensor) -> object: ...
+    def update_target(self) -> None: ...
+    def get_val(self, e_obs: Tensor, coalitions: Tensor) -> Tensor: ...
+    def null(self, obs: Tensor) -> Tensor: ...
+    def get_exact(self) -> None: ...
+    def exact_loss(self) -> object: ...
+
+
+class Explainer(Protocol):
+    model: Model
+    with_exact_char: bool
+    exact: dict[tuple[float, ...], Tensor]
+
+    def update(self, obs: Tensor) -> object: ...
+    def sv(self, obs: Tensor) -> Tensor: ...
+    def get_exact(self) -> None: ...
+    def exact_loss(self) -> object: ...
+
+
+class ExactBuffer:
+    """Sequential read-only stand-in for the upstream Buffer, as used by exact computations."""
+
+    def __init__(self, observations: Tensor) -> None:
+        self.observations = observations
+        self.size = int(observations.shape[0])
+
+    def sample(self, batch_size: int, *keys: str, start: int | None = None) -> list[Tensor]:
+        if keys != ("obs",) or start is None or start + batch_size > self.size:
+            raise ValueError("exact buffers are read sequentially as observations only")
+        return [self.observations[start : start + batch_size]]
 
 
 class Environment(Protocol):
@@ -125,7 +185,11 @@ def main() -> None:
                 "epsilon": EPSILON,
                 "gamma": 1.0,
                 "cases": {name: {"features": features, "actions": actions} for name, features, actions in CASES},
-                "collector": "unchanged GWB/Mastermind get_P and value_iteration, CPU",
+                "steps": STEPS,
+                "batch_size": BATCH_SIZE,
+                "learning_rate": LEARNING_RATE,
+                "tau": TAU,
+                "collector": "unchanged GWB/Mastermind get_P, value_iteration and outcome ASTs, CPU, recorded draws",
             },
             indent=2,
         )
@@ -161,7 +225,271 @@ def capture(root: Path, reference: dict[str, HostArray]) -> tuple[dict[str, Host
             states = sorted(table)
             arrays[f"{name}_q_{label}_states"] = np.asarray(states, np.int32)
             arrays[f"{name}_q_{label}"] = np.asarray([table[state] for state in states], np.float32)
+        arrays.update(capture_units(namespace, torch, name, env, agent, reference, arrays))
     return arrays, torch.__version__
+
+
+def capture_units(
+    namespace: dict[str, object],
+    torch: Torch,
+    name: str,
+    env: Environment,
+    agent: Agent,
+    reference: dict[str, HostArray],
+    tables: dict[str, HostArray],
+) -> dict[str, HostArray]:
+    """Off- and on-policy outcome characteristics and the outcome Shapley model on fixed inputs."""
+    features, actions = reference[f"{name}_unique"].shape[1], tables[f"{name}_p_probability"].shape[1]
+    stub = SimpleNamespace(
+        single_observation_space=SimpleNamespace(shape=(features,)),
+        single_action_space=SimpleNamespace(n=actions, shape=()),
+        envs=[SimpleNamespace(unwrapped=env)],
+        unwrapped=SimpleNamespace(get_attr=lambda attribute: [env]),
+    )
+    observations = reference[f"{name}_exact_buffer"].astype(np.float32)
+    buffer = ExactBuffer(torch.from_numpy(observations))
+    behaviour = _behaviour(namespace, torch, stub, agent, buffer, name, features, reference)
+    batch = _transitions(tables, name, observations, actions)
+    arrays: dict[str, HostArray] = {f"{name}_batch_{key}": value for key, value in batch.items()}
+    unique = torch.from_numpy(reference[f"{name}_unique"].astype(np.float32))
+    probe = _coalitions(int(unique.shape[0]), features, 7)
+    arrays[f"{name}_probe_coalitions"] = probe
+    tensors = {key: torch.from_numpy(value) for key, value in batch.items()}
+    tensors["action"] = torch.from_numpy(batch["action"].astype(np.int64))
+    sampled: list[HostArray] = []
+    namespace["Categorical"] = _recording_categorical(sampled)
+
+    off = _outcome(namespace, torch, "PerformanceCharacteristicOffPolicy", stub, agent, behaviour, features)
+    arrays.update(_parameters(f"{name}_off_initial", off.model))
+    for step in range(STEPS):
+        coalitions = _coalitions(BATCH_SIZE, features, step)
+        arrays[f"{name}_off_coalitions_{step}"] = coalitions
+        off.sampler.sample_rand = _fixed(torch.from_numpy(coalitions.astype(np.float32)))
+        sampled.clear()
+        loss = off.update(
+            tensors["obs"],
+            tensors["action"],
+            tensors["reward"],
+            tensors["next_obs"],
+            tensors["terminated"],
+            tensors["e_obs"],
+        )
+        arrays[f"{name}_off_next_actions_{step}"] = np.asarray(sampled[0], np.int32)
+        arrays[f"{name}_off_loss_{step}"] = _numpy(cast(tuple[Tensor, ...], loss)[0])
+        if step == 0:
+            arrays.update(_gradients(f"{name}_off_gradient", off.model))
+    arrays.update(_parameters(f"{name}_off_final", off.model))
+    arrays.update(_parameters(f"{name}_off_target", off.target_critic))
+    arrays.update(_values(f"{name}_off", off, unique, torch.from_numpy(probe.astype(np.float32))))
+    for label, flag in (("with_exact_char", True), ("without_exact_char", False)):
+        off.with_exact_char = flag
+        vars(off).pop("exact", None)
+        loss = off.exact_loss()
+        arrays[f"{name}_exact_{label}"] = _exact_table(off, unique, features)
+        arrays[f"{name}_off_exact_loss_{label}"] = _numpy(cast(tuple[Tensor, ...], loss)[0])
+
+    on = _outcome(namespace, torch, "PerformanceCharacteristicOnPolicy", stub, agent, behaviour, features)
+    arrays.update(_parameters(f"{name}_on_initial", on.model))
+    for step in range(STEPS):
+        coalitions = torch.from_numpy(_coalitions(BATCH_SIZE, features, step).astype(np.float32))
+        loss = on.update(
+            tensors["obs"], tensors["reward"], tensors["next_obs"], tensors["terminated"], tensors["e_obs"], coalitions
+        )
+        on.update_target()
+        arrays[f"{name}_on_loss_{step}"] = _numpy(cast(tuple[Tensor, ...], loss)[0])
+        if step == 0:
+            arrays.update(_gradients(f"{name}_on_gradient", on.model))
+    arrays.update(_parameters(f"{name}_on_final", on.model))
+    arrays.update(_parameters(f"{name}_on_target", on.target_critic))
+    arrays.update(_values(f"{name}_on", on, unique, torch.from_numpy(probe.astype(np.float32))))
+    for label, flag in (("with_exact_char", True), ("without_exact_char", False)):
+        on.with_exact_char = flag
+        vars(on).pop("exact", None)
+        arrays[f"{name}_on_exact_loss_{label}"] = _numpy(cast(tuple[Tensor, ...], on.exact_loss())[0])
+
+    # The Shapley model explains the off-policy characteristic, whose ground truth uses the exact behaviour.
+    off.with_exact_char = True
+    vars(off).pop("exact", None)
+    off.get_exact()
+    arrays.update(_shapley(namespace, torch, name, stub, off, features, tensors["obs"], unique))
+    return arrays
+
+
+def _shapley(
+    namespace: dict[str, object],
+    torch: Torch,
+    name: str,
+    stub: SimpleNamespace,
+    char: Outcome,
+    features: int,
+    batch: Tensor,
+    unique: Tensor,
+) -> dict[str, HostArray]:
+    arguments = SimpleNamespace(
+        model_arch=_architecture(features, softmax=False),
+        learning_rate=LEARNING_RATE,
+        with_exact_char=True,
+        verbose=False,
+    )
+    torch.manual_seed(SEED + 3)
+    shapley = cast(Callable[..., Explainer], namespace["PerformanceShapley"])(stub, arguments, char)
+    arrays = _parameters(f"{name}_shapley_initial", shapley.model)
+    for step in range(STEPS):
+        coalition = (np.arange(features) + step) % 2 == 0
+        arrays[f"{name}_shapley_coalition_{step}"] = coalition
+        char.sampler.sample = _fixed(torch.from_numpy(coalition[None].astype(np.float32)))
+        loss = shapley.update(batch)
+        arrays[f"{name}_shapley_loss_{step}"] = _numpy(cast(tuple[Tensor, ...], loss)[0])
+        if step == 0:
+            arrays.update(_gradients(f"{name}_shapley_gradient", shapley.model))
+    arrays.update(_parameters(f"{name}_shapley_final", shapley.model))
+    arrays[f"{name}_shapley_sv_unique"] = _numpy(shapley.sv(unique))
+    for label, flag in (("with_exact_char", True), ("without_exact_char", False)):
+        shapley.with_exact_char = flag
+        vars(shapley).pop("exact", None)
+        shapley.get_exact()
+        keys = [tuple(float(value) for value in row) for row in _numpy(unique)]
+        arrays[f"{name}_shapley_exact_{label}"] = np.stack([_numpy(shapley.exact[key]) for key in keys])
+        arrays[f"{name}_shapley_exact_loss_{label}"] = _numpy(cast(tuple[Tensor, ...], shapley.exact_loss())[0])
+    return arrays
+
+
+def _behaviour(
+    namespace: dict[str, object],
+    torch: Torch,
+    stub: SimpleNamespace,
+    agent: Agent,
+    buffer: ExactBuffer,
+    name: str,
+    features: int,
+    reference: dict[str, HostArray],
+) -> Learned:
+    arguments = SimpleNamespace(
+        model_arch=_architecture(features, softmax=True), learning_rate=LEARNING_RATE, policy="explore", verbose=False
+    )
+    cls = cast(Callable[..., Learned], namespace["PolicyCharacteristicModel"])
+    behaviour = cls(agent, stub, arguments, buffer, None, buffer)
+    for index, parameter in enumerate(behaviour.model.parameters()):
+        parameter.data.copy_(torch.from_numpy(reference[f"{name}_char_behaviour_final_{index}"]))
+    return behaviour
+
+
+def _outcome(
+    namespace: dict[str, object],
+    torch: Torch,
+    cls: str,
+    stub: SimpleNamespace,
+    agent: Agent,
+    behaviour: Learned,
+    features: int,
+) -> Outcome:
+    arguments = SimpleNamespace(
+        model_arch=_architecture(3 * features, softmax=False),
+        learning_rate=LEARNING_RATE,
+        gamma=1.0,
+        tau=TAU,
+        start_e=None,
+        verbose=False,
+        with_exact_char=True,
+        buffer_size=BATCH_SIZE,
+    )
+    torch.manual_seed(SEED + 2)
+    return cast(Callable[..., Outcome], namespace[cls])(agent, stub, arguments, behaviour)
+
+
+def _values(prefix: str, model: Outcome, unique: Tensor, coalitions: Tensor) -> dict[str, HostArray]:
+    """get_val at each unique state with a fixed coalition per row, and the null value."""
+    return {
+        f"{prefix}_get_val": _numpy(model.get_val(unique, coalitions)),
+        f"{prefix}_null": _numpy(model.null(unique)),
+    }
+
+
+def _exact_table(model: Outcome, unique: Tensor, features: int) -> HostArray:
+    """Exact outcome values as (coalitions, unique states) in cartesian_prod order."""
+    states = [tuple(float(value) for value in row) for row in _numpy(unique)]
+    coalitions = list(itertools.product((0, 1), repeat=features))
+    return np.asarray(
+        [[_numpy(model.exact[coalition][state])[0] for state in states] for coalition in coalitions], np.float32
+    )
+
+
+def _transitions(
+    tables: dict[str, HostArray], name: str, observations: HostArray, actions: int
+) -> dict[str, HostArray]:
+    """A fixed batch of transitions read from P (first non-zero outcome), with independent e_obs rows."""
+    states = [tuple(row) for row in tables[f"{name}_p_states"].tolist()]
+    obs = observations[:BATCH_SIZE]
+    action = np.arange(BATCH_SIZE) % actions
+    following, reward, done = [], [], []
+    for row, chosen in zip(obs.astype(np.int32).tolist(), action, strict=True):
+        index = states.index(tuple(row))
+        outcome = int(np.flatnonzero(tables[f"{name}_p_probability"][index, chosen] > 0)[0])
+        following.append(tables[f"{name}_p_next"][index, chosen, outcome])
+        reward.append(tables[f"{name}_p_reward"][index, chosen, outcome])
+        done.append(tables[f"{name}_p_done"][index, chosen, outcome])
+    return {
+        "obs": obs.astype(np.float32),
+        "action": action.astype(np.int32),
+        "reward": np.asarray(reward, np.float32),
+        "next_obs": np.asarray(following, np.float32),
+        "terminated": np.asarray(done, np.float32),
+        "e_obs": np.roll(observations, 3, axis=0)[:BATCH_SIZE].astype(np.float32),
+    }
+
+
+def _coalitions(rows: int, features: int, step: int) -> HostArray:
+    grid_rows, columns = np.meshgrid(np.arange(rows), np.arange(features), indexing="ij")
+    return ((grid_rows * 3 + columns * 5 + step * 7) % 5) < 2 + step % 2
+
+
+def _recording_categorical(log: list[HostArray]) -> type:
+    base = cast(type, importlib.import_module("torch.distributions").Categorical)
+
+    class Recording(base):  # ty: ignore[unsupported-base] -- dynamic Torch distribution class.
+        def sample(self, *arguments: object, **keywords: object) -> Tensor:
+            value = cast(Tensor, super().sample(*arguments, **keywords))
+            log.append(np.asarray(value.detach().cpu().numpy()))
+            return value
+
+    return Recording
+
+
+def _architecture(features: int, *, softmax: bool) -> dict[str, list[object]]:
+    architecture: dict[str, list[object]] = {
+        "input": ["Linear", [features, 64]],
+        "input_activation": ["ReLU", []],
+        "hidden1": ["Linear", [64, 64]],
+        "hidden1_activation": ["ReLU", []],
+        "output": ["Linear", [64, None]],
+    }
+    if softmax:
+        architecture["output_activation"] = ["Softmax", [-1]]
+    return architecture
+
+
+def _parameters(name: str, model: Model) -> dict[str, HostArray]:
+    return {f"{name}_{index}": _numpy(parameter) for index, parameter in enumerate(model.parameters())}
+
+
+def _gradients(name: str, model: Model) -> dict[str, HostArray]:
+    arrays: dict[str, HostArray] = {}
+    for index, parameter in enumerate(model.parameters()):
+        if parameter.grad is None:
+            raise RuntimeError("reference gradient missing")
+        arrays[f"{name}_{index}"] = _numpy(parameter.grad)
+    return arrays
+
+
+def _fixed(value: Tensor) -> Callable[..., Tensor]:
+    def sample(*_: object, **__: object) -> Tensor:
+        return value
+
+    return sample
+
+
+def _numpy(tensor: Tensor) -> FloatArray:
+    return tensor.detach().cpu().numpy().astype(np.float32)
 
 
 def transitions(name: str, env: Environment) -> dict[str, HostArray]:
@@ -248,7 +576,30 @@ def _namespace(root: Path, torch: Torch) -> dict[str, object]:
     for name, module in (("envs/gwb.py", "reference_gwb"), ("envs/mastermind.py", "reference_mastermind")):
         loaded = _load(package / name, module)
         namespace.update({key: getattr(loaded, key) for key in ("GWB", "Mastermind") if hasattr(loaded, key)})
-    for name, definitions in (("utils.py", ("value_iteration",)), ("dqn.py", ("DQN_Super", "DQN"))):
+    namespace.update(
+        comb=importlib.import_module("math").comb,
+        tqdm=lambda iterable, *_, **__: iterable,
+        ImportanceWeightedMSELoss=models.ImportanceWeightedMSELoss,
+        MultiHeadNN=models.MultiHeadNN,
+    )
+    for name, definitions in (
+        ("utils.py", ("value_iteration", "ShapleySampler", "Buffer")),
+        ("dqn.py", ("DQN_Super", "DQN")),
+        (
+            "characteristics.py",
+            (
+                "Characteristic",
+                "CharacteristicModel",
+                "ValuePolicyCharacteristic",
+                "ValuePolicyCharacteristicModel",
+                "PolicyCharacteristicModel",
+                "PerformanceCharacteristic",
+                "PerformanceCharacteristicOnPolicy",
+                "PerformanceCharacteristicOffPolicy",
+            ),
+        ),
+        ("shapley.py", ("Shapley", "PerformanceShapley")),
+    ):
         path = package / name
         tree = ast.parse(path.read_text())
         selected: list[ast.stmt] = [
