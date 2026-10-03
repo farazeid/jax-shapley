@@ -90,7 +90,9 @@ def final_metrics(runs: pd.DataFrame) -> pd.DataFrame:
 
     Runs whose final exact loss is not finite and positive are kept with a NaN value and counted as failures.
     """
-    logged = runs.dropna(subset=["exact_loss"])
+    logged = runs.dropna(subset=["exact_loss"]).copy()
+    # Characteristics have no exact-characteristic group; upstream Hypercube chains label them "without".
+    logged.loc[logged["stage"] == "characteristic", "exact_char"] = ""
     last = logged.sort_values("step").groupby([*KEYS, "framework", "seed"], as_index=False).last()
     frames = []
     for metric, column in (("final_exact_loss", "exact_loss"), ("batches_to_stop", "step")):
