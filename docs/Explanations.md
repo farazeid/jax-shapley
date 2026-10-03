@@ -100,6 +100,23 @@ Each Shapley stage trains against the characteristic in its final, trained state
 - behaviour outputs are probability distributions
 - the importance weights match their definitions
 
+## Pipeline parity fixture
+
+`tests/fixtures/fastsverl_pipeline.npz` is captured by running upstream's unchanged `fill_buffer`, `get_data` and `train_models` (`scripts/explanations_port/collect_fastsverl_pipeline.py`). It records every random draw: buffer rows, by reissuing `Buffer.sample`'s own `np.random.choice` call on the same global stream, and coalitions. `tests/test_pipeline_parity.py` replays those draws through the JAX loop's injectable `train_draw`/`validation_draw` and checks:
+
+- **Buffer collection.** 16 vector Hypercube(3, 5) environments and a hand-built, tie-free greedy agent that reaches the goal every 10 steps. The 640 recorded observations, including 48 auto-resets, match exactly.
+- **Training loop.**
+  - a behaviour characteristic and its Shapley model, with patience 2
+  - a prediction characteristic stopped mid-run by the exact-loss condition under `track_batch`
+
+  Every epoch's train, validation and exact loss, every logged step, the stopping epoch and the restored best weights match within 1e-4.
+- **Reloaded ε.** It follows upstream's save rule, `linear_schedule((steps − 1) · num_envs)`.
+
+```bash
+uv run --script scripts/explanations_port/collect_fastsverl_pipeline.py \
+  /path/to/fastsverl tests/fixtures/fastsverl_pipeline.npz
+```
+
 ## Upstream semantics to preserve
 
 - **Masking.** Unknown features are set to `MASK = -2` directly in the raw observation. Mastermind uses `-1` for empty cells, so a masked cell and an empty cell are adjacent integers.

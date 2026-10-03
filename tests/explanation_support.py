@@ -92,10 +92,10 @@ def assign(mlp: MLP, fixture: FixtureArrays, prefix: str) -> None:
         layer.bias[...] = jnp.asarray(fixture[f"{prefix}_{index * 2 + 1}"])
 
 
-def assert_parameters(mlp: MLP, fixture: FixtureArrays, prefix: str) -> None:
+def assert_parameters(mlp: MLP, fixture: FixtureArrays, prefix: str, *, rtol: float = RTOL, atol: float = ATOL) -> None:
     for index, layer in enumerate(mlp.layers):
-        np.testing.assert_allclose(layer.kernel[...], fixture[f"{prefix}_{index * 2}"].T, rtol=RTOL, atol=ATOL)
-        np.testing.assert_allclose(layer.bias[...], fixture[f"{prefix}_{index * 2 + 1}"], rtol=RTOL, atol=ATOL)
+        np.testing.assert_allclose(layer.kernel[...], fixture[f"{prefix}_{index * 2}"].T, rtol=rtol, atol=atol)
+        np.testing.assert_allclose(layer.bias[...], fixture[f"{prefix}_{index * 2 + 1}"], rtol=rtol, atol=atol)
 
 
 def assert_gradients(gradients: nnx.State[str | int, nnx.Param[Array]], fixture: FixtureArrays, prefix: str) -> None:
