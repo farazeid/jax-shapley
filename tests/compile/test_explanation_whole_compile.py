@@ -27,6 +27,7 @@ from jax_shapley.train_explanations import (
     ShapleyRunConfig,
     run_characteristic,
     run_outcome,
+    run_outcome_on_policy,
     run_outcome_shapley,
     run_shapley,
     stack_seeds,
@@ -75,6 +76,50 @@ def test_whole_outcome_runs_compile(case: str, with_exact_char: bool) -> None:
         training = OutcomeTrainConfig(train_size=100_000, validation_size=16 * 10)
         config = OutcomeRunConfig(_unused(), _unused(), with_exact_char=with_exact_char, tau=0.01, train=training)
         _compile_outcome(Mastermind222, Mastermind222Config(), 8, config)
+
+
+@pytest.mark.compile
+@pytest.mark.parametrize("case", ["gridworld", "mastermind222"])
+def test_whole_on_policy_outcome_runs_compile(case: str) -> None:
+    """Audited train_V_on_policy settings: Gridworld 100k steps over 8 environments, Mastermind 200k over 16."""
+    if case == "gridworld":
+        training = OutcomeTrainConfig(total_timesteps=100_000, num_envs=8)
+        config = OutcomeRunConfig(_unused(), _unused(), "on_policy", tau=0.001, train=training, chunk_epochs=125)
+        _compile_on_policy(Gridworld, GridworldConfig(), 2, config)
+    else:
+        training = OutcomeTrainConfig(total_timesteps=200_000, num_envs=16)
+        config = OutcomeRunConfig(_unused(), _unused(), "on_policy", tau=0.01, train=training, chunk_epochs=125)
+        _compile_on_policy(Mastermind222, Mastermind222Config(), 8, config)
+
+
+def _compile_on_policy[State, Params](
+    factory: Callable[[], EnvironmentProtocol[State, Params]],
+    environment: EnvironmentConfig,
+    features: int,
+    config: OutcomeRunConfig,
+) -> None:
+    actions, width = 4, 64
+    explained = CharacteristicConfig("behaviour", "explore", (width, width))
+    agent = FrozenAgent(
+        QNetwork(dqn_config(features, actions, hidden_widths=(width, width)), rngs=nnx.Rngs(0)),
+        jnp.asarray(0.05, jnp.float32),
+    )
+    characteristic = CharacteristicModel(characteristic_network(features, actions, explained), rngs=nnx.Rngs(1))
+    buffers = Buffers(
+        jnp.zeros((DEFAULT.train_size, features), jnp.int32),
+        jnp.zeros((DEFAULT.validation_size, features), jnp.int32),
+        jnp.zeros((DEFAULT.exact_size, features), jnp.int32),
+    )
+    run = partial(
+        run_outcome_on_policy,
+        environment_factory=factory,
+        config=config,
+        explained=explained,
+        tabular=transition_model(environment),
+        sink=RecordingSink(),
+    )
+    arguments = (stack_seeds([agent] * SEEDS), stack_seeds([characteristic] * SEEDS), stack_seeds([buffers] * SEEDS))
+    nnx.jit(run).trace(KEYS, *arguments, None).lower().compile()
 
 
 def _compile_outcome[State, Params](

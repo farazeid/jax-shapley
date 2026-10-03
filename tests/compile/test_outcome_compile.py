@@ -27,7 +27,7 @@ from jax_shapley.outcome import (
     exact_outcome_loss,
     learnt_behaviour_table,
     outcome_network,
-    sample_next_actions,
+    sample_actions,
     soft_update,
     update_off_policy,
     update_on_policy,
@@ -81,7 +81,7 @@ def test_outcome_updates_compile(case: str, variant: Variant) -> None:
             soft_update(networks, config.tau)
             return metrics
         policy = _policy(behaviour, agent)
-        next_actions = sample_next_actions(policy, key, batch.next_observations, explained, coalitions)
+        next_actions = sample_actions(policy, key, batch.next_observations, explained, coalitions)
         return update_off_policy(networks, optimizer, batch, explained, coalitions, next_actions, config)
 
     key = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
