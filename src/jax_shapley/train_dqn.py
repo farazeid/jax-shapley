@@ -28,6 +28,7 @@ from jax_shapley.envs import (
     GridworldState,
     Hypercube,
     HypercubeState,
+    Mastermind,
     Mastermind222,
     Mastermind222State,
 )
@@ -110,8 +111,24 @@ class GridworldConfig:
 
 @dataclass(frozen=True, slots=True)
 class Mastermind222Config:
-    def make(self) -> Mastermind222:
+    def make(self) -> Mastermind:
         return Mastermind222()
+
+
+@dataclass(frozen=True, slots=True)
+class MastermindConfig:
+    """Any Mastermind size; the paper uses 3-3-3 and 4-4-3, 4-5-3, 4-6-3 (code size, guesses, pegs)."""
+
+    code_size: int = 3
+    num_guesses: int = 3
+    num_pegs: int = 3
+
+    def __post_init__(self) -> None:
+        if self.code_size < 1 or self.num_guesses < 1 or self.num_pegs < 2:
+            raise ValueError("Mastermind needs code_size >= 1, num_guesses >= 1 and num_pegs >= 2")
+
+    def make(self) -> Mastermind:
+        return Mastermind(self.code_size, self.num_guesses, self.num_pegs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +161,7 @@ class ResumeConfig:
             raise ValueError("validate_only and compile_only are mutually exclusive")
 
 
-type EnvironmentConfig = GridworldConfig | Mastermind222Config | HypercubeConfig
+type EnvironmentConfig = GridworldConfig | Mastermind222Config | MastermindConfig | HypercubeConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +290,10 @@ type CLIConfig = (
         tyro.conf.subcommand(name="mastermind222", default=DQNRunConfig(Mastermind222Config())),
     ]
     | Annotated[
+        DQNRunConfig[MastermindConfig],
+        tyro.conf.subcommand(name="mastermind", default=DQNRunConfig(MastermindConfig())),
+    ]
+    | Annotated[
         DQNRunConfig[HypercubeConfig], tyro.conf.subcommand(name="hypercube", default=DQNRunConfig(HypercubeConfig()))
     ]
     | Annotated[ResumeConfig, tyro.conf.subcommand(name="resume")]
@@ -359,11 +380,11 @@ def main(args: list[str] | None = None) -> RunSummary | None:
                 sink=router,
             )
         )
-    elif isinstance(config.env, Mastermind222Config):
+    elif isinstance(config.env, Mastermind222Config | MastermindConfig):
         runner = nnx.jit(
             partial(
                 run,
-                environment_factory=Mastermind222,
+                environment_factory=config.env.make,
                 config=config.train,
                 hidden_widths=config.hidden_widths,
                 chunk_steps=config.chunk_steps,
@@ -586,7 +607,7 @@ def checkpoint_due(vector_step: int | Array, num_envs: int, total_timesteps: int
 def network_config(config: EnvironmentConfig, widths: tuple[int, ...]) -> MLPConfig:
     if isinstance(config, GridworldConfig):
         return _network_for_env(config.make(), widths)
-    if isinstance(config, Mastermind222Config):
+    if isinstance(config, Mastermind222Config | MastermindConfig):
         return _network_for_env(config.make(), widths)
     return _network_for_env(config.make(), widths)
 

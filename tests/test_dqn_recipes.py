@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from jax_shapley.train_dqn import DQNRunConfig, HypercubeConfig, parse_args
+from jax_shapley.train_dqn import DQNRunConfig, HypercubeConfig, MastermindConfig, parse_args
 
 ROOT = Path(__file__).parents[1]
 
@@ -26,6 +26,22 @@ def test_gridworld_and_mastermind_source_settings(tmp_path: Path) -> None:
     assert (mastermind.train.num_envs, mastermind.train.total_timesteps) == (16, 100_000)
     assert mastermind.train.exploration_fraction == pytest.approx(0.25)
     assert mastermind.seed == 3
+
+
+@pytest.mark.parametrize("size,timesteps", [("333", 1_000_000), ("443", 10_000_000), ("463", 10_000_000)])
+def test_large_mastermind_source_settings(tmp_path: Path, size: str, timesteps: int) -> None:
+    config = parse_args(_capture(tmp_path, "mastermind.sh", leading=(size,))[0][4:])
+    assert isinstance(config, DQNRunConfig) and isinstance(config.env, MastermindConfig)
+    assert (config.env.code_size, config.env.num_guesses, config.env.num_pegs) == tuple(int(digit) for digit in size)
+    assert (config.train.total_timesteps, config.train.buffer_size, config.train.num_envs) == (timesteps, timesteps, 16)
+    assert (config.train.learning_starts, config.train.train_frequency, config.hidden_widths) == (
+        10_000,
+        10,
+        (128, 128),
+    )
+    assert config.train.exploration_fraction == pytest.approx(0.25) and config.train.end_e == pytest.approx(0.01)
+    with pytest.raises(subprocess.CalledProcessError):
+        _capture(tmp_path, "mastermind.sh", leading=("222",))
 
 
 def test_all_hypercube_settings_and_seed_selection(tmp_path: Path) -> None:
@@ -80,7 +96,9 @@ def test_smoke_recipe_is_short_and_has_updates(tmp_path: Path) -> None:
     assert config.train.eval_episodes == 2
 
 
-def _capture(tmp_path: Path, script: str, extra: tuple[str, ...] = ()) -> list[list[str]]:
+def _capture(
+    tmp_path: Path, script: str, extra: tuple[str, ...] = (), leading: tuple[str, ...] = ()
+) -> list[list[str]]:
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     ledger = tmp_path / "commands.jsonl"
@@ -98,7 +116,7 @@ def _capture(tmp_path: Path, script: str, extra: tuple[str, ...] = ()) -> list[l
     if bash is None:
         raise RuntimeError("bash is required for recipe validation")
     subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- trusted local script argv.
-        [bash, str(ROOT / "experiments/dqn" / script), "--validate-only", *extra],
+        [bash, str(ROOT / "experiments/dqn" / script), *leading, "--validate-only", *extra],
         env=environment,
         check=True,
         cwd=tmp_path,

@@ -1,0 +1,15 @@
+{
+  "episodes_per_guess_index": 100,
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "fixture_sha256": "9f8f81df9b9efe18ea1c7dfeaace57f06a75dec5b50e3f4753eb20e9628a79fc",
+  "losing_episodes": 200,
+  "source_sha256": {
+    "mastermind": "16ae8c47583ddf506ab074c965f5c0099c048a23d9090b3704e257e758663b5a"
+  },
+  "transition_counts": {
+    "mm333": 1907,
+    "mm443": 8342,
+    "mm453": 9044,
+    "mm463": 9842
+  }
+}

@@ -40,7 +40,7 @@ from jax_shapley.characteristics import (
     update_characteristic,
 )
 from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_coalitions
-from jax_shapley.envs import Gridworld, GridworldState, HypercubeState, Mastermind222, Mastermind222State
+from jax_shapley.envs import Gridworld, GridworldState, HypercubeState, Mastermind222State
 from jax_shapley.networks import MLPConfig, QNetwork
 from jax_shapley.outcome import (
     AgentPolicy,
@@ -85,6 +85,7 @@ from jax_shapley.train_dqn import (
     EnvironmentConfig,
     GridworldConfig,
     Mastermind222Config,
+    MastermindConfig,
     ResumeConfig,
     choose_action,
     environment_step,
@@ -1766,8 +1767,8 @@ def _on_policy_template(
     key = jax.random.key(0)
     if isinstance(env, GridworldConfig):
         return initial_on_policy_state(EpisodeStatisticsWrapper(Gridworld()), network, config, key, pool)
-    if isinstance(env, Mastermind222Config):
-        return initial_on_policy_state(EpisodeStatisticsWrapper(Mastermind222()), network, config, key, pool)
+    if isinstance(env, Mastermind222Config | MastermindConfig):
+        return initial_on_policy_state(EpisodeStatisticsWrapper(env.make()), network, config, key, pool)
     return initial_on_policy_state(EpisodeStatisticsWrapper(env.make()), network, config, key, pool)
 
 
@@ -1782,8 +1783,8 @@ def _with_environment(
     """Bind the environment factory, preserving each environment's state/parameter types."""
     if isinstance(env, GridworldConfig):
         return partial(runner, environment_factory=Gridworld, **options)
-    if isinstance(env, Mastermind222Config):
-        return partial(runner, environment_factory=Mastermind222, **options)
+    if isinstance(env, Mastermind222Config | MastermindConfig):
+        return partial(runner, environment_factory=env.make, **options)
     return partial(runner, environment_factory=env.make, **options)
 
 

@@ -24,10 +24,9 @@ from jax_shapley.envs import (
     Gridworld,
     GridworldState,
     HypercubeState,
-    Mastermind222,
-    Mastermind222State,
+    MastermindState,
 )
-from jax_shapley.train_dqn import EnvironmentConfig, GridworldConfig, Mastermind222Config
+from jax_shapley.train_dqn import EnvironmentConfig, GridworldConfig, Mastermind222Config, MastermindConfig
 from jax_shapley.wrappers import EnvironmentProtocol
 
 type TableStates = Int[Array, "states features"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
@@ -82,12 +81,12 @@ def transition_model(config: EnvironmentConfig) -> TabularModel:
             for start in env._starts
         ]
         return enumerate_model(env, starts)
-    if isinstance(config, Mastermind222Config):
-        env = Mastermind222()
+    if isinstance(config, Mastermind222Config | MastermindConfig):
+        env = config.make()
         roots = [
-            Mastermind222State(
+            MastermindState(
                 time=jnp.asarray(0, jnp.int32),
-                board=jnp.full((2, 4), -1, jnp.int32),
+                board=jnp.full((env.num_guesses, env.code_size + 2), -1, jnp.int32),
                 goal=env.decode_action(jnp.asarray(goal, jnp.int32)),
                 guess_index=jnp.asarray(0, jnp.int32),
                 terminated=jnp.asarray(False),

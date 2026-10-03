@@ -52,7 +52,7 @@ from jax_shapley.run_io import (
     prefix_digest,
     verify_prefix,
 )
-from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config
+from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config, MastermindConfig
 from jax_shapley.train_explanations import (
     AnyState,
     Buffers,
@@ -909,7 +909,7 @@ def _environment(config: EnvironmentConfig) -> tuple[str, int, HostArray, HostAr
     """Name, action count and observation bounds, preserving each environment's parameter type."""
     if isinstance(config, GridworldConfig):
         return _space(config.make())
-    if isinstance(config, Mastermind222Config):
+    if isinstance(config, Mastermind222Config | MastermindConfig):
         return _space(config.make())
     return _space(config.make())
 

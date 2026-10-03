@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import pytest
 from einops import rearrange
 
-from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind, Mastermind222
 from jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo, StepInfo
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
 
@@ -32,8 +32,11 @@ class _BatchedStep[State, Params](Protocol):
         lambda: _assert_env_compiles(Gridworld()),
         lambda: _assert_env_compiles(Hypercube(3, 2)),
         lambda: _assert_env_compiles(Mastermind222()),
+        lambda: _assert_env_compiles(Mastermind(3, 3, 3)),
+        lambda: _assert_env_compiles(Mastermind(4, 4, 3)),
+        lambda: _assert_env_compiles(Mastermind(4, 6, 3)),
     ],
-    ids=["gridworld", "hypercube-3x2", "mastermind-222"],
+    ids=["gridworld", "hypercube-3x2", "mastermind-222", "mastermind-333", "mastermind-443", "mastermind-463"],
 )
 def test_env_reset_and_step_compile(check: Callable[[], None]) -> None:
     check()
@@ -56,8 +59,9 @@ def test_hypercube_shape_variants_compile(side_length: int, dimension: int) -> N
         lambda: _assert_rollout_compiles(Gridworld()),
         lambda: _assert_rollout_compiles(Hypercube(4, 5)),
         lambda: _assert_rollout_compiles(Mastermind222()),
+        lambda: _assert_rollout_compiles(Mastermind(4, 6, 3)),
     ],
-    ids=["gridworld", "hypercube-4x5", "mastermind-222"],
+    ids=["gridworld", "hypercube-4x5", "mastermind-222", "mastermind-463"],
 )
 def test_vectorized_rollout_scan_compile(check: Callable[[], None]) -> None:
     check()
