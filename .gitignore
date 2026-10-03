@@ -8,3 +8,6 @@ __pycache__
 .DS_Store
 
 docs/figures/*.png
+
+# Training and explanation run artifacts (recipes default to runs/).
+runs/
