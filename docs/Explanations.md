@@ -135,11 +135,26 @@ The exact loss is the mean squared error over all valid `(C, e)` pairs.
 - on-policy replay invariants hold: one coalition per decision, `e` drawn from the pool, and continuity across steps
 - sweeps and interrupted runs resume byte-identically
 
-**Deviations from upstream:**
+The outcome-specific deviations are in the [deviation ledger](#deviation-ledger).
 
-- **Non-terminating policy.** Under γ = 1, a conditioned policy that can loop forever has no finite value. Upstream's value iteration then never terminates; the port's solve returns non-finite exact values, and the run logs them. The outcome fixture therefore explains the ε-greedy agent, because its greedy Gridworld policy loops.
-- **Off-policy target after early stopping.** Restoring the best off-policy model also restores the target that was saved with it; upstream restores only the model. The target is not used after training.
-- **Terminal transitions.** On-policy terminal transitions store the pre-reset next observation, where upstream stores the reset observation. The `(1 − terminated)` mask makes the two equivalent.
+## Deviation ledger
+
+Every known difference between the port and FastSVERL `25b2cbe`, and why it does not change behaviour (or how it does):
+
+| Area | Upstream | Port | Effect |
+| --- | --- | --- | --- |
+| Random streams | torch and NumPy global generators | explicit JAX keys, split per run and per seed | Runs are not seed-for-seed identical; parity tests inject recorded draws, and the end-to-end comparison is distributional |
+| Precision | float64 value iteration; float32 networks | float32 throughout | Exact values agree within 1e-5 relative / 1e-4 absolute (fixture tests) |
+| Exact policy evaluation | value iteration to a 1e-10 change | direct linear solve of `(I − γ C_π) V = R_π` | Same fixed point |
+| Non-terminating conditioned policy (γ = 1) | value iteration never terminates (the run hangs) | the solve returns non-finite exact values, which the run logs | Only reachable with a policy that can loop forever; upstream gives no result at all. The comparison harness times out such upstream runs and records them as failures |
+| Exact outcome states | `torch.unique` of the exact buffer | transition-model states, marked valid when present in the exact buffer | Same set of valid states; avoids padding to the observation-space bound |
+| Null value `v(s, ∅)` | network on an all-masked batch | network on one all-masked row, broadcast | Identical values; works around an XLA CPU miscompilation of broadcast-constant batches (JIT/eager tests guard it) |
+| Off-policy target after early stopping | best model restored; the target keeps its last weights | the target saved with the best model is restored too | The target is not used after training |
+| Outcome optimiser | Adam over the model only | one Adam over model and target | The target's gradients are exactly zero, so Adam leaves it unchanged (fixture target weights match) |
+| On-policy terminal transitions | stores the reset observation as `n_obs` | stores the pre-reset observation | Masked by `(1 − terminated)`; equivalent |
+| Truncated transitions | `final_observation` | Gymnax pre-reset observation | Same observation |
+| Processes | one process per seed | `--seeds` trains every seed in one compiled program | Each seed uses the keys of a single run with that seed; sweeps equal single runs |
+| Checkpoints | model saves every tenth of the run | full-state Orbax checkpoints every tenth of the run, with exact resume | No numerical effect |
 
 ## Reference fixture
 
