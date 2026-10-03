@@ -37,6 +37,7 @@ from jax_shapley.train_dqn import (
     GridworldConfig,
     HypercubeConfig,
     Mastermind222Config,
+    MastermindConfig,
     RunState,
     RunSummary,
     StepMetrics,
@@ -485,6 +486,10 @@ def parse_settings(text: str) -> DQNRunConfig[EnvironmentConfig]:
         env = GridworldConfig()
     elif name == "Mastermind222Config" and not environment:
         env = Mastermind222Config()
+    elif name == "MastermindConfig" and set(environment) == {"code_size", "num_guesses", "num_pegs"}:
+        env = MastermindConfig(
+            _integer(environment, "code_size"), _integer(environment, "num_guesses"), _integer(environment, "num_pegs")
+        )
     elif name == "HypercubeConfig" and set(environment) == {"side_length", "dimension"}:
         env = HypercubeConfig(_integer(environment, "side_length"), _integer(environment, "dimension"))
     else:

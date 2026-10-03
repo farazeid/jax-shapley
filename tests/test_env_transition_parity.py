@@ -17,8 +17,10 @@ from jax_shapley.envs import (
     GridworldState,
     Hypercube,
     HypercubeState,
+    Mastermind,
     Mastermind222,
     Mastermind222State,
+    MastermindState,
 )
 
 
@@ -31,6 +33,7 @@ class _RawStep(Protocol):
 type RawStepOutput = tuple[jax.Array, object, jax.Array, jax.Array, dict[str, jax.Array]]
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "fastsverl_transitions.npz"
+MASTERMIND_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "fastsverl_mastermind.npz"
 
 
 @pytest.mark.slow
@@ -57,6 +60,42 @@ def test_gpu_exhaustive_transition_parity(request: pytest.FixtureRequest) -> Non
     assert jax.default_backend() == "gpu"
     output = request.config.getoption("--parity-output")
     assert_zero_mismatches(measure_parity(output))
+
+
+@pytest.mark.parametrize("size", ["333", "443", "453", "463"])
+def test_larger_mastermind_transition_parity(size: str) -> None:
+    """Every first guess against every goal, and winning/losing episodes, match upstream exactly."""
+    with np.load(MASTERMIND_FIXTURE_PATH) as fixture:
+        data = {key.removeprefix(f"mm{size}_"): fixture[key] for key in fixture.files if key.startswith(f"mm{size}_")}
+    code_size, num_guesses, num_pegs = (int(digit) for digit in size)
+    env = Mastermind(code_size, num_guesses, num_pegs)
+    count = data["action"].size
+    state = MastermindState(
+        board=jnp.asarray(data["board"], dtype=jnp.int32),
+        goal=jnp.asarray(data["goal"], dtype=jnp.int32),
+        guess_index=jnp.asarray(data["guess_index"]),
+        terminated=jnp.zeros(count, dtype=jnp.bool_),
+        time=jnp.asarray(data["guess_index"]),
+    )
+    output = _batched_raw_step(
+        cast(_RawStep, env.step_env),
+        jax.random.split(jax.random.key(999), count),
+        state,
+        jnp.asarray(data["action"]),
+        env.default_params,
+    )
+    obs, next_state, reward, done, info = jax.device_get(output)
+    expected = data["next_board"].astype(np.int32)
+    np.testing.assert_array_equal(obs, expected.reshape(count, -1))
+    np.testing.assert_array_equal(next_state.board, expected)
+    np.testing.assert_array_equal(next_state.guess_index, data["guess_index"] + 1)
+    np.testing.assert_array_equal(reward, data["reward"])
+    np.testing.assert_array_equal(done, data["terminated"])
+    np.testing.assert_array_equal(info["terminated"], data["terminated"])
+    np.testing.assert_array_equal(info["truncated"], data["truncated"])
+    # Observations stay inside the declared space, which bounds masks and unique-state counts.
+    space = env.observation_space(env.default_params)
+    assert obs.shape[1:] == space.shape and obs.min() >= space.low and obs.max() <= space.high
 
 
 def measure_parity(output: Path | None) -> dict[str, dict[str, int]]:

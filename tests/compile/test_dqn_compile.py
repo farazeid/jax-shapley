@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind, Mastermind222
 from jax_shapley.networks import dqn_config
 from jax_shapley.replay import append, empty_replay, sample
 from jax_shapley.train_dqn import DQNTrainConfig, evaluate_dqn, initialize_run, run_chunk, update, update_target
@@ -22,6 +22,8 @@ def test_dqn_environment_chunks_compile(num_envs: int, chunk_steps: int) -> None
     _compile_training(Gridworld(), 2, 4, num_envs, chunk_steps)
     _compile_training(Mastermind222(), 8, 4, num_envs, chunk_steps)
     _compile_training(Hypercube(6, 5), 5, 10, num_envs, chunk_steps)
+    # The paper's largest Mastermind: 36 features and 81 actions.
+    _compile_training(Mastermind(4, 6, 3), 36, 81, num_envs, chunk_steps)
 
 
 @pytest.mark.compile

@@ -26,6 +26,7 @@ def render_mastermind(
     num_guesses: int,
     code_size: int,
     config: RenderConfig | None,
+    num_pegs: int = 2,
     transparent: bool = False,
 ) -> np.ndarray:
     """Render the public Mastermind board without revealing its secret by default."""
@@ -53,11 +54,13 @@ def render_mastermind(
         fill=PALETTE.panel,
         outline=PALETTE.grid,
     )
-    draw_text(draw, (left, 25), "Mastermind-222", font=font, scale=scale, anchor="lm")
+    title = f"Mastermind-{code_size}{num_guesses}{num_pegs}"
+    values = ",".join(str(value) for value in range(1, num_pegs + 1))
+    draw_text(draw, (left, 25), title, font=font, scale=scale, anchor="lm")
     draw_text(
         draw,
         (left, 50),
-        "2 positions | values {1,2} | at most 2 guesses | secret hidden",
+        f"{code_size} positions | values {{{values}}} | at most {num_guesses} guesses | secret hidden",
         font=font,
         scale=scale,
         fill=PALETTE.muted,

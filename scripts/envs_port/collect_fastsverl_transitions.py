@@ -1,8 +1,14 @@
-"""Capture exhaustive transition fixtures from a local FastSVERL checkout.
+"""Capture transition fixtures from a local FastSVERL checkout.
 
 This developer tool deliberately does not fetch or install FastSVERL. Pass a
 checkout pinned to the commit exposed as the ``expected_commit`` CLI option. The generated
-fixtures are consumed by offline tests.
+fixtures are consumed by offline tests:
+
+- ``transitions``: exhaustive Gridworld, Hypercube and Mastermind-222 transitions.
+- ``mastermind``: the paper's larger Mastermind sizes (3-3-3, 4-4-3, 4-5-3, 4-6-3). Their
+  histories are too many to enumerate, so the fixture holds every (first guess, goal)
+  pair, which pins the clue logic, and seeded episodes that win at every guess index or
+  lose at the last guess, which pin termination and rewards.
 """
 
 from __future__ import annotations
@@ -17,13 +23,20 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import numpy as np
 import numpy.typing as npt
 import tyro
 
 ArrayLike = npt.ArrayLike
+
+
+# (code size, guesses, pegs) reported in the paper beyond 2-2-2.
+MASTERMIND_SIZES = ((3, 3, 3), (4, 4, 3), (4, 5, 3), (4, 6, 3))
+EPISODES_PER_GUESS = 100
+LOSING_EPISODES = 200
+EXPECTED_MASTERMIND_COUNTS = {"mm333": 1907, "mm443": 8342, "mm453": 9044, "mm463": 9842}
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,8 @@ class Args:
     gridworld_source: Path = Path("fastsverl/fastsverl/envs/gwb.py")
     hypercube_source: Path = Path("fastsverl/fastsverl/envs/hypercube.py")
     mastermind_source: Path = Path("fastsverl/fastsverl/envs/mastermind.py")
+    mastermind_output: Path = Path("tests/fixtures/fastsverl_mastermind.npz")
+    fixtures: Literal["all", "transitions", "mastermind"] = "all"
 
 
 class _ActionSpace(Protocol):
@@ -83,6 +98,7 @@ class _HypercubeInstance(Protocol):
 
 class _MastermindInstance(Protocol):
     index_to_guess: np.ndarray
+    num_guesses: int
     action_space: _ActionSpace
     grid: np.ndarray
     goal: np.ndarray
@@ -110,6 +126,10 @@ def main() -> None:
     }
     paths = {name: source_root / relative for name, relative in relative_paths.items()}
     modules = {name: load_module(f"fastsverl_fixture_{name}", path) for name, path in paths.items()}
+    if args.fixtures in ("all", "mastermind"):
+        write_mastermind_sizes(modules, args.mastermind_output, commit, paths["mastermind"])
+    if args.fixtures == "mastermind":
+        return
     arrays = capture_transitions(modules)
     counts = transition_counts(arrays)
     expected_counts = {
@@ -142,6 +162,105 @@ def capture_transitions(modules: dict[str, ModuleType]) -> dict[str, ArrayLike]:
     arrays.update(capture_hypercubes(hypercube))
     arrays.update(capture_mastermind(mastermind(code_size=2, num_guesses=2, num_pegs=2, seed=0)))
     return arrays
+
+
+def write_mastermind_sizes(modules: dict[str, ModuleType], output: Path, commit: str, source: Path) -> None:
+    factory = cast(_MastermindFactory, modules["mastermind"].Mastermind)
+    arrays: dict[str, ArrayLike] = {}
+    counts: dict[str, int] = {}
+    for code_size, num_guesses, num_pegs in MASTERMIND_SIZES:
+        name = f"mm{code_size}{num_guesses}{num_pegs}"
+        env = factory(code_size=code_size, num_guesses=num_guesses, num_pegs=num_pegs, seed=0)
+        captured = capture_mastermind_sizes(env, np.random.default_rng(code_size * 100 + num_guesses * 10 + num_pegs))
+        arrays.update({key.replace("mm_", f"{name}_", 1): value for key, value in captured.items()})
+        counts[name] = int(np.asarray(captured["mm_action"]).size)
+    if counts != EXPECTED_MASTERMIND_COUNTS:
+        raise RuntimeError(f"Unexpected Mastermind fixture counts: {counts}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cast(_SavezCompressed, np.savez_compressed)(output, **arrays)
+    provenance = {
+        "fastsverl_commit": commit,
+        "source_sha256": {"mastermind": sha256(source)},
+        "transition_counts": counts,
+        "episodes_per_guess_index": EPISODES_PER_GUESS,
+        "losing_episodes": LOSING_EPISODES,
+        "fixture_sha256": sha256(output),
+    }
+    output.with_suffix(".json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(provenance, indent=2, sort_keys=True))
+
+
+def capture_mastermind_sizes(env: _MastermindInstance, rng: np.random.Generator) -> dict[str, ArrayLike]:
+    """Every first guess against every goal, then winning and losing episodes from seeded draws."""
+    rows = _MastermindRows()
+    # Native dtype: upstream's clue cache keys on the goal's raw int64 bytes.
+    goals = [np.asarray(goal) for goal in env.index_to_guess]
+    actions = env.action_space.n
+    for goal in goals:
+        for action in range(actions):
+            rows.record(_fresh(env, goal), action)
+    for win_at in range(env.num_guesses):
+        for _ in range(EPISODES_PER_GUESS):
+            goal_index = int(rng.integers(actions))
+            current = _fresh(env, goals[goal_index])
+            for _ in range(win_at):
+                # A wrong guess: every other action, uniformly.
+                action = int(rng.integers(actions - 1))
+                current = rows.record(current, action if action < goal_index else action + 1)
+            rows.record(current, goal_index)
+    for _ in range(LOSING_EPISODES):
+        current = _fresh(env, goals[int(rng.integers(actions))])
+        while True:
+            current = rows.record(current, int(rng.integers(actions)))
+            if rows.terminated[-1]:
+                break
+    return rows.arrays()
+
+
+def _fresh(env: _MastermindInstance, goal: np.ndarray) -> _MastermindInstance:
+    fresh = deepcopy(env)
+    fresh.reset()
+    fresh.goal = goal.copy()
+    return fresh
+
+
+class _MastermindRows:
+    """Transitions recorded from deep copies, so every source state stays intact."""
+
+    def __init__(self) -> None:
+        self.boards: list[np.ndarray] = []
+        self.goals: list[np.ndarray] = []
+        self.guess_indices: list[int] = []
+        self.actions: list[int] = []
+        self.next_boards: list[np.ndarray] = []
+        self.rewards: list[float] = []
+        self.terminated: list[bool] = []
+        self.truncated: list[bool] = []
+
+    def record(self, source: _MastermindInstance, action: int) -> _MastermindInstance:
+        env = deepcopy(source)
+        self.boards.append(np.asarray(env.grid.copy(), dtype=np.int8))
+        self.goals.append(np.asarray(env.goal.copy(), dtype=np.int8))
+        self.guess_indices.append(int(env.count))
+        self.actions.append(action)
+        _, reward, done, trunc, _ = env.step(action)
+        self.next_boards.append(np.asarray(env.grid.copy(), dtype=np.int8))
+        self.rewards.append(float(reward))
+        self.terminated.append(done)
+        self.truncated.append(trunc)
+        return env
+
+    def arrays(self) -> dict[str, ArrayLike]:
+        return {
+            "mm_board": np.asarray(self.boards, dtype=np.int8),
+            "mm_goal": np.asarray(self.goals, dtype=np.int8),
+            "mm_guess_index": np.asarray(self.guess_indices, dtype=np.int32),
+            "mm_action": np.asarray(self.actions, dtype=np.int32),
+            "mm_next_board": np.asarray(self.next_boards, dtype=np.int8),
+            "mm_reward": np.asarray(self.rewards, dtype=np.float32),
+            "mm_terminated": np.asarray(self.terminated, dtype=np.bool_),
+            "mm_truncated": np.asarray(self.truncated, dtype=np.bool_),
+        }
 
 
 def transition_counts(arrays: dict[str, ArrayLike]) -> dict[str, int]:

@@ -45,7 +45,7 @@ uv sync --all-groups --extra cuda
 uv lock --check
 uv run ruff check .
 
-uv run scripts/envs_port/collect_fastsverl_transitions.py \
+uv run --with tqdm scripts/envs_port/collect_fastsverl_transitions.py \
     --source-root "$fastsverl_source_root"
 
 JAX_PLATFORMS=cpu uv run --extra cuda pytest \

@@ -14,7 +14,8 @@ from jaxtyping import Bool, Float, Int
 # These targeted suppressions apply only to non-Python shape grammar.
 type Observation = Int[Array, "... features"]  # ruff: ignore[forward-annotation-syntax-error]
 type Position2 = Int[Array, "... 2"]  # ruff: ignore[forward-annotation-syntax-error]
-type Board222 = Int[Array, "... 2 4"]  # ruff: ignore[forward-annotation-syntax-error]
+type Board = Int[Array, "... guesses columns"]  # ruff: ignore[forward-annotation-syntax-error]
+type Code = Int[Array, "... code"]  # ruff: ignore[forward-annotation-syntax-error]
 type Counter = Int[Array, "..."]
 type Flag = Bool[Array, "..."]
 type Reward = Float[Array, "..."]

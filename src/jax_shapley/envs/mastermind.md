@@ -1,6 +1,6 @@
-# Mastermind-222 Environment Specification
+# Mastermind Environment Specification
 
-`Mastermind222` is the end-to-end JAX/Gymnax port of the fixed FastSVERL Mastermind-222 configuration: a hidden code of length 2, at most 2 guesses, and an alphabet of 2 peg values.
+`Mastermind(code_size, num_guesses, num_pegs)` is the end-to-end JAX/Gymnax port of FastSVERL's Mastermind. Most of this card describes the Mastermind-222 configuration (a hidden code of length 2, at most 2 guesses, and an alphabet of 2 peg values), which `Mastermind222` names with those defaults. [Larger sizes](#larger-sizes) covers the paper's 3-3-3 and 4-4-3, 4-5-3, 4-6-3 configurations.
 
 ![Rendered Mastermind-222 state](../../../docs/figures/envs-render--mastermind-222.webp)
 
@@ -150,9 +150,35 @@ The offline reference fixture exhaustively covers 64 valid transitions: 4 goals 
 - [Pinned FastSVERL source](https://github.com/djeb20/fastsverl/blob/25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b/fastsverl/fastsverl/envs/mastermind.py)
 - Source SHA-256: `16ae8c47583ddf506ab074c965f5c0099c048a23d9090b3704e257e758663b5a`
 
+## Larger sizes
+
+`Mastermind(code_size, num_guesses, num_pegs)` generalises every quantity above. Size names list code size, guesses and pegs, as in the paper.
+
+| Size | Features | Actions (codes) | Paper use |
+| --- | ---: | ---: | --- |
+| 2-2-2 | 8 | 4 | Figures 1, 3, 4, 7, 10, 11 |
+| 3-3-3 | 15 | 27 | Figures 4 and 11 (exact Shapley values at their practical limit) |
+| 4-4-3, 4-5-3, 4-6-3 | 24, 30, 36 | 81 | Tables 1–4, Figure 6 |
+
+- Board: `(num_guesses, code_size + 2)`, rows `[misplaced, pegs..., exact]`, flattened row-major.
+- Observation space: `Box(-1, max(num_pegs, code_size))`.
+- Action `a` decodes to peg `i` = `(a // num_pegs**i) % num_pegs + 1`.
+- Reward: `-1`, plus `num_guesses` on the winning guess.
+- Termination: on a win or after the last guess.
+- `default_params.max_steps_in_episode` is `num_guesses`.
+- For 2-2-2 every random draw and output is unchanged, which the exhaustive fixture checks.
+
+**Configuration.** DQN and explanation runs select a size with `train_dqn mastermind --env.code-size … --env.num-guesses … --env.num-pegs …` (`MastermindConfig`). `mastermind222` remains the 2-2-2 subcommand. `experiments/dqn/mastermind.sh 333|443|453|463` holds the paper's large agents.
+
+**Parity.** These sizes have too many histories to enumerate. `tests/fixtures/fastsverl_mastermind.npz` (from `scripts/envs_port/collect_fastsverl_transitions.py --fixtures mastermind`) holds 29,135 transitions from the unchanged upstream environment:
+
+- every first guess against every goal, which pins the clue logic
+- 100 winning episodes per guess index and 200 losing episodes per size, which pin rewards and termination
+
+`tests/test_env_transition_parity.py` matches every observation, board, reward and flag exactly.
+
 ## Scope and known differences
 
-- Only Mastermind-222 is implemented; larger FastSVERL configurations remain out of scope.
 - The released FastSVERL action and board encodings are authoritative where they differ from intuition.
 - Seed-for-seed NumPy/JAX goal identity is not required.
 - The hidden goal is part of the environment state but never part of the public observation or ordinary render.
