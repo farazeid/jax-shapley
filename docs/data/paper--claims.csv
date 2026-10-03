@@ -1,0 +1,26 @@
+claim,figure,statement,check
+fig3a_is_helps,main_mastermind_222_offpolicy_policy,"Importance sampling lowers error when using the agent's training buffer",final(Off-policy (with IS)) < final(Off-policy (without IS))
+fig3a_onpolicy_best,main_mastermind_222_offpolicy_policy,"Off-policy data does not match the on-policy baseline",final(On-policy) < final(Off-policy (with IS))
+fig7_is_helps,app_mastermind_222_offpolicy_value,"Importance sampling lowers prediction characteristic error",final(Off-policy (with IS)) < final(Off-policy (without IS))
+fig7_onpolicy_best,app_mastermind_222_offpolicy_value,"On-policy remains more accurate for prediction",final(On-policy) < final(Off-policy (with IS))
+fig8_normalised_best_policy,app_gwb_offpolicy_weighting_policy,"Normalised weights give the best off-policy results",final(Normalised IS) < final(Without IS)
+fig8_unnormalised_worst_policy,app_gwb_offpolicy_weighting_policy,"Unnormalised weights are worse than no reweighting",final(Unnormalised IS) > final(Without IS)
+fig8_normalised_best_value,app_gwb_offpolicy_weighting_value,"Normalised weights give the best off-policy results (prediction)",final(Normalised IS) < final(Without IS)
+fig8_unnormalised_worst_value,app_gwb_offpolicy_weighting_value,"Unnormalised weights are worse than no reweighting (prediction)",final(Unnormalised IS) > final(Without IS)
+fig3b_ratio_mitigates,main_mastermind_222_parallel_value_approx,"Higher update ratios mitigate error spikes as the policy shifts",max(50:1) < max(1:1)
+fig10_ratio_mitigates_policy,app_mastermind_222_parallel_policy_approx,"Higher update ratios mitigate error spikes (behaviour)",max(50:1) < max(1:1)
+fig10_ratio_mitigates_outcome,app_mastermind_222_parallel_perf_approx_behaviour,"Higher update ratios mitigate error spikes (outcome)",max(50:1) < max(1:1)
+fig10_ratio_mitigates_gwb_value,app_gwb_parallel_value_approx,"Higher update ratios mitigate error spikes in Gridworld (prediction)",max(50:1) < max(1:1)
+fig3c_sampling_beats_model,main_mastermind_222_policy_sampling,"Sampling converges to a lower loss than the model-based characteristic",final(Sample) < final(Model)
+fig3c_sampling_matches_exact,main_mastermind_222_policy_sampling,"Sampling matches the performance of exact characteristic values",ratio(final(Sample) / final(Exact)) within [0.5; 2]
+fig11_sampling_beats_model_value,app_mastermind_222_value_sampling,"Sampling eliminates characteristic error propagation (prediction)",final(Sample) < final(Model)
+fig11_sampling_beats_model_333,app_mastermind_333_policy_sampling,"Sampling eliminates characteristic error propagation (Mastermind-333)",final(Sample) < final(Model)
+fig11_sampling_beats_model_gwb,app_gwb_policy_sampling,"Sampling eliminates characteristic error propagation (Gridworld)",final(Sample) < final(Model)
+fig4_error_propagation_222,app_mastermind_222_policy_shapley,"Shapley error propagates from the characteristic model",final(Approx characteristic) > final(Exact characteristic)
+fig4_error_propagation_333,app_mastermind_333_policy_shapley,"Shapley error propagates from the characteristic model (Mastermind-333)",final(Approx characteristic) > final(Exact characteristic)
+fig4_error_propagation_gwb,app_gwb_policy_shapley,"Shapley error propagates from the characteristic model (Gridworld)",final(Approx characteristic) > final(Exact characteristic)
+fig1_outcome_exact_behaviour,main_mastermind_222_perf_char,"An exact behaviour characteristic lowers outcome characteristic error",final(On-policy; exact behaviour) < final(On-policy; approx behaviour)
+fig2_scaling_behaviour,hypercube_policy,"Updates to the target loss grow with the number of states",spearman(states; updates) >= 0.8 per dimension (characteristic)
+fig5_scaling_prediction,hypercube_value,"Updates to the target loss grow with the number of states (prediction)",spearman(states; updates) >= 0.8 per dimension (characteristic)
+tables_converge,tables 1/3/4,"Models converge to a stable loss in the large domains",final losses finite and positive for every domain and model
+tables_cost_manageable,tables 1/3/4,"Updates to converge stay consistent across domain sizes",max/min updates across 443/453/463 <= 3 per model
