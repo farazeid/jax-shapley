@@ -64,3 +64,70 @@ explanation_stage() {
             ;;
     esac
 }
+
+# Run one outcome stage (Gridworld, Mastermind-222): dqn_performance_* characteristics and Shapley models.
+# Usage: outcome_stage STAGE TAU NUM_ENVS TOTAL_TIMESTEPS TRAIN_SIZE SHAPLEY_EPOCHS -- RECIPE_ARGS...
+outcome_stage() {
+    local stage=$1 tau=$2 num_envs=$3 total=$4 train_size=$5 shapley_epochs=$6
+    shift 7
+    dqn_gates "$@"
+    local exact
+    local -a seeds
+    seeds=(--seeds {1..20})
+    if [[ -n "$(dqn_option --seed "$@")" ]]; then seeds=(); fi
+    case "$stage" in
+        outcome)
+            case "$(dqn_option --variant "$@")" in
+                on_policy|off_policy) ;;
+                *) echo "outcome runs require --variant on_policy|off_policy" >&2; return 2 ;;
+            esac
+            # Both source groups: exact values conditioned on the exact (w_exact) or learnt (wo_exact)
+            # behaviour characteristic. Off-policy: epochs = total * batch // train_size, validation
+            # = 10 * num_envs, patience = epochs; on-policy: train_V_on_policy over num_envs.
+            for exact in --with-exact-char --no-with-exact-char; do
+                uv run python -m jax_shapley.train_explanations outcome \
+                    ${seeds[@]+"${seeds[@]}"} \
+                    "$exact" \
+                    --tau "$tau" \
+                    --gamma 1.0 \
+                    --hidden-widths 64 64 \
+                    --train.learning-rate 0.00025 \
+                    --train.batch-size 64 \
+                    --train.exact-loss \
+                    --train.total-timesteps "$total" \
+                    --train.num-envs "$num_envs" \
+                    --train.train-frequency 1 \
+                    --train.target-network-frequency 1 \
+                    --train.train-size "$train_size" \
+                    --train.validation-size $((10 * num_envs)) \
+                    --train.epochs $((total * 64 / train_size)) \
+                    --train.track-batch \
+                    "$@"
+            done
+            ;;
+        outcome-shapley)
+            # --characteristic names an outcome run (or sweep). The source's three groups explain the
+            # outcome characteristic trained with (w_policy) or without (wo_policy) the exact behaviour
+            # characteristic against exact outcome values, and wo_policy against the learnt one (wo_perf).
+            for exact in --with-exact-char --no-with-exact-char; do
+                uv run python -m jax_shapley.train_explanations shapley \
+                    ${seeds[@]+"${seeds[@]}"} \
+                    "$exact" \
+                    --buffers fresh \
+                    --hidden-widths 64 64 \
+                    --train.epochs "$shapley_epochs" \
+                    --train.learning-rate 0.00025 \
+                    --train.batch-size 128 \
+                    --train.buffer-size 10000 \
+                    --train.val-fraction 0.2 \
+                    --train.num-envs 16 \
+                    --train.exact-loss \
+                    "$@"
+            done
+            ;;
+        *)
+            echo "usage: STAGE must be outcome or outcome-shapley" >&2
+            return 2
+            ;;
+    esac
+}

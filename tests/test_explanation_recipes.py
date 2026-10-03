@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from jax_shapley import train_dqn
-from jax_shapley.train_explanations import CharacteristicRunConfig, ShapleyRunConfig, parse_args
+from jax_shapley.train_explanations import CharacteristicRunConfig, OutcomeRunConfig, ShapleyRunConfig, parse_args
 
 ROOT = Path(__file__).parents[1]
 AGENT = ("--agent", "runs/agent")
@@ -53,6 +53,45 @@ def test_single_agent_recipes_encode_source_settings(
         for command in _capture(tmp_path, script, ("shapley", *AGENT, "--characteristic", "runs/c"))
     ]
     assert all(isinstance(config, ShapleyRunConfig) and config.sweep == tuple(range(1, 21)) for config in swept)
+
+
+@pytest.mark.parametrize(
+    "script,tau,num_envs,total,train_size,shapley",
+    [("gridworld.sh", 0.001, 8, 100_000, 50_000, 20), ("mastermind222.sh", 0.01, 16, 200_000, 100_000, 100)],
+)
+def test_outcome_recipes_encode_source_settings(
+    tmp_path: Path, script: str, tau: float, num_envs: int, total: int, train_size: int, shapley: int
+) -> None:
+    for variant in ("on_policy", "off_policy"):
+        selected = ("outcome", "--variant", variant, *AGENT, "--characteristic", "runs/c")
+        commands = _capture(tmp_path, script, selected)
+        configs = [parse_args(command[4:]) for command in commands]
+        assert [config.with_exact_char for config in configs if isinstance(config, OutcomeRunConfig)] == [True, False]
+        for config in configs:
+            assert isinstance(config, OutcomeRunConfig)
+            assert (config.variant, config.sweep, config.hidden_widths) == (variant, tuple(range(1, 21)), (64, 64))
+            assert (config.tau, config.gamma) == (pytest.approx(tau), 1.0)
+            training = config.train
+            assert (training.batch_size, training.learning_rate) == (64, pytest.approx(2.5e-4))
+            assert (training.total_timesteps, training.num_envs, training.train_frequency) == (total, num_envs, 1)
+            assert training.target_network_frequency == 1 and training.exact_loss and training.track_batch
+            # Source: validation = 10 * ExpArgs.num_envs, epochs = total * batch // train_size = patience.
+            assert (training.train_size, training.validation_size) == (train_size, 10 * num_envs)
+            assert (training.epochs, training.patience_epochs) == (128, 128)
+    with pytest.raises(subprocess.CalledProcessError):
+        _capture(tmp_path, script, ("outcome", *AGENT, "--characteristic", "runs/c"))
+    commands = _capture(tmp_path, script, ("outcome-shapley", *AGENT, "--characteristic", "runs/o", "--seed", "3"))
+    configs = [parse_args(command[4:]) for command in commands]
+    assert [config.with_exact_char for config in configs if isinstance(config, ShapleyRunConfig)] == [True, False]
+    for config in configs:
+        assert isinstance(config, ShapleyRunConfig)
+        assert (config.sweep, config.buffers, config.train.epochs, config.train.patience) == (
+            (3,),
+            "fresh",
+            shapley,
+            None,
+        )
+        assert (config.train.train_size, config.train.validation_size, config.train.num_envs) == (8000, 2000, 16)
 
 
 def test_characteristic_recipes_require_a_kind(tmp_path: Path) -> None:
@@ -111,7 +150,8 @@ def _capture(tmp_path: Path, script: str, extra: tuple[str, ...]) -> list[list[s
     if bash is None:
         raise RuntimeError("bash is required for recipe validation")
     # Stage names lead; the inspection flag follows so recipes never start gates or jobs.
-    stage = extra[:1] if extra[:1] in (("characteristic",), ("shapley",)) else ()
+    stages = (("characteristic",), ("shapley",), ("outcome",), ("outcome-shapley",))
+    stage = extra[:1] if extra[:1] in stages else ()
     subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- trusted local script argv.
         [bash, str(ROOT / "experiments/explanations" / script), *stage, "--validate-only", *extra[len(stage) :]],
         env=environment,
