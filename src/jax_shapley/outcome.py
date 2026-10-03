@@ -26,7 +26,7 @@ from jax import Array
 from jaxtyping import Bool, Float, Int
 
 from jax_shapley.characteristics import LossMetrics, Policy, Values, policy_probabilities
-from jax_shapley.coalitions import Coalitions, CoalitionTable, Observations
+from jax_shapley.coalitions import Coalitions, CoalitionTable, Observations, mask
 from jax_shapley.networks import MLP, LayerConfig, MLPConfig, QNetwork
 from jax_shapley.shapley import CharacteristicFunction, MaskedCharacteristic
 from jax_shapley.tabular import ActionTable, TabularModel, policy_q_values, state_indices
@@ -292,6 +292,27 @@ def exact_outcome(
 
     values = jax.lax.map(per_coalition, conditioned)
     return ExactOutcome(states, state_valid & modelled, values)
+
+
+def exact_behaviour_table(
+    observations: Batch, targets: Values, states: UniqueStates, coalitions: CoalitionTable
+) -> tuple[ConditionedTable, UniqueFlags]:
+    """The exact behaviour characteristic at given states, and whether each state occurs in the buffer.
+
+    For coalition C and state s this is the mean explained policy over buffer rows
+    that agree with s on C: the source's conditional expectation under the buffer's
+    empirical state distribution (characteristics.exact_characteristic), evaluated
+    directly at the transition model's states instead of every padded unique row.
+    """
+    present = jnp.any(jnp.all(states[:, None, :] == observations[None, :, :], axis=-1), axis=-1)
+
+    def per_coalition(coalition: Array) -> Values:
+        known = mask(states, coalition)[:, None, :] == mask(observations, coalition)[None, :, :]
+        matches = jnp.all(known, axis=-1).astype(jnp.float32)
+        return (matches @ targets) / jnp.maximum(jnp.sum(matches, axis=-1, keepdims=True), 1.0)
+
+    table: ConditionedTable = jax.lax.map(per_coalition, coalitions)
+    return table, present
 
 
 def learnt_behaviour_table(

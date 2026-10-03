@@ -27,6 +27,7 @@ from jax_shapley.outcome import (
     OutcomeNetworks,
     Transitions,
     Variant,
+    exact_behaviour_table,
     exact_outcome,
     exact_outcome_loss,
     learnt_behaviour_table,
@@ -50,7 +51,7 @@ from jax_shapley.shapley import (
     shapley_network,
     update_shapley,
 )
-from jax_shapley.tabular import transition_model
+from jax_shapley.tabular import state_indices, transition_model
 from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config, make_adam
 from tests.explanation_support import (
     ATOL,
@@ -133,12 +134,11 @@ def test_values_and_null_match_source(case: str, prefix: str) -> None:
 @pytest.mark.parametrize("case", tuple(CONFIGS))
 def test_exact_values_and_losses_match_source(case: str) -> None:
     fixture, shape = _fixture(), layout(case)
-    exact = _exact(fixture, shape)
+    exact, columns = _exact(shape)
     for label in LABELS:
         np.testing.assert_allclose(
-            exact[label].values, fixture[f"{case}_exact_{label}"], rtol=EXACT_RTOL, atol=EXACT_ATOL
+            exact[label].values[:, columns], fixture[f"{case}_exact_{label}"], rtol=EXACT_RTOL, atol=EXACT_ATOL
         )
-        assert bool(exact[label].state_valid.all())
         for prefix, variant in VARIANTS.items():
             characteristic = _characteristic(fixture, shape, variant, f"{case}_{prefix}_final")
             loss = exact_outcome_loss(characteristic, exact[label], all_coalitions(shape.features))
@@ -172,10 +172,10 @@ def test_outcome_shapley_matches_source(case: str) -> None:
     np.testing.assert_allclose(
         explain(model, characteristic, states), fixture[f"{case}_shapley_sv_unique"], rtol=RTOL, atol=ATOL
     )
-    exact = _exact(fixture, shape)
+    exact, columns = _exact(shape)
     coalitions = all_coalitions(shape.features)
     tables = {
-        "with_exact_char": exact["with_exact_char"].values[..., None],
+        "with_exact_char": exact["with_exact_char"].values[:, columns, None],
         "without_exact_char": characteristic_table(characteristic, states, coalitions),
     }
     valid = jnp.ones(states.shape[0], jnp.bool_)
@@ -214,25 +214,35 @@ def _assert_gradients[Model: nnx.Module](
     assert_gradients(result[1], fixture, prefix)
 
 
-def _exact(fixture: FixtureArrays, shape: CaseLayout) -> dict[str, ExactOutcome]:
-    """Exact outcome values with the exact and with the learnt behaviour characteristic."""
+def _exact(shape: CaseLayout) -> tuple[dict[str, ExactOutcome], Array]:
+    """Production exact outcome values (at every modelled state), and the columns of upstream's unique states.
+
+    The exact behaviour characteristic evaluated at modelled states must agree with
+    exact_characteristic at the buffer's unique states.
+    """
     explanations = load_fixture()
     policy = _policy(shape)
     tabular = transition_model(CONFIGS[shape.name])
     observations = jnp.asarray(explanations[f"{shape.name}_exact_buffer"])
     unique = jnp.asarray(explanations[f"{shape.name}_unique"])
     coalitions = all_coalitions(shape.features)
-    behaviour = exact_characteristic(
-        observations, policy.agent(observations), coalitions, max_unique=int(unique.shape[0])
-    )
+    targets = policy.agent(observations)
+    behaviour = exact_characteristic(observations, targets, coalitions, max_unique=int(unique.shape[0]))
     np.testing.assert_array_equal(behaviour.states, unique)
+    exact_table, present = exact_behaviour_table(observations, targets, tabular.states, coalitions)
+    columns, modelled = state_indices(tabular, unique)
+    assert bool(modelled.all()) and int(present.sum()) == unique.shape[0] and bool(present[columns].all())
+    np.testing.assert_allclose(exact_table[:, columns], behaviour.at_states, rtol=1e-6, atol=1e-7)
     agent = policy.agent(tabular.states)
-    valid = jnp.ones(unique.shape[0], jnp.bool_)
     conditioned = {
-        "with_exact_char": behaviour.at_states,
-        "without_exact_char": learnt_behaviour_table(policy.behaviour, unique, coalitions),
+        "with_exact_char": exact_table,
+        "without_exact_char": learnt_behaviour_table(policy.behaviour, tabular.states, coalitions),
     }
-    return {label: exact_outcome(tabular, unique, valid, table, agent, 1.0) for label, table in conditioned.items()}
+    exact = {
+        label: exact_outcome(tabular, tabular.states, present, table, agent, 1.0)
+        for label, table in conditioned.items()
+    }
+    return exact, columns
 
 
 def _characteristic(fixture: FixtureArrays, shape: CaseLayout, variant: Variant, prefix: str) -> OutcomeCharacteristic:

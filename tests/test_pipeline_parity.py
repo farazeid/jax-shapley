@@ -80,7 +80,7 @@ def test_characteristic_loop_matches_upstream_train_models(case: str) -> None:
     buffers = _buffers(fixture)
     context = characteristic_context(buffers, _agent(fixture), explained, training, 8, 32)
 
-    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel]:
+    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel, Draw]:
         del frozen
         return _recorded(characteristic_learner(context, training, 8), fixture, prefix)
 
@@ -103,7 +103,7 @@ def test_shapley_loop_matches_upstream_train_models() -> None:
     function = MaskedCharacteristic(characteristic)
     context = shapley_context(buffers, _agent(fixture), function, explained, config, 8, 32)
 
-    def learner(context: ShapleyContext, frozen: CharacteristicModel) -> Learner[ShapleyModel]:
+    def learner(context: ShapleyContext, frozen: CharacteristicModel) -> Learner[ShapleyModel, Draw]:
         learner = shapley_learner(context, MaskedCharacteristic(frozen), config, 8)
         return _recorded(learner, fixture, "loop_shapley", single=True)
 
@@ -148,7 +148,7 @@ def _replay[Model: nnx.Module, Context, Frozen](
     training: ExplanationTrainConfig,
     context: Context,
     frozen: Frozen,
-    learner: Callable[[Context, Frozen], Learner[Model]],
+    learner: Callable[[Context, Frozen], Learner[Model, Draw]],
 ) -> tuple[RecordingSink, ExplanationState[Model]]:
     """The production loop as a one-seed sweep, with recorded draws injected by `learner`."""
     sink = RecordingSink()
@@ -161,8 +161,8 @@ def _replay[Model: nnx.Module, Context, Frozen](
 
 
 def _recorded[Model: nnx.Module](
-    learner: Learner[Model], fixture: dict[str, np.ndarray], prefix: str, *, single: bool = False
-) -> Learner[Model]:
+    learner: Learner[Model, Draw], fixture: dict[str, np.ndarray], prefix: str, *, single: bool = False
+) -> Learner[Model, Draw]:
     """Replace random draws by upstream's recorded rows and coalitions, indexed by epoch and batch."""
     rows = jnp.asarray(fixture[f"{prefix}_train_rows"])
     coalitions = jnp.asarray(fixture[f"{prefix}_train_coalitions"])

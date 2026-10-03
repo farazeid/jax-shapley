@@ -33,6 +33,7 @@ from jax_shapley.characteristics import (
     characteristic_network,
     max_unique_states,
 )
+from jax_shapley.outcome import OutcomeNetworks, Variant, outcome_network
 from jax_shapley.run_io import (
     REFERENCE_COMMIT,
     CallbackToken,
@@ -50,9 +51,9 @@ from jax_shapley.run_io import (
     prefix_digest,
     verify_prefix,
 )
-from jax_shapley.shapley import ShapleyModel
 from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config
 from jax_shapley.train_explanations import (
+    AnyState,
     Buffers,
     BufferSource,
     CharacteristicRunConfig,
@@ -60,12 +61,16 @@ from jax_shapley.train_explanations import (
     ExplanationState,
     ExplanationTrainConfig,
     FrozenAgent,
+    OutcomeInputs,
+    OutcomeRunConfig,
+    OutcomeTrainConfig,
     RunConfig,
     ShapleyRunConfig,
+    replay_prefix,
 )
 from jax_shapley.wrappers import EnvironmentProtocol
 
-type Stage = Literal["characteristic", "shapley"]
+type Stage = Literal["characteristic", "shapley", "outcome"]
 
 METRIC_COLUMNS = ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "best_epoch", "seconds")
 
@@ -87,7 +92,7 @@ class RunContext:
     agent_sha256: str
     characteristic: CharacteristicModel | None
     characteristic_sha256: str | None
-    inherited: Buffers | None
+    inherited: Buffers | OutcomeInputs | None
     explained: CharacteristicConfig
     features: int
     actions: int
@@ -102,6 +107,17 @@ class LoadedCharacteristic:
     agent_sha256: str
     model: CharacteristicModel
     buffers: Buffers
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedOutcome:
+    """A completed outcome run's best networks; `characteristic_sha256` identifies its behaviour characteristic."""
+
+    config: OutcomeRunConfig
+    agent_sha256: str
+    characteristic_sha256: str
+    networks: OutcomeNetworks
     sha256: str
 
 
@@ -326,7 +342,8 @@ class ExplanationWriter:
 def prepare_context(config: RunConfig) -> RunContext:
     """Load and identify the explained models; derive static shapes and the saved settings."""
     agent_settings = load_settings(config.agent / "config.json")
-    loaded = load_agent(config.agent, agent_settings.network, load_replay=False)
+    outcome = isinstance(config, OutcomeRunConfig)
+    loaded = load_agent(config.agent, agent_settings.network, load_replay=outcome)
     if loaded.vector_step != agent_settings.train.vector_steps:
         raise ValueError("explanations require a completed DQN training run")
     agent = FrozenAgent(loaded.model, jnp.asarray(loaded.epsilon, jnp.float32))
@@ -335,10 +352,27 @@ def prepare_context(config: RunConfig) -> RunContext:
     features = agent_settings.network.input_features
     characteristic: CharacteristicModel | None = None
     characteristic_sha256: str | None = None
-    inherited: Buffers | None = None
+    inherited: Buffers | OutcomeInputs | None = None
     if isinstance(config, CharacteristicRunConfig):
         explained = config.characteristic
         exact_rows = config.train.exact_size
+    elif isinstance(config, OutcomeRunConfig):
+        source = load_characteristic(config.characteristic)
+        if source.agent_sha256 != agent_sha256:
+            raise ValueError("the behaviour characteristic explains a different agent")
+        if source.config.kind != "behaviour":
+            raise ValueError("outcome characteristics condition on a behaviour characteristic")
+        replay = loaded.replay
+        rows = max(config.train.train_size, config.train.validation_size)
+        if replay is None or int(replay.size) < rows:
+            raise ValueError(f"outcome runs need at least {rows} transitions in the agent's replay")
+        explained, characteristic, characteristic_sha256 = source.config.characteristic, source.model, source.sha256
+        inherited = OutcomeInputs(
+            source.buffers,
+            replay_prefix(replay.data, config.train.train_size),
+            replay_prefix(replay.data, config.train.validation_size),
+        )
+        exact_rows = source.config.train.exact_size
     else:
         source = load_characteristic(config.characteristic)
         if source.agent_sha256 != agent_sha256:
@@ -395,6 +429,27 @@ def load_characteristic(folder: Path) -> LoadedCharacteristic:
     finally:
         store.close()
     return LoadedCharacteristic(config, settings.agent_sha256, model, buffers, array_sha256(values))
+
+
+def load_outcome(folder: Path) -> LoadedOutcome:
+    """A completed outcome run's networks (the best-validation model and its target)."""
+    settings = load_run_settings(folder / "config.json")
+    config = settings.config
+    if not isinstance(config, OutcomeRunConfig) or settings.characteristic_sha256 is None:
+        raise ValueError("expected an outcome run")
+    agent = load_settings(config.agent / "config.json")
+    features, actions = agent.network.input_features, agent.env.make().num_actions
+    networks = OutcomeNetworks(outcome_network(features, actions, config.outcome), rngs=nnx.Rngs(0))
+    store = ExplanationStore(folder, read_only=True)
+    try:
+        if store.metadata().phase != ExplanationPhase.COMPLETE:
+            raise ValueError("the outcome run has not completed")
+        state = nnx.state(networks)
+        values = store.arrays("model", _leaves(state))
+        nnx.update(networks, jax.tree.unflatten(jax.tree.structure(state), values))
+    finally:
+        store.close()
+    return LoadedOutcome(config, settings.agent_sha256, settings.characteristic_sha256, networks, array_sha256(values))
 
 
 def restore_state[Model: nnx.Module](
@@ -496,6 +551,8 @@ def _initialize_folder(folder: Path, settings: str) -> None:
 def _label(config: RunConfig, context: RunContext) -> str:
     if isinstance(config, CharacteristicRunConfig):
         return f"characteristic-{config.kind}"
+    if isinstance(config, OutcomeRunConfig):
+        return f"outcome-{config.variant.replace('_', '-')}"
     return f"shapley-{context.explained.kind}"
 
 
@@ -521,12 +578,12 @@ def write_epochs(path: Path, metrics: tuple[HostArray, ...], seconds: float) -> 
 def summarize(
     folder: Path,
     config: RunConfig,
-    result: ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel],
+    result: AnyState,
     seconds: float,
 ) -> ExplanationSummary:
     return ExplanationSummary(
         str(folder),
-        "characteristic" if isinstance(config, CharacteristicRunConfig) else "shapley",
+        _stage(config),
         int(result.epoch),
         int(result.best_epoch),
         float(result.best_loss),
@@ -576,6 +633,8 @@ def parse_run_settings(text: str) -> RunSettings:
         config = _characteristic_config(value)
     elif stage == "shapley":
         config = _shapley_config(value)
+    elif stage == "outcome":
+        config = _outcome_config(value)
     else:
         raise ValueError("unsupported explanation stage")
     characteristic = envelope["characteristic_sha256"]
@@ -638,10 +697,44 @@ def _shapley_config(value: dict[str, object]) -> ShapleyRunConfig:
     )
 
 
+def _outcome_config(value: dict[str, object]) -> OutcomeRunConfig:
+    _schema(value, fields(OutcomeRunConfig))
+    return OutcomeRunConfig(
+        Path(_string(value, "agent")),
+        Path(_string(value, "characteristic")),
+        _variant(_string(value, "variant")),
+        _boolean(value, "with_exact_char"),
+        _number(value, "tau"),
+        _number(value, "gamma"),
+        _widths(value),
+        _outcome_train_config(_mapping(value["train"])),
+        _integer(value, "seed"),
+        _seeds(value),
+        _integer(value, "chunk_epochs"),
+        Path(_string(value, "output")),
+        _boolean(value, "validate_only"),
+        _boolean(value, "compile_only"),
+    )
+
+
+def _outcome_train_config(value: dict[str, object]) -> OutcomeTrainConfig:
+    _schema(value, fields(OutcomeTrainConfig))
+    return OutcomeTrainConfig(
+        epochs=_integer(value, "epochs"),
+        patience=None if value["patience"] is None else _integer(value, "patience"),
+        learning_rate=_number(value, "learning_rate"),
+        batch_size=_integer(value, "batch_size"),
+        train_size=_integer(value, "train_size"),
+        validation_size=_integer(value, "validation_size"),
+        exact_loss=_boolean(value, "exact_loss"),
+        exact_condition=None if value["exact_condition"] is None else _number(value, "exact_condition"),
+        track_batch=_boolean(value, "track_batch"),
+        adam=_adam(_mapping(value["adam"])),
+    )
+
+
 def _train_config(value: dict[str, object]) -> ExplanationTrainConfig:
     _schema(value, fields(ExplanationTrainConfig))
-    adam = _mapping(value["adam"])
-    _schema(adam, fields(AdamConfig))
     return ExplanationTrainConfig(
         epochs=_integer(value, "epochs"),
         patience=None if value["patience"] is None else _integer(value, "patience"),
@@ -654,8 +747,13 @@ def _train_config(value: dict[str, object]) -> ExplanationTrainConfig:
         exact_buffer_size=None if value["exact_buffer_size"] is None else _integer(value, "exact_buffer_size"),
         exact_condition=None if value["exact_condition"] is None else _number(value, "exact_condition"),
         track_batch=_boolean(value, "track_batch"),
-        adam=AdamConfig(_number(adam, "beta1"), _number(adam, "beta2"), _number(adam, "epsilon")),
+        adam=_adam(_mapping(value["adam"])),
     )
+
+
+def _adam(value: dict[str, object]) -> AdamConfig:
+    _schema(value, fields(AdamConfig))
+    return AdamConfig(_number(value, "beta1"), _number(value, "beta2"), _number(value, "epsilon"))
 
 
 def _schema(value: dict[str, object], expected: tuple[Field[object], ...]) -> None:
@@ -677,6 +775,14 @@ def _policy(value: str) -> Policy:
     if value == "explore":
         return "explore"
     raise ValueError("invalid saved explained policy")
+
+
+def _variant(value: str) -> Variant:
+    if value == "off_policy":
+        return "off_policy"
+    if value == "on_policy":
+        return "on_policy"
+    raise ValueError("invalid saved outcome variant")
 
 
 def _environment(config: EnvironmentConfig) -> tuple[str, int, HostArray, HostArray]:
@@ -708,7 +814,9 @@ def _widths(value: dict[str, object]) -> tuple[int, ...]:
 
 
 def _stage(config: RunConfig) -> Stage:
-    return "characteristic" if isinstance(config, CharacteristicRunConfig) else "shapley"
+    if isinstance(config, CharacteristicRunConfig):
+        return "characteristic"
+    return "outcome" if isinstance(config, OutcomeRunConfig) else "shapley"
 
 
 def _leaves(tree: object) -> tuple[Array, ...]:

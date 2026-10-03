@@ -1,9 +1,12 @@
-"""FastSVERL behaviour/prediction explanations: configuration, compiled training and CLI.
+"""FastSVERL explanations: configuration, compiled training and CLI.
 
-A characteristic run explains a trained DQN agent; a Shapley run explains that
-characteristic. Each run collects its observation buffers with the agent, trains
-for whole epochs with early stopping, and checkpoints complete state for exact
-resume. Shell recipes provide experiment values; explanation_io.py owns host I/O.
+A characteristic run explains a trained DQN agent (behaviour or prediction); an
+outcome run explains the agent's return when it follows a trained behaviour
+characteristic; a Shapley run explains a characteristic. Characteristic and
+Shapley runs collect observation buffers with the agent; off-policy outcome runs
+learn from prefixes of the agent's replay. All train for whole epochs with early
+stopping and checkpoint complete state for exact resume. Shell recipes provide
+experiment values; explanation_io.py owns host I/O.
 """
 
 from __future__ import annotations
@@ -39,6 +42,25 @@ from jax_shapley.characteristics import (
 from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_coalitions
 from jax_shapley.envs import Gridworld, Mastermind222
 from jax_shapley.networks import QNetwork
+from jax_shapley.outcome import (
+    AgentPolicy,
+    ConditionedPolicy,
+    ExactOutcome,
+    OutcomeCharacteristic,
+    OutcomeConfig,
+    OutcomeNetworks,
+    Transitions,
+    Variant,
+    exact_behaviour_table,
+    exact_outcome,
+    exact_outcome_loss,
+    learnt_behaviour_table,
+    off_policy_loss,
+    outcome_network,
+    sample_next_actions,
+    update_off_policy,
+)
+from jax_shapley.replay import TransitionBatch
 from jax_shapley.shapley import (
     CharacteristicFunction,
     MaskedCharacteristic,
@@ -51,6 +73,7 @@ from jax_shapley.shapley import (
     shapley_network,
     update_shapley,
 )
+from jax_shapley.tabular import TabularModel, transition_model
 from jax_shapley.train_dqn import (
     AdamConfig,
     GridworldConfig,
@@ -221,7 +244,106 @@ class ShapleyRunConfig:
         )
 
 
-type RunConfig = CharacteristicRunConfig | ShapleyRunConfig
+@dataclass(frozen=True, slots=True)
+class OutcomeTrainConfig:
+    """Source outcome settings: train_models over prefixes of the agent's replay (off-policy).
+
+    The source's train and validation buffers are the first `train_size` and
+    `validation_size` replay transitions, so they overlap.
+    """
+
+    epochs: int = 128
+    patience: int | None = None
+    learning_rate: float = 2.5e-4
+    batch_size: int = 64
+    train_size: int = 50_000
+    validation_size: int = 80
+    exact_loss: bool = True
+    exact_condition: float | None = None
+    track_batch: bool = True
+    adam: AdamConfig = field(default_factory=AdamConfig)
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("epochs", self.epochs),
+            ("batch_size", self.batch_size),
+            ("train_size", self.train_size),
+            ("validation_size", self.validation_size),
+        ):
+            _positive(name, value)
+        if self.patience is not None:
+            _positive("patience", self.patience)
+        if not isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("learning_rate must be positive")
+        if self.batches < 1:
+            raise ValueError("the train buffer must hold at least one batch")
+        if self.exact_condition is not None and (not self.exact_loss or not self.exact_condition > 0):
+            raise ValueError("exact_condition must be positive and requires exact_loss")
+
+    @property
+    def batches(self) -> int:
+        return self.train_size // self.batch_size
+
+    @property
+    def patience_epochs(self) -> int:
+        return self.epochs if self.patience is None else self.patience
+
+    @property
+    def checkpoint_epochs(self) -> int:
+        return max(1, self.epochs // 10)
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeRunConfig:
+    """Explains the agent behind a completed behaviour characteristic run.
+
+    `with_exact_char` selects the conditioned policy inside the exact ground truth:
+    the exact or the learnt behaviour characteristic. Training always uses the
+    learnt one.
+    """
+
+    agent: Path
+    characteristic: Path
+    variant: Variant = "off_policy"
+    with_exact_char: bool = True
+    tau: float = 0.001
+    gamma: float = 1.0
+    hidden_widths: tuple[int, ...] = (64, 64)
+    train: OutcomeTrainConfig = field(default_factory=OutcomeTrainConfig)
+    seed: int = 1
+    seeds: tuple[int, ...] = ()
+    chunk_epochs: int = 1
+    output: Path = Path("runs")
+    validate_only: bool = False
+    compile_only: bool = False
+
+    def __post_init__(self) -> None:
+        _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
+        OutcomeConfig(self.variant, self.tau, self.gamma, self.hidden_widths)
+        if self.variant != "off_policy":
+            raise ValueError("only the off-policy outcome characteristic is available")
+
+    @property
+    def outcome(self) -> OutcomeConfig:
+        return OutcomeConfig(self.variant, self.tau, self.gamma, self.hidden_widths)
+
+    @property
+    def sweep(self) -> tuple[int, ...]:
+        """Seeds trained together; `characteristic` may name a characteristic sweep, pairing seed s with its seed s."""
+        return self.seeds or (self.seed,)
+
+    def for_seed(self, seed: int, agent: Path | None = None, characteristic: Path | None = None) -> OutcomeRunConfig:
+        return replace(
+            self, seed=seed, seeds=(), agent=agent or self.agent, characteristic=characteristic or self.characteristic
+        )
+
+
+type RunConfig = CharacteristicRunConfig | ShapleyRunConfig | OutcomeRunConfig
+type TrainConfig = ExplanationTrainConfig | OutcomeTrainConfig
+type ExplainedModel = CharacteristicModel | ShapleyModel | OutcomeNetworks
+type AnyState = (
+    ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel] | ExplanationState[OutcomeNetworks]
+)
 
 
 @struct.dataclass
@@ -285,6 +407,32 @@ class ShapleyContext:
     exact_values: Array | None
 
 
+@struct.dataclass
+class OutcomeInputs:
+    """Per-seed inputs of an outcome run: the behaviour characteristic's buffers and the agent's replay prefixes."""
+
+    buffers: Buffers
+    train: Transitions
+    validation: Transitions
+
+
+@struct.dataclass
+class OutcomeFrozen:
+    """The frozen models an outcome learner conditions on: the agent and its behaviour characteristic."""
+
+    agent: FrozenAgent
+    behaviour: CharacteristicModel
+
+
+@struct.dataclass
+class OutcomeContext:
+    """Per-seed constants an outcome learner reads: replay prefixes and the exact ground truth."""
+
+    train: Transitions
+    validation: Transitions
+    exact: ExactOutcome | None
+
+
 class Draw(NamedTuple):
     """One batch's sampled buffer rows and coalition(s)."""
 
@@ -292,7 +440,40 @@ class Draw(NamedTuple):
     coalitions: Array
 
 
-class Learner[Model](NamedTuple):
+class OutcomeDraw(NamedTuple):
+    """One off-policy outcome batch: transition rows, independently drawn explained rows, coalitions per row,
+    and the key the conditioned policy samples next actions with."""
+
+    rows: Array
+    explained: Array
+    coalitions: Array
+    key: Array
+
+
+class Schedule(Protocol):
+    """Epoch-loop settings shared by every train_models-style run."""
+
+    @property
+    def epochs(self) -> int: ...
+    @property
+    def learning_rate(self) -> float: ...
+    @property
+    def exact_loss(self) -> bool: ...
+    @property
+    def exact_condition(self) -> float | None: ...
+    @property
+    def track_batch(self) -> bool: ...
+    @property
+    def adam(self) -> AdamConfig: ...
+    @property
+    def batches(self) -> int: ...
+    @property
+    def patience_epochs(self) -> int: ...
+    @property
+    def checkpoint_epochs(self) -> int: ...
+
+
+class Learner[Model, Sample](NamedTuple):
     """Model-specific steps closed over precomputed targets and frozen models.
 
     Sampling is separate from learning: `train_draw(key, epoch, batch)` and
@@ -300,20 +481,21 @@ class Learner[Model](NamedTuple):
     parity tests replay recorded upstream draws through them instead.
     """
 
-    train_batch: Callable[[Model, nnx.Optimizer[Model], Buffers, Draw], Array]
-    validation_loss: Callable[[Model, Buffers, Draw], Array]
+    train_batch: Callable[[Model, nnx.Optimizer[Model], Buffers, Sample], Array]
+    validation_loss: Callable[[Model, Buffers, Sample], Array]
     exact_loss: Callable[[Model], Array]
-    train_draw: Callable[[Array, Array, Array], Draw]
-    validation_draw: Callable[[Array, Array], Draw]
+    train_draw: Callable[[Array, Array, Array], Sample]
+    validation_draw: Callable[[Array, Array], Sample]
 
 
 class Runner(Protocol):
-    def __call__(self, *args: object) -> ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel]: ...
+    def __call__(self, *args: object) -> AnyState: ...
 
 
 type CLIConfig = (
     Annotated[CharacteristicRunConfig, tyro.conf.subcommand(name="characteristic")]
     | Annotated[ShapleyRunConfig, tyro.conf.subcommand(name="shapley")]
+    | Annotated[OutcomeRunConfig, tyro.conf.subcommand(name="outcome")]
     | Annotated[ResumeConfig, tyro.conf.subcommand(name="resume")]
 )
 
@@ -409,14 +591,14 @@ def main(args: list[str] | None = None) -> ExplanationSummary | list[Explanation
 def restore_sweep(
     folders: list[Path], configs: list[RunConfig], contexts: list[RunContext]
 ) -> tuple[
-    ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel],
+    AnyState,
     list[ExplanationMetadata | None],
     list[int | None],
 ]:
     """Restore each seed folder's checkpoint, check its explained models, and stack the states."""
     from jax_shapley.explanation_io import ExplanationStore, load_run_settings, restore_state
 
-    states: list[ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel]] = []
+    states: list[AnyState] = []
     metadata: list[ExplanationMetadata | None] = []
     sequences: list[int | None] = []
     for folder, seed_config, context in zip(folders, configs, contexts, strict=True):
@@ -449,7 +631,7 @@ def seed_configs(config: RunConfig) -> list[RunConfig]:
         runs = [folder for folder in sorted(config.agent.iterdir()) if (folder / "config.json").exists()]
         agents = {load_settings(folder / "config.json").seed: folder for folder in runs}
     characteristics: dict[int, Path] | None = None
-    if isinstance(config, ShapleyRunConfig):
+    if not isinstance(config, CharacteristicRunConfig):
         paired = sweep_folders(config.characteristic)
         if paired != [config.characteristic]:
             characteristics = {int(folder.name.removeprefix("seed-")): folder for folder in paired}
@@ -515,7 +697,7 @@ def run_characteristic[State, Params](
 
     contexts = nnx.vmap(context, in_axes=(0, 0), out_axes=0)(state.buffers, agents)
 
-    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel]:
+    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel, Draw]:
         del frozen
         return characteristic_learner(context, training, features)
 
@@ -561,10 +743,170 @@ def run_shapley[State, Params](
 
     contexts = nnx.vmap(context, in_axes=(0, 0, 0), out_axes=0)(state.buffers, agents, characteristics)
 
-    def learner(context: ShapleyContext, characteristic: CharacteristicModel) -> Learner[ShapleyModel]:
+    def learner(context: ShapleyContext, characteristic: CharacteristicModel) -> Learner[ShapleyModel, Draw]:
         return shapley_learner(context, MaskedCharacteristic(characteristic), config, features)
 
     return train(state, contexts, characteristics, learner, training, config.chunk_epochs, sink)
+
+
+def run_outcome[State, Params](
+    keys: Array,
+    agents: FrozenAgent,
+    characteristics: CharacteristicModel | None,
+    inherited: OutcomeInputs | None,
+    state: ExplanationState[OutcomeNetworks] | None = None,
+    *,
+    environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
+    config: OutcomeRunConfig,
+    explained: CharacteristicConfig,
+    tabular: TabularModel | None,
+    sink: ExplanationSink,
+) -> ExplanationState[OutcomeNetworks]:
+    """Learn each seed's off-policy outcome characteristic from its agent's replay prefixes.
+
+    The buffers checkpointed with the state are the replay prefixes' observations
+    and the behaviour characteristic's exact buffer, whose unique states the exact
+    values explain.
+    """
+    if characteristics is None or inherited is None:
+        raise ValueError("outcome runs need the behaviour characteristics, their buffers and the agents' replay")
+    env = EpisodeStatisticsWrapper(environment_factory())
+    training = config.train
+    features, actions = _dimensions(env)
+    network = outcome_network(features, actions, config.outcome)
+    if state is None:
+
+        def initialize(key: Array, inputs: OutcomeInputs) -> ExplanationState[OutcomeNetworks]:
+            model_key, key = jax.random.split(key)
+            buffers = Buffers(inputs.train.observations, inputs.validation.observations, inputs.buffers.exact)
+            return initialize_state(OutcomeNetworks(network, rngs=nnx.Rngs(model_key)), buffers, training, key)
+
+        state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
+
+    def context(inputs: OutcomeInputs, agent: FrozenAgent, behaviour: CharacteristicModel) -> OutcomeContext:
+        return outcome_context(inputs, OutcomeFrozen(agent, behaviour), explained, config, tabular)
+
+    contexts = nnx.vmap(context, in_axes=(0, 0, 0), out_axes=0)(inherited, agents, characteristics)
+    frozen = OutcomeFrozen(agents, characteristics)
+
+    def learner(context: OutcomeContext, frozen: OutcomeFrozen) -> Learner[OutcomeNetworks, OutcomeDraw]:
+        return outcome_learner(context, frozen, explained, config, features)
+
+    return train(state, contexts, frozen, learner, training, config.chunk_epochs, sink)
+
+
+def outcome_context(
+    inputs: OutcomeInputs,
+    frozen: OutcomeFrozen,
+    explained: CharacteristicConfig,
+    config: OutcomeRunConfig,
+    tabular: TabularModel | None,
+) -> OutcomeContext:
+    """Exact outcome values at the behaviour characteristic's unique exact-buffer states.
+
+    Those states are non-terminal, so they are exactly the transition model's
+    states that occur in the exact buffer. with_exact_char conditions on the exact
+    behaviour characteristic, otherwise on the learnt one; both follow the agent's
+    explained policy elsewhere.
+    """
+    if not config.train.exact_loss:
+        return OutcomeContext(inputs.train, inputs.validation, None)
+    if tabular is None:
+        raise ValueError("exact outcome values need the environment's transition model")
+    policy = conditioned_policy(frozen, explained)
+    observations, states = inputs.buffers.exact, tabular.states
+    coalitions = all_coalitions(states.shape[-1])
+    exact_table, present = exact_behaviour_table(observations, policy.agent(observations), states, coalitions)
+    conditioned = (
+        exact_table if config.with_exact_char else learnt_behaviour_table(policy.behaviour, states, coalitions)
+    )
+    exact = exact_outcome(tabular, states, present, conditioned, policy.agent(states), config.gamma)
+    return OutcomeContext(inputs.train, inputs.validation, exact)
+
+
+def outcome_learner(
+    context: OutcomeContext,
+    frozen: OutcomeFrozen,
+    explained: CharacteristicConfig,
+    config: OutcomeRunConfig,
+    features: int,
+) -> Learner[OutcomeNetworks, OutcomeDraw]:
+    """Source get_data for PerformanceCharacteristicOffPolicy: transitions plus an independent e_obs sample."""
+    training = config.train
+    outcome = config.outcome
+    policy = conditioned_policy(frozen, explained)
+
+    def draw(key: Array, size: int, buffer: int) -> OutcomeDraw:
+        keys: Array = jax.random.split(key, 4)
+        rows = jax.random.randint(keys[0], (size,), 0, buffer)
+        explained_rows = jax.random.randint(keys[1], (size,), 0, buffer)
+        return OutcomeDraw(rows, explained_rows, uniform_coalitions(keys[2], size, features), keys[3])
+
+    def train_draw(key: Array, epoch: Array, batch: Array) -> OutcomeDraw:
+        del epoch, batch
+        return draw(key, training.batch_size, training.train_size)
+
+    def validation_draw(key: Array, epoch: Array) -> OutcomeDraw:
+        del epoch
+        # Source validation resamples the whole validation size with replacement.
+        return draw(key, training.validation_size, training.validation_size)
+
+    def inputs(transitions: Transitions, sample: OutcomeDraw) -> tuple[Transitions, Array, Array]:
+        rows = sample.rows
+        batch = Transitions(
+            transitions.observations[rows],
+            transitions.actions[rows],
+            transitions.rewards[rows],
+            transitions.next_observations[rows],
+            transitions.terminated[rows],
+        )
+        explained_rows = transitions.observations[sample.explained]
+        next_actions = sample_next_actions(
+            policy, sample.key, batch.next_observations, explained_rows, sample.coalitions
+        )
+        return batch, explained_rows, next_actions
+
+    def train_batch(
+        networks: OutcomeNetworks, optimizer: nnx.Optimizer[OutcomeNetworks], buffers: Buffers, sample: OutcomeDraw
+    ) -> Array:
+        del buffers
+        batch, explained_rows, next_actions = inputs(context.train, sample)
+        return update_off_policy(
+            networks, optimizer, batch, explained_rows, sample.coalitions, next_actions, outcome
+        ).loss
+
+    def validation_loss(networks: OutcomeNetworks, buffers: Buffers, sample: OutcomeDraw) -> Array:
+        del buffers
+        batch, explained_rows, next_actions = inputs(context.validation, sample)
+        return off_policy_loss(
+            networks.model, networks.target, batch, explained_rows, sample.coalitions, next_actions, outcome.gamma
+        )[0]
+
+    def exact_loss(networks: OutcomeNetworks) -> Array:
+        assert context.exact is not None
+        characteristic = OutcomeCharacteristic(networks, policy, outcome.variant)
+        return exact_outcome_loss(characteristic, context.exact, all_coalitions(features))
+
+    return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
+
+
+def conditioned_policy(frozen: OutcomeFrozen, explained: CharacteristicConfig) -> ConditionedPolicy:
+    """pi_hat from the behaviour characteristic and the agent's explained (greedy or explore) policy."""
+    agent = AgentPolicy(frozen.agent.model, explained.policy, frozen.agent.epsilon)
+    return ConditionedPolicy(MaskedCharacteristic(frozen.behaviour), agent)
+
+
+def replay_prefix(data: TransitionBatch, rows: int) -> Transitions:
+    """The first `rows` replay transitions, as the source slices `agent.buffer` for outcome buffers."""
+    if data.observations.shape[0] < rows:
+        raise ValueError(f"the agent's replay holds fewer than {rows} transitions")
+    return Transitions(
+        data.observations[:rows],
+        data.actions[:rows],
+        data.rewards[:rows],
+        data.next_observations[:rows],
+        data.terminated[:rows],
+    )
 
 
 def characteristic_context(
@@ -590,7 +932,7 @@ def characteristic_context(
 
 def characteristic_learner(
     context: CharacteristicContext, training: ExplanationTrainConfig, features: int
-) -> Learner[CharacteristicModel]:
+) -> Learner[CharacteristicModel, Draw]:
     """Uniform coalitions per row; targets and exact values come from the precomputed context."""
 
     def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
@@ -650,7 +992,7 @@ def shapley_context(
 
 def shapley_learner(
     context: ShapleyContext, characteristic: CharacteristicFunction, config: ShapleyRunConfig, features: int
-) -> Learner[ShapleyModel]:
+) -> Learner[ShapleyModel, Draw]:
     """One Shapley-kernel coalition per batch against the frozen characteristic."""
     training = config.train
 
@@ -680,12 +1022,12 @@ def shapley_learner(
     return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
 
-def train[Model: nnx.Module, Context, Frozen](
+def train[Model: nnx.Module, Context, Frozen, Sample](
     state: ExplanationState[Model],
     contexts: Context,
     frozen: Frozen,
-    make_learner: Callable[[Context, Frozen], Learner[Model]],
-    config: ExplanationTrainConfig,
+    make_learner: Callable[[Context, Frozen], Learner[Model, Sample]],
+    config: Schedule,
     chunk_epochs: int,
     sink: ExplanationSink,
 ) -> ExplanationState[Model]:
@@ -750,8 +1092,8 @@ def train[Model: nnx.Module, Context, Frozen](
     return finished
 
 
-def epoch_step[Model: nnx.Module](
-    state: ExplanationState[Model], learner: Learner[Model], config: ExplanationTrainConfig
+def epoch_step[Model: nnx.Module, Sample](
+    state: ExplanationState[Model], learner: Learner[Model, Sample], config: Schedule
 ) -> tuple[ExplanationState[Model], EpochMetrics]:
     """One source epoch: shuffled-with-replacement batches, validation, exact loss, early stopping."""
     key, batch_key, validation_key = jax.random.split(state.key, 3)
@@ -874,7 +1216,7 @@ def collect_observations[State, Params](
 
 
 def initialize_state[Model: nnx.Module](
-    model: Model, buffers: Buffers, config: ExplanationTrainConfig, key: Array
+    model: Model, buffers: Buffers, config: Schedule, key: Array
 ) -> ExplanationState[Model]:
     return ExplanationState(
         model,
@@ -890,9 +1232,7 @@ def initialize_state[Model: nnx.Module](
     )
 
 
-def template_state(
-    context: RunContext, config: RunConfig
-) -> ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel]:
+def template_state(context: RunContext, config: RunConfig) -> AnyState:
     """Host template with the run's static shapes, used only to validate and place restored arrays."""
     training = config.train
     features = context.features
@@ -905,6 +1245,9 @@ def template_state(
     if isinstance(config, CharacteristicRunConfig):
         network = characteristic_network(features, context.actions, config.characteristic)
         return initialize_state(CharacteristicModel(network, rngs=nnx.Rngs(0)), buffers, training, key)
+    if isinstance(config, OutcomeRunConfig):
+        networks = OutcomeNetworks(outcome_network(features, context.actions, config.outcome), rngs=nnx.Rngs(0))
+        return initialize_state(networks, buffers, config.train, key)
     layout = ShapleyLayout(features, context.actions if context.explained.kind == "behaviour" else 1)
     model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(0))
     return initialize_state(model, buffers, training, key)
@@ -940,6 +1283,15 @@ def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Call
         if isinstance(env, Mastermind222Config):
             return partial(run_characteristic, environment_factory=Mastermind222, **options)
         return partial(run_characteristic, environment_factory=env.make, **options)
+    if isinstance(config, OutcomeRunConfig):
+        # The transition model is a host-built constant shared by every seed.
+        tabular = transition_model(env) if config.train.exact_loss else None
+        outcome = {"config": config, "explained": context.explained, "tabular": tabular, "sink": sink}
+        if isinstance(env, GridworldConfig):
+            return partial(run_outcome, environment_factory=Gridworld, **outcome)
+        if isinstance(env, Mastermind222Config):
+            return partial(run_outcome, environment_factory=Mastermind222, **outcome)
+        return partial(run_outcome, environment_factory=env.make, **outcome)
     options = {"config": config, "explained": context.explained, "max_unique": context.max_unique, "sink": sink}
     if isinstance(env, GridworldConfig):
         return partial(run_shapley, environment_factory=Gridworld, **options)
@@ -990,7 +1342,9 @@ def _dimensions[State, Params](env: EpisodeStatisticsWrapper[State, Params]) -> 
 
 
 def _stage(config: RunConfig) -> str:
-    return "characteristic" if isinstance(config, CharacteristicRunConfig) else "Shapley model"
+    if isinstance(config, CharacteristicRunConfig):
+        return "characteristic"
+    return "outcome characteristic" if isinstance(config, OutcomeRunConfig) else "Shapley model"
 
 
 def _array_leaves(tree: object) -> tuple[Array, ...]:
