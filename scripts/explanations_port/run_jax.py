@@ -3,8 +3,11 @@
 The protocol matches run_upstream.py: Gridworld and Mastermind-222 use one agent
 (seed 1), characteristic seeds 1..N, and Shapley seeds 1..N, all explaining the
 first characteristic with and without the exact characteristic. Each Hypercube
-seed trains its own agent, characteristic and Shapley model. Settings come only
-from the shell recipes. The caller runs ./check.sh once and sets
+seed trains its own agent, characteristic and Shapley model. Outcome cases are
+matched replicates: seed s trains agent s, behaviour characteristic s, outcome
+characteristics s (both variants, with and without the exact behaviour
+characteristic) and outcome Shapley models s. Settings come only from the shell
+recipes. The caller runs ./check.sh once and sets
 JAX_SHAPLEY_GATES_PASSED=1, so individual recipes skip the gates.
 """
 
@@ -43,7 +46,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("runs/explanations-port"))
     parser.add_argument("--seeds", type=int, default=5)
-    parser.add_argument("--cases", nargs="+", default=["gridworld", "mastermind222", "hypercube"])
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        default=["gridworld", "mastermind222", "hypercube", "gridworld-outcome", "mastermind222-outcome"],
+    )
     parser.add_argument("--runs", type=Path, default=Path("docs/data/explanations-port--jax-runs.csv"))
     parser.add_argument("--timing", type=Path, default=Path("docs/data/explanations-port--jax-timing.csv"))
     args = parser.parse_args()
@@ -54,6 +61,8 @@ def main() -> None:
     for case in args.cases:
         if case == "hypercube":
             invocations.extend(hypercube(root / "hypercube", args.seeds))
+        elif case.endswith("-outcome"):
+            invocations.extend(outcome(root / case, case.removesuffix("-outcome"), args.seeds))
         else:
             invocations.extend(single_agent(root / case, case, args.seeds))
     export(invocations, Path(args.runs), Path(args.timing))
@@ -79,6 +88,47 @@ def single_agent(root: Path, case: str, seeds: int) -> list[Invocation]:
             command = [recipe, "shapley", "--agent", str(agent_run), "--characteristic", str(characteristic), *sweep]
             shapley = _invoke([*command, "--output", str(output)], output)
             invocations.append(Invocation(label, kind, "shapley", 0, shapley.seconds, shapley.runs))
+    return invocations
+
+
+def outcome(root: Path, case: str, seeds: int) -> list[Invocation]:
+    """Matched replicates, as run_upstream.outcome: per-seed agents, then one sweep per stage pairing seed s."""
+    label = f"{case}-outcome"
+    invocations: list[Invocation] = []
+    agents = root / "agents"
+    for seed in range(1, seeds + 1):
+        agent = _invoke([f"experiments/dqn/{case}.sh", "--seed", str(seed), "--output", str(agents)], agents)
+        invocations.append(Invocation(label, "", "agent", seed, agent.seconds, ()))
+    recipe = f"experiments/explanations/{case}.sh"
+    sweep = ["--seeds", *(str(seed) for seed in range(1, seeds + 1))]
+    output = root / "behaviour"
+    command = [recipe, "characteristic", "--kind", "behaviour", "--agent", str(agents), *sweep]
+    behaviour = _invoke([*command, "--output", str(output)], output)
+    invocations.append(Invocation(label, "behaviour", "characteristic", 0, behaviour.seconds, behaviour.runs))
+    behaviour_root = behaviour.runs[0].parent
+    # The source's outcome Shapley drivers explain the on-policy (Gridworld) or off-policy (Mastermind) variant.
+    explained = "on_policy" if case == "gridworld" else "off_policy"
+    for variant in ("on_policy", "off_policy"):
+        output = root / f"outcome-{variant}"
+        command = [
+            recipe,
+            "outcome",
+            "--variant",
+            variant,
+            "--agent",
+            str(agents),
+            "--characteristic",
+            str(behaviour_root),
+        ]
+        result = _invoke([*command, *sweep, "--output", str(output)], output)
+        invocations.append(Invocation(label, variant, "outcome", 0, result.seconds, result.runs))
+        if variant != explained:
+            continue
+        for characteristic in sorted({run.parent for run in result.runs}):
+            output = root / f"shapley-{characteristic.name}"
+            command = [recipe, "outcome-shapley", "--agent", str(agents), "--characteristic", str(characteristic)]
+            shapley = _invoke([*command, *sweep, "--output", str(output)], output)
+            invocations.append(Invocation(label, variant, "shapley", 0, shapley.seconds, shapley.runs))
     return invocations
 
 
@@ -134,7 +184,7 @@ def export(invocations: list[Invocation], runs_path: Path, timing_path: Path) ->
                 stage = settings["stage"]
                 config = settings["config"]
                 seed = int(config["seed"])
-                exact_char = "" if stage == "characteristic" else ("with" if config["with_exact_char"] else "without")
+                exact_char = _exact_char(stage, config)
                 with (folder / "metrics.csv").open() as source:
                     metrics = list(csv.DictReader(source))
                 for row in metrics:
@@ -162,6 +212,21 @@ def export(invocations: list[Invocation], runs_path: Path, timing_path: Path) ->
                     round(seconds[-1] - seconds[0], 6) if len(seconds) > 1 else 0.0,
                     len(seconds),
                 ))
+
+
+def _exact_char(stage: str, config: dict[str, object]) -> str:
+    """The comparison group: exact-characteristic use, or the source's outcome Shapley group."""
+    if stage == "characteristic":
+        return ""
+    exact = "with" if config["with_exact_char"] else "without"
+    explained = json.loads((Path(str(config["characteristic"])) / "config.json").read_text())
+    if stage != "shapley" or explained["stage"] != "outcome":
+        return exact
+    # dqn_performance_* Shapley groups; Shapley without exact values of a w_exact outcome run has no source group.
+    outcome_exact = bool(explained["config"]["with_exact_char"])
+    if config["with_exact_char"]:
+        return "w_policy" if outcome_exact else "wo_policy"
+    return "wo_perf" if not outcome_exact else "wo_perf_w_policy"
 
 
 def _epoch_median(

@@ -3,26 +3,33 @@ set -euo pipefail
 
 usage() {
     cat <<'TEXT'
-Usage: bash scripts/explanations_port/run.sh [--seeds N] [--cases CASE...] [--skip-jax] [--skip-upstream]
+Usage: bash scripts/explanations_port/run.sh [--seeds N] [--cases CASE...] [--skip-jax] [--skip-upstream] [--margins-only]
 
 Reproduce the explanation-port comparison from the repository root. The pinned
 FastSVERL commit is cloned into a temporary directory, removed on exit, and run
 in an isolated PyTorch environment. Runs execute sequentially so that the timings
-are comparable. CASE is gridworld, mastermind222 or hypercube (default: all).
---skip-jax and --skip-upstream keep that side's existing CSVs; the upstream side is deterministic.
+are comparable. CASE is gridworld, mastermind222, hypercube, gridworld-outcome or
+mastermind222-outcome (default: all). --skip-jax and --skip-upstream keep that
+side's existing CSVs; the upstream side is deterministic.
+
+Equivalence margins come from the JAX runs alone. --margins-only runs the JAX side,
+writes docs/data/explanations-port--margins.csv and stops: commit that file before
+running the upstream side. The comparison refuses to run without it.
 TEXT
 }
 
-seeds=5
+seeds=20
 skip_jax=false
 skip_upstream=false
-cases=(gridworld mastermind222 hypercube)
+margins_only=false
+cases=(gridworld mastermind222 hypercube gridworld-outcome mastermind222-outcome)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --seeds) seeds=$2; shift 2 ;;
         --skip-jax) skip_jax=true; shift ;;
         --skip-upstream) skip_upstream=true; shift ;;
+        --margins-only) margins_only=true; shift ;;
         --cases) shift; cases=(); while [[ $# -gt 0 && "$1" != --* ]]; do cases+=("$1"); shift; done ;;
         *) usage >&2; exit 2 ;;
     esac
@@ -54,6 +61,12 @@ export JAX_SHAPLEY_GATES_PASSED=1
 if [[ "$skip_jax" == false ]]; then
     JAX_PLATFORMS=cpu uv run python scripts/explanations_port/run_jax.py \
         --root "$jax_runs" --seeds "$seeds" --cases "${cases[@]}"
+fi
+
+if [[ "$margins_only" == true ]]; then
+    uv run --group benchmark scripts/explanations_port/compare.py --mode margins
+    echo "Pilot margins written; commit docs/data/explanations-port--margins.csv before the upstream side."
+    exit 0
 fi
 
 if [[ "$skip_upstream" == false ]]; then

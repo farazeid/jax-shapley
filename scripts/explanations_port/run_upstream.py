@@ -38,6 +38,8 @@ SMALL_ARCH = {
 HYPERCUBES = ((3, 2, 50_000), (3, 3, 50_000), (2, 5, 50_000))
 CLASSES = {"behaviour": ("Policy", "policy"), "prediction": ("Value", "value")}
 RUN_COLUMNS = ("framework", "environment", "kind", "stage", "exact_char", "seed", "step", "train_loss", "exact_loss")
+# Outcome runs with a non-terminating conditioned policy never finish upstream; see outcome().
+OUTCOME_TIMEOUT = 3600.0
 TIMING_COLUMNS = ("framework", "environment", "kind", "stage", "exact_char", "seed", "measure", "seconds", "epochs")
 
 
@@ -81,6 +83,12 @@ class Exporter:
             with path.open("w", newline="") as output:
                 csv.writer(output).writerow(columns)
 
+    def failure(self, environment: str, kind: str, stage: str, exact_char: str, seed: int, reason: str) -> None:
+        """A run that could not complete, kept in the timing CSV so the comparison can account for it."""
+        print(f"[upstream] FAILED {environment} {kind} {stage} {exact_char} seed={seed}: {reason}", flush=True)
+        with self.timing_path.open("a", newline="") as timing_file:
+            csv.writer(timing_file).writerow(("upstream", environment, kind, stage, exact_char, seed, reason, "", ""))
+
     def record(self, run: Run) -> None:
         """Long-format exact/train losses per logged step, and the run's timing."""
         with self.runs_path.open("a", newline="") as rows_file, self.timing_path.open("a", newline="") as timing_file:
@@ -102,10 +110,12 @@ class Exporter:
             stages = ("Characteristic", "Shapley") if run.stage == "combined" else ("",)
             if run.stage == "agent":
                 return
+            # train_V_on_policy logs its loss every 100 global steps, not per epoch.
+            train_suffix = "OnPolicy_loss" if run.kind == "on_policy" and run.stage == "outcome" else "_epoch_loss"
             for stage in stages:
                 label = run.stage if not stage else ("characteristic" if stage == "Characteristic" else "shapley")
                 exact = _series(accumulator, tags, stage, "_exact_loss")
-                train = _series(accumulator, tags, stage, "_epoch_loss")
+                train = _series(accumulator, tags, stage, train_suffix)
                 for step in sorted(exact.keys() | train.keys()):
                     rows.writerow((
                         "upstream",
@@ -148,7 +158,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--seeds", type=int, default=5)
-    parser.add_argument("--cases", nargs="+", default=["gridworld", "mastermind222", "hypercube"])
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        default=["gridworld", "mastermind222", "hypercube", "gridworld-outcome", "mastermind222-outcome"],
+    )
     parser.add_argument("--runs", type=Path, default=Path("docs/data/explanations-port--upstream-runs.csv"))
     parser.add_argument("--timing", type=Path, default=Path("docs/data/explanations-port--upstream-timing.csv"))
     args = parser.parse_args()
@@ -158,6 +172,8 @@ def main() -> None:
     for case in args.cases:
         if case == "hypercube":
             hypercube(root, args.seeds, exporter)
+        elif case.endswith("-outcome"):
+            outcome(root, case.removesuffix("-outcome"), args.seeds, exporter)
         else:
             single_agent(root, case, args.seeds, exporter)
 
@@ -223,6 +239,105 @@ def single_agent(root: Path, case: str, seeds: int, exporter: Exporter) -> None:
                     )
 
 
+def outcome(root: Path, case: str, seeds: int, exporter: Exporter) -> None:
+    """Matched replicates: seed s trains agent s, behaviour characteristic s, outcome characteristics s, Shapley s.
+
+    Outcome characteristics cover both variants, with and without the exact behaviour
+    characteristic. Shapley models follow dqn_performance_*.py: the variant the driver
+    explains (on-policy for Gridworld, off-policy for Mastermind) in its three groups.
+    """
+    experiments = root / "experiments/fastsverl"
+    suffix = "gwb" if case == "gridworld" else "mastermind"
+    label = f"{case}-outcome"
+    agent_driver = _driver(experiments / f"agents/dqn_{suffix}.py")
+    policy_driver = _driver(experiments / f"characteristics/dqn_policy_{suffix}.py")
+    outcome_driver = _driver(experiments / f"characteristics/dqn_performance_{suffix}.py")
+    shapley_driver = _driver(experiments / f"shapleys/dqn_performance_{suffix}.py")
+    for seed in range(1, seeds + 1):
+        exp, agent, env = (_instance(agent_driver, name) for name in ("ExpArgs", "AgentArgs", "EnvArgs"))
+        if case == "mastermind222":
+            agent.update(critic_arch=SMALL_ARCH, total_timesteps=100_000, buffer_size=100_000)
+            env.update(code_size=2, num_guesses=2, num_pegs=2)
+        agent_run = _launch(
+            exporter, experiments / "agents", "run.py", seed, [exp, agent, env], ["DQN"], label, "", "agent", ""
+        )
+        policy_exp, policy_args = _instance(policy_driver, "ExpArgs"), _instance(policy_driver, "CharacteristicArgs")
+        policy_exp["agent_args_f"] = agent_run.folder.name
+        if case == "mastermind222":
+            policy_args.update(
+                model_arch=dict(SMALL_ARCH, output_activation=["Softmax", [-1]]), epochs=50, save_val=False
+            )
+        behaviour = _launch(
+            exporter,
+            experiments / "characteristics",
+            "run_policy_prediction.py",
+            seed,
+            [policy_exp, policy_args],
+            ["DQN", "PolicyCharacteristicModel"],
+            label,
+            "behaviour",
+            "characteristic",
+            "",
+        )
+        outcomes: dict[tuple[str, bool], Run] = {}
+        for variant, cls in (
+            ("on_policy", "PerformanceCharacteristicOnPolicy"),
+            ("off_policy", "PerformanceCharacteristicOffPolicy"),
+        ):
+            for with_exact in (True, False):
+                outcome_exp = _instance(outcome_driver, "ExpArgs")
+                outcome_args = _instance(outcome_driver, "CharacteristicArgs")
+                outcome_exp["agent_args_f"] = agent_run.folder.name
+                outcome_args.update(policy_char_args_f=behaviour.folder.name, with_exact_char=with_exact)
+                exact_char = "with" if with_exact else "without"
+                try:
+                    outcomes[variant, with_exact] = _launch(
+                        exporter,
+                        experiments / "characteristics",
+                        "run_performance.py",
+                        seed,
+                        [outcome_exp, outcome_args],
+                        ["DQN", cls],
+                        label,
+                        variant,
+                        "outcome",
+                        exact_char,
+                        timeout=OUTCOME_TIMEOUT,
+                    )
+                except subprocess.TimeoutExpired:
+                    # Upstream value iteration never converges when the conditioned policy can loop forever.
+                    exporter.failure(label, variant, "outcome", exact_char, seed, "timeout")
+        shapley_args = _instance(shapley_driver, "ShapleyArgs")
+        explained = "off_policy" if shapley_args["off_policy_char"] else "on_policy"
+        shapley_args["save_explanations"] = False
+        # The driver's groups: w_policy and wo_policy explain exact outcome values; wo_perf the learnt one.
+        for group, char_exact, shapley_exact in (
+            ("w_policy", True, True),
+            ("wo_policy", False, True),
+            ("wo_perf", False, False),
+        ):
+            if (explained, char_exact) not in outcomes:
+                exporter.failure(label, explained, "shapley", group, seed, "missing outcome characteristic")
+                continue
+            shapley_exp = _instance(shapley_driver, "ExpArgs")
+            shapley_exp.update(
+                agent_args_f=agent_run.folder.name, char_args_f=outcomes[explained, char_exact].folder.name
+            )
+            shapley_args["with_exact_char"] = shapley_exact
+            _launch(
+                exporter,
+                experiments / "shapleys",
+                "run_performance.py",
+                seed,
+                [shapley_exp, shapley_args],
+                ["DQN"],
+                label,
+                explained,
+                "shapley",
+                group,
+            )
+
+
 def hypercube(root: Path, seeds: int, exporter: Exporter) -> None:
     """Paper protocol: every seed trains its own agent, characteristic and Shapley model in one process."""
     folder = root / "experiments/hypercube"
@@ -271,13 +386,14 @@ def _launch(
     kind: str,
     stage: str,
     exact_char: str,
+    timeout: float | None = None,
 ) -> Run:
     runs = folder / "runs"
     before = set(runs.iterdir()) if runs.exists() else set()
     started = time.perf_counter()
     argv = [sys.executable, "-c", HARNESS, script, str(seed), *(json.dumps(value) for value in arguments), *classes]
     print(f"[upstream] {environment} {kind or 'agent'} {stage} {exact_char} seed={seed}", flush=True)
-    subprocess.run(argv, cwd=folder, check=True)  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed argv, verified checkout.
+    subprocess.run(argv, cwd=folder, check=True, timeout=timeout)  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed argv, verified checkout.
     created = sorted(set(runs.iterdir()) - before)
     if len(created) != 1:
         raise RuntimeError(f"expected one new run folder in {runs}, found {created}")
