@@ -76,6 +76,7 @@ from jax_shapley.shapley import (
 from jax_shapley.tabular import TabularModel, transition_model
 from jax_shapley.train_dqn import (
     AdamConfig,
+    EnvironmentConfig,
     GridworldConfig,
     Mastermind222Config,
     ResumeConfig,
@@ -399,12 +400,20 @@ class CharacteristicContext:
 
 
 @struct.dataclass
+class ExactShapley:
+    """Exact normalised Shapley values at the exact buffer's unique states (padded, with validity)."""
+
+    states: Array
+    state_valid: Array
+    values: Array
+
+
+@struct.dataclass
 class ShapleyContext:
     """Per-seed constants a Shapley learner reads: buffers and the exact-loss ground truth."""
 
     buffers: Buffers
-    exact: ExactCharacteristic | None
-    exact_values: Array | None
+    exact: ExactShapley | None
 
 
 @struct.dataclass
@@ -422,6 +431,22 @@ class OutcomeFrozen:
 
     agent: FrozenAgent
     behaviour: CharacteristicModel
+
+
+@struct.dataclass
+class ExplainedOutcome:
+    """A trained outcome characteristic's networks and the behaviour characteristic it conditions on."""
+
+    networks: OutcomeNetworks
+    behaviour: CharacteristicModel
+
+
+@struct.dataclass
+class OutcomeShapleyFrozen:
+    """The frozen models an outcome Shapley learner explains."""
+
+    agent: FrozenAgent
+    explained: ExplainedOutcome
 
 
 @struct.dataclass
@@ -814,14 +839,19 @@ def outcome_context(
     if tabular is None:
         raise ValueError("exact outcome values need the environment's transition model")
     policy = conditioned_policy(frozen, explained)
-    observations, states = inputs.buffers.exact, tabular.states
+    exact = outcome_exact(inputs.buffers.exact, policy, tabular, config.with_exact_char, config.gamma)
+    return OutcomeContext(inputs.train, inputs.validation, exact)
+
+
+def outcome_exact(
+    observations: Array, policy: ConditionedPolicy, tabular: TabularModel, with_exact_char: bool, gamma: float
+) -> ExactOutcome:
+    """Source PerformanceCharacteristic.get_exact over the exact buffer's unique states."""
+    states = tabular.states
     coalitions = all_coalitions(states.shape[-1])
     exact_table, present = exact_behaviour_table(observations, policy.agent(observations), states, coalitions)
-    conditioned = (
-        exact_table if config.with_exact_char else learnt_behaviour_table(policy.behaviour, states, coalitions)
-    )
-    exact = exact_outcome(tabular, states, present, conditioned, policy.agent(states), config.gamma)
-    return OutcomeContext(inputs.train, inputs.validation, exact)
+    conditioned = exact_table if with_exact_char else learnt_behaviour_table(policy.behaviour, states, coalitions)
+    return exact_outcome(tabular, states, present, conditioned, policy.agent(states), gamma)
 
 
 def outcome_learner(
@@ -909,6 +939,90 @@ def replay_prefix(data: TransitionBatch, rows: int) -> Transitions:
     )
 
 
+def run_outcome_shapley[State, Params](
+    keys: Array,
+    agents: FrozenAgent,
+    characteristics: ExplainedOutcome | None,
+    inherited: Buffers | None,
+    state: ExplanationState[ShapleyModel] | None = None,
+    *,
+    environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
+    config: ShapleyRunConfig,
+    explained: CharacteristicConfig,
+    outcome: OutcomeRunConfig,
+    tabular: TabularModel | None,
+    sink: ExplanationSink,
+) -> ExplanationState[ShapleyModel]:
+    """Source PerformanceShapley: explain each seed's frozen outcome characteristic.
+
+    Buffers follow the behaviour characteristic's explained policy; exact values use
+    the behaviour characteristic's exact buffer, as the outcome characteristic does.
+    """
+    if characteristics is None or inherited is None:
+        raise ValueError("outcome Shapley runs need the outcome characteristics and the behaviour buffers")
+    if config.buffers != "fresh":
+        raise ValueError("outcome Shapley runs collect fresh buffers")
+    env = EpisodeStatisticsWrapper(environment_factory())
+    training = config.train
+    features, _ = _dimensions(env)
+    layout = ShapleyLayout(features, 1)
+    network = shapley_network(layout, config.hidden_widths)
+    if state is None:
+
+        def initialize(key: Array, agent: FrozenAgent, inherited: Buffers) -> ExplanationState[ShapleyModel]:
+            key, buffers = collect_buffers(env, agent, explained.policy, training, key, inherited.exact)
+            model_key, key = jax.random.split(key)
+            return initialize_state(ShapleyModel(network, layout, rngs=nnx.Rngs(model_key)), buffers, training, key)
+
+        state = nnx.vmap(initialize, in_axes=(0, 0, 0), out_axes=0)(keys, agents, inherited)
+
+    def context(buffers: Buffers, frozen: OutcomeShapleyFrozen) -> ShapleyContext:
+        return outcome_shapley_context(buffers, frozen, explained, config, outcome, tabular)
+
+    frozen = OutcomeShapleyFrozen(agents, characteristics)
+    contexts = nnx.vmap(context, in_axes=(0, 0), out_axes=0)(state.buffers, frozen)
+
+    def learner(context: ShapleyContext, frozen: OutcomeShapleyFrozen) -> Learner[ShapleyModel, Draw]:
+        return shapley_learner(context, outcome_function(frozen, explained, outcome), config, features)
+
+    return train(state, contexts, frozen, learner, training, config.chunk_epochs, sink)
+
+
+def outcome_shapley_context(
+    buffers: Buffers,
+    frozen: OutcomeShapleyFrozen,
+    explained: CharacteristicConfig,
+    config: ShapleyRunConfig,
+    outcome: OutcomeRunConfig,
+    tabular: TabularModel | None,
+) -> ShapleyContext:
+    """Exact Shapley values at the exact buffer's unique states.
+
+    with_exact_char explains the exact outcome values (themselves conditioned on the
+    exact or learnt behaviour characteristic, as the outcome run chose); otherwise
+    the learnt outcome characteristic.
+    """
+    if not config.train.exact_loss:
+        return ShapleyContext(buffers, None)
+    if tabular is None:
+        raise ValueError("exact outcome Shapley values need the environment's transition model")
+    function = outcome_function(frozen, explained, outcome)
+    exact = outcome_exact(buffers.exact, function.policy, tabular, outcome.with_exact_char, outcome.gamma)
+    values = (
+        exact.values[..., None]
+        if config.with_exact_char
+        else characteristic_table(function, exact.states, all_coalitions(exact.states.shape[-1]))
+    )
+    return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
+
+
+def outcome_function(
+    frozen: OutcomeShapleyFrozen, explained: CharacteristicConfig, outcome: OutcomeRunConfig
+) -> OutcomeCharacteristic:
+    policy = conditioned_policy(OutcomeFrozen(frozen.agent, frozen.explained.behaviour), explained)
+    return OutcomeCharacteristic(frozen.explained.networks, policy, outcome.variant)
+
+
 def characteristic_context(
     buffers: Buffers,
     agent: FrozenAgent,
@@ -978,7 +1092,7 @@ def shapley_context(
 ) -> ShapleyContext:
     """Exact Shapley values on the characteristic's exact buffer; with_exact_char selects the ground truth."""
     if not config.train.exact_loss:
-        return ShapleyContext(buffers, None, None)
+        return ShapleyContext(buffers, None)
     observations = buffers.exact
     targets = explained_values(agent.model(observations).q_values, explained, agent.epsilon)
     coalitions = all_coalitions(features)
@@ -987,7 +1101,7 @@ def shapley_context(
     values = (
         exact.at_states if config.with_exact_char else characteristic_table(characteristic, exact.states, coalitions)
     )
-    return ShapleyContext(buffers, exact, exact_shapley(values))
+    return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 
 
 def shapley_learner(
@@ -1016,8 +1130,8 @@ def shapley_learner(
 
     def exact_loss(model: ShapleyModel) -> Array:
         exact = context.exact
-        assert exact is not None and context.exact_values is not None
-        return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, context.exact_values)
+        assert exact is not None
+        return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, exact.values)
 
     return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
@@ -1248,7 +1362,8 @@ def template_state(context: RunContext, config: RunConfig) -> AnyState:
     if isinstance(config, OutcomeRunConfig):
         networks = OutcomeNetworks(outcome_network(features, context.actions, config.outcome), rngs=nnx.Rngs(0))
         return initialize_state(networks, buffers, config.train, key)
-    layout = ShapleyLayout(features, context.actions if context.explained.kind == "behaviour" else 1)
+    outputs = context.actions if context.explained.kind == "behaviour" and context.outcome is None else 1
+    layout = ShapleyLayout(features, outputs)
     model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(0))
     return initialize_state(model, buffers, training, key)
 
@@ -1274,30 +1389,47 @@ def parse_args(args: list[str] | None = None) -> CLIConfig:
 
 
 def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Callable[..., object]:
-    """Bind static configuration, preserving each environment's state/parameter types."""
+    """Bind static configuration for the run's stage."""
     env = context.env_config
     if isinstance(config, CharacteristicRunConfig):
-        options = {"config": config, "max_unique": context.max_unique, "sink": sink}
-        if isinstance(env, GridworldConfig):
-            return partial(run_characteristic, environment_factory=Gridworld, **options)
-        if isinstance(env, Mastermind222Config):
-            return partial(run_characteristic, environment_factory=Mastermind222, **options)
-        return partial(run_characteristic, environment_factory=env.make, **options)
+        options: dict[str, object] = {"config": config, "max_unique": context.max_unique, "sink": sink}
+        return _with_environment(run_characteristic, env, options)
     if isinstance(config, OutcomeRunConfig):
-        # The transition model is a host-built constant shared by every seed.
-        tabular = transition_model(env) if config.train.exact_loss else None
-        outcome = {"config": config, "explained": context.explained, "tabular": tabular, "sink": sink}
-        if isinstance(env, GridworldConfig):
-            return partial(run_outcome, environment_factory=Gridworld, **outcome)
-        if isinstance(env, Mastermind222Config):
-            return partial(run_outcome, environment_factory=Mastermind222, **outcome)
-        return partial(run_outcome, environment_factory=env.make, **outcome)
+        options = {
+            "config": config,
+            "explained": context.explained,
+            "tabular": _tabular(env, config.train.exact_loss),
+            "sink": sink,
+        }
+        return _with_environment(run_outcome, env, options)
+    if context.outcome is not None:
+        tabular = _tabular(env, config.train.exact_loss)
+        options = {
+            "config": config,
+            "explained": context.explained,
+            "outcome": context.outcome,
+            "tabular": tabular,
+            "sink": sink,
+        }
+        return _with_environment(run_outcome_shapley, env, options)
     options = {"config": config, "explained": context.explained, "max_unique": context.max_unique, "sink": sink}
+    return _with_environment(run_shapley, env, options)
+
+
+def _tabular(env: EnvironmentConfig, exact_loss: bool) -> TabularModel | None:
+    """The transition model exact outcome values need: a host-built constant shared by every seed."""
+    return transition_model(env) if exact_loss else None
+
+
+def _with_environment(
+    runner: Callable[..., object], env: EnvironmentConfig, options: dict[str, object]
+) -> Callable[..., object]:
+    """Bind the environment factory, preserving each environment's state/parameter types."""
     if isinstance(env, GridworldConfig):
-        return partial(run_shapley, environment_factory=Gridworld, **options)
+        return partial(runner, environment_factory=Gridworld, **options)
     if isinstance(env, Mastermind222Config):
-        return partial(run_shapley, environment_factory=Mastermind222, **options)
-    return partial(run_shapley, environment_factory=env.make, **options)
+        return partial(runner, environment_factory=Mastermind222, **options)
+    return partial(runner, environment_factory=env.make, **options)
 
 
 def _stack_optional[Tree](items: list[Tree | None]) -> Tree | None:

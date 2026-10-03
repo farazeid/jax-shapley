@@ -34,6 +34,7 @@ from jax_shapley.characteristics import (
     max_unique_states,
 )
 from jax_shapley.outcome import OutcomeNetworks, Variant, outcome_network
+from jax_shapley.replay import ReplayState
 from jax_shapley.run_io import (
     REFERENCE_COMMIT,
     CallbackToken,
@@ -57,6 +58,7 @@ from jax_shapley.train_explanations import (
     Buffers,
     BufferSource,
     CharacteristicRunConfig,
+    ExplainedOutcome,
     ExplanationPhase,
     ExplanationState,
     ExplanationTrainConfig,
@@ -90,7 +92,7 @@ class RunContext:
     env_config: EnvironmentConfig
     agent: FrozenAgent
     agent_sha256: str
-    characteristic: CharacteristicModel | None
+    characteristic: CharacteristicModel | ExplainedOutcome | None
     characteristic_sha256: str | None
     inherited: Buffers | OutcomeInputs | None
     explained: CharacteristicConfig
@@ -99,6 +101,8 @@ class RunContext:
     exact_rows: int
     max_unique: int
     settings: str
+    outcome: OutcomeRunConfig | None = None
+    """The explained outcome run's settings, when a Shapley run explains an outcome characteristic."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,18 @@ class LoadedOutcome:
     characteristic_sha256: str
     networks: OutcomeNetworks
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Sources:
+    """What a run explains, as loaded for its context."""
+
+    explained: CharacteristicConfig
+    characteristic: CharacteristicModel | ExplainedOutcome | None
+    characteristic_sha256: str | None
+    inherited: Buffers | OutcomeInputs | None
+    exact_rows: int
+    outcome: OutcomeRunConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,64 +358,38 @@ class ExplanationWriter:
 def prepare_context(config: RunConfig) -> RunContext:
     """Load and identify the explained models; derive static shapes and the saved settings."""
     agent_settings = load_settings(config.agent / "config.json")
-    outcome = isinstance(config, OutcomeRunConfig)
-    loaded = load_agent(config.agent, agent_settings.network, load_replay=outcome)
+    loaded = load_agent(config.agent, agent_settings.network, load_replay=isinstance(config, OutcomeRunConfig))
     if loaded.vector_step != agent_settings.train.vector_steps:
         raise ValueError("explanations require a completed DQN training run")
     agent = FrozenAgent(loaded.model, jnp.asarray(loaded.epsilon, jnp.float32))
     agent_sha256 = array_sha256((*jax.tree.leaves(nnx.state(loaded.model)), agent.epsilon))
     environment, actions, low, high = _environment(agent_settings.env)
     features = agent_settings.network.input_features
-    characteristic: CharacteristicModel | None = None
-    characteristic_sha256: str | None = None
-    inherited: Buffers | OutcomeInputs | None = None
     if isinstance(config, CharacteristicRunConfig):
-        explained = config.characteristic
-        exact_rows = config.train.exact_size
+        sources = _Sources(config.characteristic, None, None, None, config.train.exact_size)
     elif isinstance(config, OutcomeRunConfig):
-        source = load_characteristic(config.characteristic)
-        if source.agent_sha256 != agent_sha256:
-            raise ValueError("the behaviour characteristic explains a different agent")
-        if source.config.kind != "behaviour":
-            raise ValueError("outcome characteristics condition on a behaviour characteristic")
-        replay = loaded.replay
-        rows = max(config.train.train_size, config.train.validation_size)
-        if replay is None or int(replay.size) < rows:
-            raise ValueError(f"outcome runs need at least {rows} transitions in the agent's replay")
-        explained, characteristic, characteristic_sha256 = source.config.characteristic, source.model, source.sha256
-        inherited = OutcomeInputs(
-            source.buffers,
-            replay_prefix(replay.data, config.train.train_size),
-            replay_prefix(replay.data, config.train.validation_size),
-        )
-        exact_rows = source.config.train.exact_size
+        sources = _outcome_sources(config, loaded.replay, agent_sha256)
+    elif isinstance(load_run_settings(config.characteristic / "config.json").config, OutcomeRunConfig):
+        sources = _outcome_shapley_sources(config, agent_sha256)
     else:
-        source = load_characteristic(config.characteristic)
-        if source.agent_sha256 != agent_sha256:
-            raise ValueError("the characteristic explains a different agent")
-        if config.buffers == "characteristic" and (
-            config.train.train_size != source.config.train.train_size
-            or config.train.validation_size != source.config.train.validation_size
-        ):
-            raise ValueError("reused characteristic buffers require identical train/validation sizes")
-        explained, characteristic, characteristic_sha256 = source.config.characteristic, source.model, source.sha256
-        inherited, exact_rows = source.buffers, source.config.train.exact_size
-    max_unique = max_unique_states(low, high, features, exact_rows)
-    settings = describe(config, environment, agent_sha256, characteristic_sha256)
+        sources = _shapley_sources(config, agent_sha256)
+    max_unique = max_unique_states(low, high, features, sources.exact_rows)
+    settings = describe(config, environment, agent_sha256, sources.characteristic_sha256)
     return RunContext(
         environment,
         agent_settings.env,
         agent,
         agent_sha256,
-        characteristic,
-        characteristic_sha256,
-        inherited,
-        explained,
+        sources.characteristic,
+        sources.characteristic_sha256,
+        sources.inherited,
+        sources.explained,
         features,
         actions,
-        exact_rows,
+        sources.exact_rows,
         max_unique,
         settings,
+        sources.outcome,
     )
 
 
@@ -548,12 +538,64 @@ def _initialize_folder(folder: Path, settings: str) -> None:
         csv.writer(output).writerow(METRIC_COLUMNS)
 
 
+def _outcome_sources(config: OutcomeRunConfig, replay: ReplayState | None, agent_sha256: str) -> _Sources:
+    source = load_characteristic(config.characteristic)
+    if source.agent_sha256 != agent_sha256:
+        raise ValueError("the behaviour characteristic explains a different agent")
+    if source.config.kind != "behaviour":
+        raise ValueError("outcome characteristics condition on a behaviour characteristic")
+    rows = max(config.train.train_size, config.train.validation_size)
+    if replay is None or int(replay.size) < rows:
+        raise ValueError(f"outcome runs need at least {rows} transitions in the agent's replay")
+    inherited = OutcomeInputs(
+        source.buffers,
+        replay_prefix(replay.data, config.train.train_size),
+        replay_prefix(replay.data, config.train.validation_size),
+    )
+    return _Sources(
+        source.config.characteristic, source.model, source.sha256, inherited, source.config.train.exact_size
+    )
+
+
+def _outcome_shapley_sources(config: ShapleyRunConfig, agent_sha256: str) -> _Sources:
+    explained = load_outcome(config.characteristic)
+    behaviour = load_characteristic(explained.config.characteristic)
+    if explained.agent_sha256 != agent_sha256:
+        raise ValueError("the outcome characteristic explains a different agent")
+    if behaviour.sha256 != explained.characteristic_sha256:
+        raise ValueError("the outcome characteristic's behaviour characteristic changed")
+    if config.buffers != "fresh":
+        raise ValueError("outcome Shapley runs collect fresh buffers")
+    return _Sources(
+        behaviour.config.characteristic,
+        ExplainedOutcome(explained.networks, behaviour.model),
+        explained.sha256,
+        behaviour.buffers,
+        behaviour.config.train.exact_size,
+        explained.config,
+    )
+
+
+def _shapley_sources(config: ShapleyRunConfig, agent_sha256: str) -> _Sources:
+    source = load_characteristic(config.characteristic)
+    if source.agent_sha256 != agent_sha256:
+        raise ValueError("the characteristic explains a different agent")
+    if config.buffers == "characteristic" and (
+        config.train.train_size != source.config.train.train_size
+        or config.train.validation_size != source.config.train.validation_size
+    ):
+        raise ValueError("reused characteristic buffers require identical train/validation sizes")
+    return _Sources(
+        source.config.characteristic, source.model, source.sha256, source.buffers, source.config.train.exact_size
+    )
+
+
 def _label(config: RunConfig, context: RunContext) -> str:
     if isinstance(config, CharacteristicRunConfig):
         return f"characteristic-{config.kind}"
     if isinstance(config, OutcomeRunConfig):
         return f"outcome-{config.variant.replace('_', '-')}"
-    return f"shapley-{context.explained.kind}"
+    return "shapley-outcome" if context.outcome is not None else f"shapley-{context.explained.kind}"
 
 
 def write_epochs(path: Path, metrics: tuple[HostArray, ...], seconds: float) -> None:
