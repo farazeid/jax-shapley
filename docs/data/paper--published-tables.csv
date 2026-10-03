@@ -1,0 +1,16 @@
+table,domain,model,updates_mean,updates_se,loss_mean,loss_se
+table_1_behaviour,Mastermind-443,Characteristic,1097000.0,112000.0,0.0038250000000000003,2.2e-05
+table_1_behaviour,Mastermind-443,Shapley,730500.0,68100.0,0.001292,3.6e-05
+table_1_behaviour,Mastermind-453,Characteristic,1287000.0,105000.0,0.0036030000000000003,2.2e-05
+table_1_behaviour,Mastermind-453,Shapley,784400.0,49900.0,0.0009578,3.2200000000000003e-05
+table_1_behaviour,Mastermind-463,Characteristic,1180000.0,118000.0,0.0037,1.2e-05
+table_1_behaviour,Mastermind-463,Shapley,712300.0,51600.0,0.001878,3.8e-05
+table_3_prediction,Mastermind-443,Characteristic,1082000.0,64000.0,0.25379999999999997,0.0037
+table_3_prediction,Mastermind-443,Shapley,601000.0,50800.0,0.15700000000000003,0.0072
+table_3_prediction,Mastermind-453,Characteristic,1065000.0,109000.0,0.27440000000000003,0.004
+table_3_prediction,Mastermind-453,Shapley,593200.0,46400.0,0.17720000000000002,0.009500000000000001
+table_3_prediction,Mastermind-463,Characteristic,987700.0000000001,33700.0,0.0327,0.0004
+table_3_prediction,Mastermind-463,Shapley,917900.0,62500.0,0.1704,0.0064
+table_4_outcome_offpolicy,Mastermind-443,Shapley,678600.0,63100.0,0.15760000000000002,0.0070999999999999995
+table_4_outcome_offpolicy,Mastermind-453,Shapley,570300.0,44100.0,0.6334,0.03
+table_4_outcome_offpolicy,Mastermind-463,Shapley,556100.0,34200.0,0.7570000000000001,0.0262

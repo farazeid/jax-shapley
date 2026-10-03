@@ -1,0 +1,81 @@
+figure,panel,title,model,states,mean,standard_error
+hypercube_policy,0,Dimension = 5,Characteristic,31,611.9030164412446,3.8006842742377103
+hypercube_policy,0,Dimension = 5,Characteristic,242,1155.4055791832916,62.04941510510662
+hypercube_policy,0,Dimension = 5,Characteristic,1023,1904.1532598277424,73.25977228191255
+hypercube_policy,0,Dimension = 5,Characteristic,3124,3979.382715143632,345.55655634673667
+hypercube_policy,0,Dimension = 5,Characteristic,7775,5131.028858432728,421.74785829187294
+hypercube_policy,0,Dimension = 5,Shapley,31,452.27405736968575,6.697486526031582
+hypercube_policy,0,Dimension = 5,Shapley,242,672.7142219463212,31.32929009792997
+hypercube_policy,0,Dimension = 5,Shapley,1023,1026.1808011384262,37.198492863251204
+hypercube_policy,0,Dimension = 5,Shapley,3124,1759.7243476900192,75.86995959681917
+hypercube_policy,0,Dimension = 5,Shapley,7775,2215.816104725224,114.39277742458216
+hypercube_policy,1,Dimension = 4,Characteristic,15,520.6792545718812,6.226750350690395
+hypercube_policy,1,Dimension = 4,Characteristic,80,828.531934902153,24.600197234744996
+hypercube_policy,1,Dimension = 4,Characteristic,255,1531.658073388794,89.13853942615833
+hypercube_policy,1,Dimension = 4,Characteristic,624,2922.7210337280408,344.6780584860826
+hypercube_policy,1,Dimension = 4,Characteristic,1295,4032.538514982202,312.1288367037446
+hypercube_policy,1,Dimension = 4,Shapley,15,364.8535731652727,11.82728261275588
+hypercube_policy,1,Dimension = 4,Shapley,80,543.4830635826713,14.873952592869045
+hypercube_policy,1,Dimension = 4,Shapley,255,912.1465470539349,36.57964390265988
+hypercube_policy,1,Dimension = 4,Shapley,624,1463.2454776939946,316.83374398300725
+hypercube_policy,1,Dimension = 4,Shapley,1295,1949.735690114767,89.6490991024416
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,7,391.4524957920147,6.2266840223585405
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,26,649.8921518763955,17.847678999042614
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,63,1227.5859135129483,54.38879343548956
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,124,1862.293772145655,89.34615888682129
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,215,2687.038619149585,139.43066280512176
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,7,285.03687023268986,7.5509279433644
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,26,395.25306278531275,16.17152195178545
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,63,604.285038111687,25.55467540131974
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,124,938.738339935044,47.52567663950879
+hypercube_policy,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,215,1257.990948149377,106.85628457972871
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,3,307.83594481894016,3.800493807643136
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,8,380.0455980460641,9.551147508563645
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,15,577.6729418771586,26.09889573527539
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,24,919.7225949936692,51.40571526590645
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,35,1303.5806644802753,108.66098853818607
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Shapley,3,205.22269984808818,7.990999595359938
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Shapley,8,182.4198478126463,11.566907607194764
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Shapley,15,231.82606217365668,17.847179724568008
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Shapley,24,304.03544002480595,18.289016097177182
+hypercube_policy,3,Dimension = 2 | Characteristic | Shapley value,Shapley,35,349.64150823117654,29.386911173842464
+hypercube_value,0,Dimension = 5,Characteristic,31,4316.09913530676,69.20433405277527
+hypercube_value,0,Dimension = 5,Characteristic,242,10011.118374969205,488.45893296647955
+hypercube_value,0,Dimension = 5,Characteristic,1023,33447.68566959086,1550.7115262711304
+hypercube_value,0,Dimension = 5,Characteristic,3124,75000.9070579576,4120.517242610629
+hypercube_value,0,Dimension = 5,Characteristic,7775,188743.05638168534,14523.190773803566
+hypercube_value,0,Dimension = 5,Shapley,31,900.4967404544716,24.203080724573056
+hypercube_value,0,Dimension = 5,Shapley,242,4126.135878576846,263.11144054527904
+hypercube_value,0,Dimension = 5,Shapley,1023,21739.000504505057,1382.9212952999333
+hypercube_value,0,Dimension = 5,Shapley,3124,50911.70934343508,2193.1328857828994
+hypercube_value,0,Dimension = 5,Shapley,7775,89227.8900175498,3754.305750396932
+hypercube_value,1,Dimension = 4,Characteristic,15,2693.7534921098736,55.5302555205235
+hypercube_value,1,Dimension = 4,Characteristic,80,5467.176002920713,182.1158771498658
+hypercube_value,1,Dimension = 4,Characteristic,255,12020.65921537371,897.4798298770747
+hypercube_value,1,Dimension = 4,Characteristic,624,28109.533736761623,10114.088294743124
+hypercube_value,1,Dimension = 4,Characteristic,1295,40194.02763257039,2486.8657350724825
+hypercube_value,1,Dimension = 4,Shapley,15,550.9352482744425,13.36218696491028
+hypercube_value,1,Dimension = 4,Shapley,80,1804.722669656178,62.337694075327136
+hypercube_value,1,Dimension = 4,Shapley,255,5915.477378208645,382.5571290912321
+hypercube_value,1,Dimension = 4,Shapley,624,14395.07890561278,2479.2681254136696
+hypercube_value,1,Dimension = 4,Shapley,1295,46181.14683459444,2152.046349681921
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,7,1193.0105323694165,31.232505262935774
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,26,2762.0908045831397,98.49760191538144
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,63,4452.714201860611,253.35263095200298
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,124,7883.2947623711,467.07600171102695
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Characteristic,215,10109.536196254374,543.8270705945888
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,7,311.56324882966646,5.22990363122949
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,26,759.8897561872739,22.050548954773035
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,63,1869.2776495819053,104.94035540205323
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,124,5482.275045467839,512.0003665148324
+hypercube_value,2,Dimension = 3 | Length = 2 | Length = 3,Shapley,215,13802.180033238796,1263.7533684166756
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,3,360.9493901246359,10.851707739521487
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,8,972.6342834398872,36.39921899398087
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,15,1785.662696555399,112.36385317655322
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,24,2781.0371485333103,193.74868238194858
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Characteristic,35,3502.866426823527,237.5983581254668
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Shapley,3,151.9826978040797,0.0
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Shapley,8,319.15644620215176,10.459598983718763
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Shapley,15,410.3408466053431,11.563433331138867
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Shapley,24,642.0986995979694,34.63505807364129
+hypercube_value,3,Dimension = 2 | Characteristic | Shapley value,Shapley,35,835.8613799405423,45.79058569277913
