@@ -12,12 +12,13 @@ from flax import nnx
 from jax_shapley.characteristics import CharacteristicConfig, CharacteristicModel, Kind, characteristic_network
 from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
 from jax_shapley.networks import QNetwork, dqn_config
-from jax_shapley.outcome import Transitions
+from jax_shapley.outcome import OutcomeNetworks, Transitions, outcome_network
 from jax_shapley.tabular import transition_model
 from jax_shapley.train_dqn import EnvironmentConfig, GridworldConfig, Mastermind222Config
 from jax_shapley.train_explanations import (
     Buffers,
     CharacteristicRunConfig,
+    ExplainedOutcome,
     ExplanationTrainConfig,
     FrozenAgent,
     OutcomeInputs,
@@ -26,6 +27,7 @@ from jax_shapley.train_explanations import (
     ShapleyRunConfig,
     run_characteristic,
     run_outcome,
+    run_outcome_shapley,
     run_shapley,
     stack_seeds,
 )
@@ -45,6 +47,7 @@ HYPERCUBE = ExplanationTrainConfig(
     track_batch=True,
 )
 CASES = ("gridworld", "mastermind222", "hypercube")
+SHAPLEY = ExplanationTrainConfig(epochs=20)
 
 
 @pytest.mark.compile
@@ -108,6 +111,21 @@ def _compile_outcome[State, Params](
     )
     arguments = (stack_seeds([agent] * SEEDS), stack_seeds([characteristic] * SEEDS), stack_seeds([inputs] * SEEDS))
     nnx.jit(run).trace(KEYS, *arguments, None).lower().compile()
+    # Source PerformanceShapley settings (Gridworld's 20 epochs; Mastermind's 100 share the shapes).
+    explained_outcome = ExplainedOutcome(
+        OutcomeNetworks(outcome_network(features, actions, config.outcome), rngs=nnx.Rngs(2)), characteristic
+    )
+    shapley = partial(
+        run_outcome_shapley,
+        environment_factory=factory,
+        config=ShapleyRunConfig(_unused(), _unused(), with_exact_char=config.with_exact_char, train=SHAPLEY),
+        explained=explained,
+        outcome=config,
+        tabular=transition_model(environment),
+        sink=RecordingSink(),
+    )
+    frozen = (stack_seeds([agent] * SEEDS), stack_seeds([explained_outcome] * SEEDS))
+    nnx.jit(shapley).trace(KEYS, *frozen, stack_seeds([behaviour_buffers] * SEEDS), None).lower().compile()
 
 
 def _transitions(rows: int, features: int) -> Transitions:

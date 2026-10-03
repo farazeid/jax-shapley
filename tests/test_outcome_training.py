@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from flax import nnx
 
 from jax_shapley import train_dqn
 from jax_shapley.characteristics import exact_characteristic
@@ -23,12 +24,24 @@ from jax_shapley.explanation_io import (
 )
 from jax_shapley.outcome import OutcomeCharacteristic, exact_outcome, exact_outcome_loss, learnt_behaviour_table
 from jax_shapley.run_io import CallbackToken, load_agent, load_replay, load_settings
+from jax_shapley.shapley import (
+    ShapleyLayout,
+    ShapleyModel,
+    characteristic_table,
+    exact_shapley,
+    exact_shapley_loss,
+    shapley_network,
+)
 from jax_shapley.tabular import transition_model
 from jax_shapley.train_explanations import (
+    ExplainedOutcome,
     FrozenAgent,
     OutcomeFrozen,
+    OutcomeShapleyFrozen,
     conditioned_policy,
     main,
+    outcome_exact,
+    outcome_function,
     parse_args,
 )
 
@@ -146,6 +159,43 @@ def test_outcome_sweep_resumes_to_the_uninterrupted_result(
         assert saved.characteristic_sha256 == load_characteristic(characteristic_folder).sha256
 
 
+@pytest.mark.parametrize("with_exact_char", [True, False])
+def test_shapley_explains_an_outcome_run(tmp_path: Path, explained: tuple[Path, Path], with_exact_char: bool) -> None:
+    agent_folder, characteristic_folder = explained
+    outcome = _single(main(_outcome(agent_folder, characteristic_folder, tmp_path / "outcome")))
+    flag = "--with-exact-char" if with_exact_char else "--no-with-exact-char"
+    summary = _single(main([*_shapley(agent_folder, Path(outcome.folder), tmp_path / "shapley"), flag]))
+    folder = Path(summary.folder)
+    assert summary.stage == "shapley" and "shapley-outcome" in folder.name
+    saved = load_run_settings(folder / "config.json")
+    assert saved.characteristic_sha256 == load_outcome(Path(outcome.folder)).sha256
+    # Score the restored best Shapley model eagerly against the ground truth the run should use.
+    loaded = load_outcome(Path(outcome.folder))
+    behaviour = load_characteristic(characteristic_folder)
+    settings = load_settings(agent_folder / "config.json")
+    agent = load_agent(agent_folder, settings.network, load_replay=False)
+    frozen = OutcomeShapleyFrozen(
+        FrozenAgent(agent.model, jnp.asarray(agent.epsilon, jnp.float32)),
+        ExplainedOutcome(loaded.networks, behaviour.model),
+    )
+    function = outcome_function(frozen, behaviour.config.characteristic, loaded.config)
+    exact = outcome_exact(
+        behaviour.buffers.exact,
+        function.policy,
+        transition_model(settings.env),
+        loaded.config.with_exact_char,
+        loaded.config.gamma,
+    )
+    every = all_coalitions(2)
+    values = exact.values[..., None] if with_exact_char else characteristic_table(function, exact.states, every)
+    model = _shapley_model(folder)
+    eager = exact_shapley_loss(model, function, exact.states, exact.state_valid, exact_shapley(values))
+    logged = {row[0]: row[4] for row in _rows(folder)}
+    np.testing.assert_allclose(logged[summary.best_epoch], eager, rtol=1e-5)
+    with pytest.raises(ValueError, match="fresh buffers"):
+        main([*_shapley(agent_folder, Path(outcome.folder), tmp_path / "reuse"), "--buffers", "characteristic"])
+
+
 def test_outcome_validation(tmp_path: Path, explained: tuple[Path, Path]) -> None:
     agent_folder, characteristic_folder = explained
     for invalid in (("--variant", "on_policy"), ("--tau", "0")):
@@ -218,6 +268,41 @@ def _outcome(agent: Path, characteristic: Path, output: Path, *extra: str) -> li
         str(output),
         *extra,
     ]
+
+
+def _shapley(agent: Path, characteristic: Path, output: Path) -> list[str]:
+    return [
+        "shapley",
+        "--agent",
+        str(agent),
+        "--characteristic",
+        str(characteristic),
+        "--hidden-widths",
+        "8",
+        "--train.epochs",
+        "3",
+        "--train.buffer-size",
+        "40",
+        "--train.num-envs",
+        "4",
+        "--train.batch-size",
+        "8",
+        "--output",
+        str(output),
+    ]
+
+
+def _shapley_model(folder: Path) -> ShapleyModel:
+    layout = ShapleyLayout(2, 1)
+    model = ShapleyModel(shapley_network(layout, (8,)), layout, rngs=nnx.Rngs(0))
+    state = nnx.state(model)
+    store = ExplanationStore(folder, read_only=True)
+    try:
+        values = store.arrays("model", tuple(jax.tree.leaves(state)))
+    finally:
+        store.close()
+    nnx.update(model, jax.tree.unflatten(jax.tree.structure(state), values))
+    return model
 
 
 def _rows(folder: Path) -> list[list[float]]:
