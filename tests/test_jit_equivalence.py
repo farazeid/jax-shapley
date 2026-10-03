@@ -26,13 +26,13 @@ from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_co
 from jax_shapley.envs import Mastermind222
 from jax_shapley.networks import QNetwork, dqn_config
 from jax_shapley.shapley import (
+    MaskedCharacteristic,
     ShapleyLayout,
     ShapleyModel,
     characteristic_table,
     exact_shapley,
     exact_shapley_loss,
     explain,
-    null_values,
     shapley_loss,
     shapley_network,
 )
@@ -55,19 +55,22 @@ def test_shapley_targets_and_values_match_eager(rows: int, features: int, action
     characteristic, model = _models(features=features, actions=actions, width=width)
     observations = jax.random.randint(jax.random.key(1), (rows, features), 0, 2, jnp.int32)
     coalition = kernel_coalitions(jax.random.key(2), 1, features)[0]
+    function = MaskedCharacteristic(characteristic)
     np.testing.assert_allclose(
-        nnx.jit(null_values)(characteristic, observations),
-        null_values(characteristic, observations),
+        nnx.jit(lambda c, o: MaskedCharacteristic(c).null(o))(characteristic, observations),
+        function.null(observations),
         rtol=RTOL,
         atol=ATOL,
     )
-    compiled = nnx.jit(lambda m, c, o, k: shapley_loss(m, c, o, k)[0])(model, characteristic, observations, coalition)
-    np.testing.assert_allclose(
-        compiled, shapley_loss(model, characteristic, observations, coalition)[0], rtol=RTOL, atol=ATOL
+    compiled = nnx.jit(lambda m, c, o, k: shapley_loss(m, MaskedCharacteristic(c), o, k)[0])(
+        model, characteristic, observations, coalition
     )
     np.testing.assert_allclose(
-        nnx.jit(explain)(model, characteristic, observations),
-        explain(model, characteristic, observations),
+        compiled, shapley_loss(model, function, observations, coalition)[0], rtol=RTOL, atol=ATOL
+    )
+    np.testing.assert_allclose(
+        nnx.jit(lambda m, c, o: explain(m, MaskedCharacteristic(c), o))(model, characteristic, observations),
+        explain(model, function, observations),
         rtol=RTOL,
         atol=ATOL,
     )
@@ -94,12 +97,17 @@ def test_characteristic_losses_and_tables_match_eager(rows: int) -> None:
         exact_characteristic_loss(characteristic, exact),
         rtol=RTOL,
     )
-    table = nnx.jit(characteristic_table)(characteristic, exact.states, every)
-    np.testing.assert_allclose(table, characteristic_table(characteristic, exact.states, every), rtol=RTOL, atol=ATOL)
+    function = MaskedCharacteristic(characteristic)
+    table = nnx.jit(lambda c, s, k: characteristic_table(MaskedCharacteristic(c), s, k))(
+        characteristic, exact.states, every
+    )
+    np.testing.assert_allclose(table, characteristic_table(function, exact.states, every), rtol=RTOL, atol=ATOL)
     solved = exact_shapley(table)
     np.testing.assert_allclose(
-        nnx.jit(exact_shapley_loss)(model, characteristic, exact.states, exact.state_valid, solved),
-        exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, solved),
+        nnx.jit(lambda m, c, s, v, x: exact_shapley_loss(m, MaskedCharacteristic(c), s, v, x))(
+            model, characteristic, exact.states, exact.state_valid, solved
+        ),
+        exact_shapley_loss(model, function, exact.states, exact.state_valid, solved),
         rtol=RTOL,
     )
 
@@ -131,8 +139,9 @@ def test_logged_exact_loss_matches_eager_evaluation_of_the_returned_model() -> N
     exact = exact_characteristic(
         inherited.exact, jnp.zeros((training.exact_size, 4)), all_coalitions(8), max_unique=training.exact_size
     )
-    solved = exact_shapley(characteristic_table(characteristic, exact.states, all_coalitions(8)))
-    eager = exact_shapley_loss(result.model, characteristic, exact.states, exact.state_valid, solved)
+    function = MaskedCharacteristic(characteristic)
+    solved = exact_shapley(characteristic_table(function, exact.states, all_coalitions(8)))
+    eager = exact_shapley_loss(result.model, function, exact.states, exact.state_valid, solved)
     logged = {row[0]: row[4] for row in sink.rows}
     np.testing.assert_allclose(logged[int(result.best_epoch)], eager, rtol=1e-5)
 

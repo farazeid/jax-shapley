@@ -17,8 +17,9 @@ from jax_shapley.characteristics import (
     exact_characteristic,
     explained_values,
 )
-from jax_shapley.coalitions import all_coalitions, mask
+from jax_shapley.coalitions import all_coalitions
 from jax_shapley.shapley import (
+    MaskedCharacteristic,
     ShapleyLayout,
     ShapleyModel,
     characteristic_table,
@@ -26,7 +27,6 @@ from jax_shapley.shapley import (
     exact_shapley_loss,
     explain,
     normalise,
-    null_values,
     shapley_loss,
     shapley_matrix,
     shapley_network,
@@ -61,7 +61,7 @@ def test_training_matches_source(case: str, kind: Kind) -> None:
     batch = jnp.asarray(fixture[f"{case}_exact_buffer"][: shape.batch_size])
     for step in range(STEPS):
         coalition = jnp.asarray(fixture[f"{name}_coalition_{step}"])
-        targets = characteristic(mask(batch, coalition)).values - null_values(characteristic, batch)
+        targets = characteristic.values(batch, coalition) - characteristic.null(batch)
         np.testing.assert_allclose(targets, fixture[f"{name}_targets_{step}"], rtol=RTOL, atol=ATOL)
         if step == 0:
             result = cast(
@@ -76,8 +76,8 @@ def test_training_matches_source(case: str, kind: Kind) -> None:
     assert_parameters(model.mlp, fixture, f"{name}_final")
     raw = model(batch).contributions
     np.testing.assert_allclose(raw, fixture[f"{name}_raw"], rtol=RTOL, atol=ATOL)
-    grand = characteristic(batch).values
-    normalised = normalise(raw, grand, null_values(characteristic, batch))
+    grand = characteristic.model(batch).values
+    normalised = normalise(raw, grand, characteristic.null(batch))
     np.testing.assert_allclose(normalised, fixture[f"{name}_normalised"], rtol=RTOL, atol=ATOL)
     unique = jnp.asarray(fixture[f"{case}_unique"])
     np.testing.assert_allclose(
@@ -124,12 +124,12 @@ def test_layout_validation() -> None:
         ShapleyLayout(1, 1)
 
 
-def _characteristic(fixture: FixtureArrays, shape: CaseLayout, kind: Kind) -> CharacteristicModel:
+def _characteristic(fixture: FixtureArrays, shape: CaseLayout, kind: Kind) -> MaskedCharacteristic:
     config = CharacteristicConfig(kind, hidden_widths=(shape.width,) * 2)
     model = CharacteristicModel(characteristic_network(shape.features, shape.actions, config), rngs=nnx.Rngs(0))
     # Shapley capture follows characteristic training, so it explains the trained characteristic.
     assign(model.mlp, fixture, f"{shape.name}_char_{kind}_final")
-    return model
+    return MaskedCharacteristic(model)
 
 
 def _shapley(fixture: FixtureArrays, shape: CaseLayout, kind: Kind, prefix: str) -> ShapleyModel:
