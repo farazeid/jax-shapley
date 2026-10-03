@@ -1,17 +1,27 @@
 """Compare PyTorch FastSVERL and JAX explanation runs: exact-loss outcomes and training speed.
 
-Acceptance rule (stated before the runs): for every configuration, a two-sided Welch
-t-test on log10 of the final exact loss across seeds must give p >= 0.01. Hypercube
-runs apply the same test to the number of batches until the exact-loss stopping
-condition. The ports use independent random streams, so the agents, buffers and
-coalitions differ: the comparison is distributional, not seed-for-seed.
+Metrics are log10 of each run's final exact loss and, for Hypercube, of the batches
+until the exact-loss stopping condition. The ports use independent random streams,
+so agents, buffers and coalitions differ: the comparison is distributional.
+
+Equivalence is tested in two steps, in this order:
+
+1. `--mode margins` reads only the JAX runs. Each metric's margin is the 95th
+   percentile of |mean(A) - mean(B)| over random 10-vs-10 splits of the JAX seeds:
+   the difference two halves of one implementation show by chance. It has a floor
+   of log10(1.02). The margins are committed before any upstream comparison.
+2. `--mode compare` requires the committed margins. Each metric passes TOST at
+   alpha 0.05 when the 90% Welch interval of the JAX-minus-upstream mean log10
+   difference lies inside (-margin, margin). Welch difference p-values are kept
+   for reference.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import log10
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -32,55 +42,139 @@ class Args:
     speed: Path = Path("docs/data/explanations-port--speed.csv")
     curves_svg: Path = Path("docs/figures/explanations-port--exact-loss.svg")
     hypercube_svg: Path = Path("docs/figures/explanations-port--hypercube.svg")
+    outcome_svg: Path = Path("docs/figures/explanations-port--outcome-exact-loss.svg")
+    margins: Path = Path("docs/data/explanations-port--margins.csv")
+    mode: Literal["margins", "compare"] = "compare"
     alpha: float = 0.01
+    tost_alpha: float = 0.05
+    bootstrap: int = 10_000
+    margin_floor: float = log10(1.02)
 
 
 def main() -> None:
     args = tyro.cli(Args)
+    if args.mode == "margins":
+        # Pilot: JAX runs only, before any cross-framework statistic exists.
+        jax_runs = pd.read_csv(args.jax_runs)
+        jax_runs["exact_char"] = jax_runs["exact_char"].fillna("")
+        margins = margins_from(final_metrics(jax_runs), args.bootstrap, args.margin_floor)
+        args.margins.parent.mkdir(parents=True, exist_ok=True)
+        margins.to_csv(args.margins, index=False)
+        print(margins.to_string(index=False))
+        return
+    if not args.margins.exists():
+        raise SystemExit(f"commit the pilot margins first: {args.margins} (--mode margins)")
     runs = pd.concat([pd.read_csv(args.upstream_runs), pd.read_csv(args.jax_runs)], ignore_index=True)
     runs["exact_char"] = runs["exact_char"].fillna("")
     timing = pd.concat([pd.read_csv(args.upstream_timing), pd.read_csv(args.jax_timing)], ignore_index=True)
     timing["exact_char"] = timing["exact_char"].fillna("")
-    summary = summarize(runs, args.alpha)
+    margins = pd.read_csv(args.margins)
+    margins["exact_char"] = margins["exact_char"].fillna("")
+    summary = summarize(final_metrics(runs), margins, args.alpha, args.tost_alpha)
     speed = speeds(timing)
-    for path in (args.summary, args.speed, args.curves_svg, args.hypercube_svg):
+    for path in (args.summary, args.speed, args.curves_svg, args.hypercube_svg, args.outcome_svg):
         path.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.summary, index=False)
     speed.to_csv(args.speed, index=False)
     plot_curves(runs, args.curves_svg)
+    plot_outcome_curves(runs, args.outcome_svg)
     plot_hypercube(summary, args.hypercube_svg)
-    failed = summary[summary["p_value"] < args.alpha] if not summary.empty else summary
     print(summary.to_string(index=False))
     print(speed.to_string(index=False))
-    print(f"{len(failed)} of {len(summary)} comparisons below p = {args.alpha}")
+    equivalent = int(summary["equivalent"].sum()) if not summary.empty else 0
+    print(f"{equivalent} of {len(summary)} comparisons equivalent (TOST, alpha {args.tost_alpha})")
 
 
-def summarize(runs: pd.DataFrame, alpha: float) -> pd.DataFrame:
-    """Final exact loss per run (and batches to stopping for Hypercube), compared across frameworks."""
-    last = runs.sort_values("step").groupby([*KEYS, "framework", "seed"], as_index=False).last()
+def final_metrics(runs: pd.DataFrame) -> pd.DataFrame:
+    """One row per run and metric: log10 of the final exact loss (and of batches to stopping for Hypercube).
+
+    Runs whose final exact loss is not finite and positive are kept with a NaN value and counted as failures.
+    """
+    logged = runs.dropna(subset=["exact_loss"])
+    last = logged.sort_values("step").groupby([*KEYS, "framework", "seed"], as_index=False).last()
+    frames = []
+    for metric, column in (("final_exact_loss", "exact_loss"), ("batches_to_stop", "step")):
+        selected = last if metric == "final_exact_loss" else last[last["environment"].str.startswith("hypercube")]
+        values = selected[column].to_numpy(np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            logs = np.where(np.isfinite(values) & (values > 0), np.log10(values), np.nan)
+        frame = selected[[*KEYS, "framework", "seed"]].copy()
+        frame["metric"], frame["log10"] = metric, logs
+        frames.append(frame)
+    return pd.DataFrame(pd.concat(frames, ignore_index=True))
+
+
+def margins_from(finals: pd.DataFrame, draws: int, floor: float) -> pd.DataFrame:
+    """95th percentile of the absolute half-difference over random equal splits of each metric's seeds."""
     rows = []
-    for group_key, group in last.groupby(KEYS):
-        key = cast(tuple[str, str, str, str], group_key)  # One value per grouping column.
-        metrics = [("final_exact_loss", "exact_loss")]
-        if str(key[0]).startswith("hypercube"):
-            metrics.append(("batches_to_stop", "step"))
-        for metric, column in metrics:
-            upstream = group[group["framework"] == "upstream"][column].to_numpy(np.float64)
-            jax = group[group["framework"] == "jax"][column].to_numpy(np.float64)
-            if upstream.size < 2 or jax.size < 2:
-                continue
-            p_value = float(stats.ttest_ind(np.log10(jax), np.log10(upstream), equal_var=False).pvalue)
-            rows.append({
-                **dict(zip(KEYS, key, strict=True)),
-                "metric": metric,
-                "upstream_runs": upstream.size,
-                "jax_runs": jax.size,
-                "upstream_geometric_mean": float(10 ** np.log10(upstream).mean()),
-                "jax_geometric_mean": float(10 ** np.log10(jax).mean()),
-                "ratio": float(10 ** (np.log10(jax).mean() - np.log10(upstream).mean())),
-                "p_value": p_value,
-                "consistent": p_value >= alpha,
-            })
+    for group_key, group in finals.groupby([*KEYS, "metric"]):
+        key = cast(tuple[str, str, str, str, str], group_key)  # One value per grouping column.
+        values = group["log10"].to_numpy(np.float64)
+        values = values[np.isfinite(values)]
+        half = values.size // 2
+        if half < 2:
+            continue
+        rng = np.random.default_rng(0)
+        differences = np.empty(draws)
+        for draw in range(draws):
+            order = rng.permutation(values.size)
+            differences[draw] = values[order[:half]].mean() - values[order[half : 2 * half]].mean()
+        margin = max(float(np.quantile(np.abs(differences), 0.95)), floor)
+        rows.append({
+            **dict(zip([*KEYS, "metric"], key, strict=True)),
+            "jax_runs": values.size,
+            "split": f"{half} vs {half}",
+            "margin_log10": margin,
+            "margin_ratio": 10**margin,
+        })
+    return pd.DataFrame(rows)
+
+
+def summarize(finals: pd.DataFrame, margins: pd.DataFrame, alpha: float, tost_alpha: float) -> pd.DataFrame:
+    """TOST equivalence of mean log10 metrics within the pilot margins; Welch difference tests for reference."""
+    margin_of = {tuple(row[[*KEYS, "metric"]]): float(row["margin_log10"]) for _, row in margins.iterrows()}
+    rows = []
+    for group_key, group in finals.groupby([*KEYS, "metric"]):
+        key = cast(tuple[str, str, str, str, str], group_key)  # One value per grouping column.
+        if key not in margin_of:
+            continue
+        upstream_all = group[group["framework"] == "upstream"]["log10"].to_numpy(np.float64)
+        jax_all = group[group["framework"] == "jax"]["log10"].to_numpy(np.float64)
+        upstream, jax = upstream_all[np.isfinite(upstream_all)], jax_all[np.isfinite(jax_all)]
+        if upstream.size < 2 or jax.size < 2:
+            continue
+        margin = margin_of[key]
+        difference = float(jax.mean() - upstream.mean())
+        jax_variance, upstream_variance = jax.var(ddof=1) / jax.size, upstream.var(ddof=1) / upstream.size
+        error = float(np.sqrt(jax_variance + upstream_variance))
+        freedom = float(
+            (jax_variance + upstream_variance) ** 2
+            / (jax_variance**2 / (jax.size - 1) + upstream_variance**2 / (upstream.size - 1))
+        )
+        half_width = float(stats.t.ppf(1 - tost_alpha, freedom)) * error
+        low, high = difference - half_width, difference + half_width
+        tost_p = max(
+            float(stats.t.sf((difference + margin) / error, freedom)),
+            float(stats.t.cdf((difference - margin) / error, freedom)),
+        )
+        p_value = float(stats.ttest_ind(jax, upstream, equal_var=False).pvalue)
+        rows.append({
+            **dict(zip([*KEYS, "metric"], key, strict=True)),
+            "upstream_runs": upstream.size,
+            "jax_runs": jax.size,
+            "upstream_failed": int(upstream_all.size - upstream.size),
+            "jax_failed": int(jax_all.size - jax.size),
+            "upstream_geometric_mean": float(10 ** upstream.mean()),
+            "jax_geometric_mean": float(10 ** jax.mean()),
+            "ratio": float(10**difference),
+            "ratio_ci_low": float(10**low),
+            "ratio_ci_high": float(10**high),
+            "margin_ratio": float(10**margin),
+            "tost_p_value": tost_p,
+            "equivalent": low > -margin and high < margin,
+            "p_value": p_value,
+            "consistent": p_value >= alpha,
+        })
     return pd.DataFrame(rows)
 
 
@@ -147,6 +241,57 @@ def plot_curves(runs: pd.DataFrame, path: Path) -> None:
         0.5, 0.965, "Geometric mean over seeds; shading: 95% t interval of the log mean", ha="center", fontsize=9
     )
     figure.tight_layout(rect=(0, 0, 1, 0.95))
+    figure.savefig(path)
+    plt.close(figure)
+    _normalize_svg(path)
+
+
+def plot_outcome_curves(runs: pd.DataFrame, path: Path) -> None:
+    """Outcome characteristics and Shapley models: exact loss per logged step, geometric mean over seeds."""
+    panels = [
+        (f"{case}-outcome", kind, stage, exact_char)
+        for case, explained in (("gridworld", "on_policy"), ("mastermind222", "off_policy"))
+        for kind, stage, exact_char in (
+            ("on_policy", "outcome", "with"),
+            ("on_policy", "outcome", "without"),
+            ("off_policy", "outcome", "with"),
+            ("off_policy", "outcome", "without"),
+            (explained, "shapley", "w_policy"),
+            (explained, "shapley", "wo_policy"),
+            (explained, "shapley", "wo_perf"),
+        )
+    ]
+    if runs[runs["environment"].str.endswith("-outcome")].empty:
+        return
+    plt.style.use("seaborn-v0_8-whitegrid")
+    figure, axes = plt.subplots(2, 7, figsize=(26, 7.5))
+    for axis, (environment, kind, stage, exact_char) in zip(axes.flat, panels, strict=True):
+        selection = runs[
+            (runs["environment"] == environment)
+            & (runs["kind"] == kind)
+            & (runs["stage"] == stage)
+            & (runs["exact_char"] == exact_char)
+        ].dropna(subset=["exact_loss"])
+        for framework, color, label in (("upstream", "#555555", "PyTorch (upstream)"), ("jax", "#2070b4", "JAX")):
+            data = selection[selection["framework"] == framework].pivot_table(
+                index="step", columns="seed", values="exact_loss"
+            )
+            data = data[(data > 0).all(axis=1) & np.isfinite(data).all(axis=1)]
+            if data.empty or data.shape[1] < 2:
+                continue
+            logs = np.log10(data.to_numpy(np.float64))
+            mean = logs.mean(axis=1)
+            half = stats.t.ppf(0.975, logs.shape[1] - 1) * logs.std(axis=1, ddof=1) / np.sqrt(logs.shape[1])
+            axis.plot(data.index, 10**mean, color=color, label=label, linewidth=1.5)
+            axis.fill_between(data.index, 10 ** (mean - half), 10 ** (mean + half), color=color, alpha=0.15)
+        title = f"{environment.removesuffix('-outcome')} {kind.replace('_', '-')} {stage} ({exact_char})"
+        axis.set_title(title, fontsize=9)
+        axis.set_yscale("log")
+        axis.set_xlabel("global step" if stage == "outcome" and kind == "on_policy" else "logged step", fontsize=8)
+        axis.set_ylabel("exact loss", fontsize=8)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+    figure.tight_layout(rect=(0, 0, 1, 0.94))
     figure.savefig(path)
     plt.close(figure)
     _normalize_svg(path)
