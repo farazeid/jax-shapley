@@ -1,14 +1,20 @@
 # Quantitative Comparison between PyTorch and JAX explanations of FastSVERL
 
-This report compares the JAX behaviour and prediction explanations with the unchanged PyTorch FastSVERL code at commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`. Both sides train the full agent → characteristic → Shapley pipeline from scratch with the paper's settings. The two implementations use independent random streams, so their agents, buffers and coalitions differ. The comparison is therefore distributional (over 5 seeds), not seed for seed. Deterministic, controlled-input parity of every numerical unit is established separately by the fixture tests described in the [explanations guide](Explanations.md).
+This report compares the JAX behaviour, prediction and outcome explanations with the unchanged PyTorch FastSVERL code at commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`. Both sides train the whole pipeline from scratch with the paper's settings, 20 seeds per configuration. The two implementations use independent random streams, so their agents, buffers and coalitions differ, and the comparison is distributional rather than seed for seed. Deterministic parity of every numerical unit, given identical inputs, is established separately by the fixture tests in the [explanations guide](Explanations.md).
 
 ## Summary
 
-- **Fidelity:** 29 of 32 comparisons meet the pre-stated acceptance rule, which is a two-sided Welch t-test on log₁₀ of the final exact loss (and, for Hypercube, of the batches until the exact-loss stopping condition) with p ≥ 0.01. The 3 that do not meet it are a known confound in the paper's protocol, explained below. All three pass under the matched protocol (p = 0.59–0.98).
-- **Speed (CPU):** steady-state training epochs are **2.7–4.7× faster** in JAX for every stage. DQN agent training is **4.6–6.3× faster**. End-to-end process wall time, including start-up and compilation, is **1.2–1.7× faster**. At this small scale it is dominated by fixed per-process costs.
-- **Bugs found by the comparison:**
-  - **A settings bug, fixed:** the Hypercube prediction recipe used the wrong Shapley stopping threshold.
-  - **An XLA CPU miscompilation, worked around:** see [Findings during validation](#findings-during-validation).
+- **Pre-registered equivalence test: 32 of 60 comparisons pass.** The test, its margins and the margin rule were committed before any upstream result existed (commit `f961aef`). The test has low power: a simulation shows that two identical implementations fail it about 34% of the time at 20 vs 20 seeds (see [Power](#power-of-the-pre-registered-test)), so roughly 20 failures are expected by chance alone.
+- **Failure breakdown:**
+  - 20 are inconclusive: the 90% interval of the JAX/upstream ratio contains 1 but is wider than the margin.
+  - 3 are the known paper-protocol confound (below); their matched-protocol counterparts pass.
+  - 5 have intervals excluding 1:
+    - two characteristic rows differ by 2.5% and 5.6% (p ≈ 0.07)
+    - the two Mastermind behaviour Shapley rows without the exact characteristic are 1.3× (p = 0.03 and 0.045); both protocols explain the same single agent per framework
+    - Hypercube 3×2 behaviour Shapley stopping (0.80×, p = 0.002) was investigated: it comes from the DQN agents, not the explanation code (see [Hypercube 3×2](#hypercube-32-shapley-stopping))
+  - No difference survives a correction for 60 comparisons.
+- **Outcome explanations** (new in this run) show no systematic difference. Every outcome comparison's interval contains 1.
+- **Speed (CPU):** per seed and epoch, JAX trains **5.4–10× faster** for every stage. End-to-end wall time, including start-up and compilation, is **4–12× faster** for Gridworld and Mastermind, where each stage trains all 20 seeds in one compiled program. Hypercube is **2.2–2.5× faster**, because each seed's agent still trains in its own process.
 
 ## Setup
 
@@ -17,104 +23,164 @@ This report compares the JAX behaviour and prediction explanations with the unch
 | Machine | Apple M4 Pro, 14 CPU cores, 48 GB, macOS 27.0.1; CPU only |
 | JAX side | jax 0.11.0, flax 0.12.8, optax 0.2.8, `JAX_PLATFORMS=cpu` |
 | PyTorch side | torch 2.6.0, gymnasium 0.29.1, numpy < 2, Python 3.12, pinned FastSVERL checkout installed in editable mode |
-| Seeds | 5 per configuration (paper: 20) |
-| Execution | Sequential, one run at a time, on an otherwise idle machine |
+| Seeds | 20 per configuration, as in the paper |
+| Execution | Sequential on an otherwise idle machine; JAX trains each stage's 20 seeds as one sweep |
 
-**Protocol.** Each domain follows the paper.
+**Protocols.**
 
-- **Gridworld and Mastermind-222:**
-  - one DQN agent (seed 1)
-  - characteristic seeds 1–5
-  - Shapley seeds 1–5, each with and without the exact characteristic as the exact-loss ground truth
-- **Hypercube:** cubes 3×2, 3×3 and 2×5 (both kinds). Each seed trains its own agent, characteristic and Shapley model, with the characteristic stopping at exact loss 0.01. The Shapley model stops at 0.001 (behaviour) or 0.01 (prediction), always without the exact characteristic, with `track_batch`.
+- **Gridworld and Mastermind-222 (paper protocol):** one DQN agent (seed 1); characteristic seeds 1–20; Shapley seeds 1–20 all explaining the *first* characteristic, each with and without the exact characteristic as ground truth.
+- **Matched protocol (`<domain>-matched`):** identical, except Shapley seed *s* explains characteristic seed *s*, so seeds are independent replicates of both stages.
+- **Outcome (`<domain>-outcome`, matched replicates):** seed *s* trains its own agent, behaviour characteristic, outcome characteristics (on- and off-policy, each with and without the exact behaviour characteristic) and outcome Shapley models. The Shapley models explain the variant upstream's driver uses (on-policy for Gridworld, off-policy for Mastermind) in the driver's three groups:
+  - `w_policy`: exact outcome values conditioned on the exact behaviour characteristic
+  - `wo_policy`: exact outcome values conditioned on the learnt behaviour characteristic
+  - `wo_perf`: the learnt outcome characteristic as ground truth
+- **Hypercube:** cubes 3×2, 3×3 and 2×5, both kinds; each seed trains its own agent, characteristic and Shapley model, stopping at the paper's exact-loss conditions.
 
-All settings are the upstream drivers' own dataclass defaults plus their per-domain values, encoded on the JAX side in `experiments/explanations/`.
+All settings are the upstream drivers' dataclass defaults plus their per-domain values, encoded on the JAX side in `experiments/explanations/`.
 
-**Matched protocol.** The paper's protocol has every Shapley seed explain the *first* characteristic. That is fine for producing explanations, but it means the five Shapley seeds share one characteristic. The matched protocol keeps everything else identical and pairs Shapley seed *s* with characteristic seed *s*. Both frameworks run both protocols, labelled `<domain>` and `<domain>-matched`.
+**Upstream harness.** Each upstream run script executes unchanged in its own process. Five things differ from upstream's own drivers:
 
-**Upstream harness.** Each upstream run script executes unchanged in its own process. Four things in how the scripts are launched differ from upstream's own drivers:
-
-- `import fastsverl.envs` runs first. The committed run scripts never import it, so gym cannot find the registered environments without it (`NameNotFound: Environment GWB doesn't exist`).
+- `import fastsverl.envs` runs first. The committed run scripts never import it, so gym cannot find the registered environments without it.
 - Weights & Biases tracking is off.
-- The seed count is reduced.
-- `save_explanations` is set to `False`. The Gridworld Shapley arguments omit this field, which the run script reads after training.
+- `save_explanations` is off.
+- Outcome runs time out after an hour, because a conditioned policy that can loop forever makes upstream value iteration never terminate. No run hit the limit.
+- Metrics are read back from upstream's TensorBoard logs.
 
-Metrics are read back from upstream's TensorBoard logs.
+## Statistical method
+
+The metric is log10 of each run's final exact loss, and for Hypercube also of the batches until the exact-loss stopping condition.
+
+1. **Margins first, from JAX alone.** For each metric, the margin is the 95th percentile of the absolute difference between the mean log10 values of two random halves (10 vs 10) of the JAX seeds, with a floor of log10(1.02). This is the difference two halves of one implementation show by chance. The margins were computed with `compare.py --mode margins` and committed (`docs/data/explanations-port--margins.csv`, commit `f961aef`) before the upstream side ran.
+2. **Equivalence (TOST, α = 0.05).** A comparison passes when the 90% Welch interval of the JAX-minus-upstream mean log10 difference lies inside ±margin.
+3. Welch difference p-values are kept for reference.
+
+### Power of the pre-registered test
+
+The margin turned out to be about as wide as the interval it must contain. Simulating two identical normal implementations with 20 seeds each, deriving the margin from one of them exactly as above, the test fails **34%** of the time. A pass is therefore strong evidence of equivalence; a failure with an interval containing 1 is not evidence of a difference. This should have been checked before committing the margin rule. It is reported here unchanged, rather than replaced after seeing the data.
 
 ## Fidelity
 
-Values are geometric means over seeds. "Ratio" is JAX ÷ upstream. "Exact char" is the Shapley exact-loss ground truth (`with_exact_char`).
+Values are geometric means over seeds. "Ratio" is JAX ÷ upstream with its 90% interval; "Margin" is the pre-registered equivalence bound on that ratio. "Group" is the exact-loss ground truth (`with`/`without` the exact characteristic) or the outcome Shapley group.
 
-| Environment | Kind | Stage | Exact char | Metric | Upstream | JAX | Ratio | p | Consistent |
+| Environment | Kind | Stage | Group | Metric | Upstream | JAX | Ratio (90% CI) | Margin | Result |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gridworld | behaviour | characteristic | — | final exact loss | 0.000109 | 0.000139 | 1.28 | 0.409 | yes |
-| gridworld | behaviour | shapley | with | final exact loss | 0.000199 | 0.00012 | 0.61 | 0.000 | **no** (confounded) |
-| gridworld | behaviour | shapley | without | final exact loss | 5.25e-12 | 9.13e-12 | 1.74 | 0.867 | yes |
-| gridworld | prediction | characteristic | — | final exact loss | 0.128 | 0.092 | 0.72 | 0.215 | yes |
-| gridworld | prediction | shapley | with | final exact loss | 0.0742 | 0.0451 | 0.61 | 0.000 | **no** (confounded) |
-| gridworld | prediction | shapley | without | final exact loss | 4.76e-09 | 1e-10 | 0.02 | 0.149 | yes |
-| gridworld-matched | behaviour | shapley | with | final exact loss | 0.000146 | 0.000141 | 0.96 | 0.937 | yes |
-| gridworld-matched | behaviour | shapley | without | final exact loss | 1.22e-11 | 1.24e-11 | 1.02 | 0.995 | yes |
-| gridworld-matched | prediction | shapley | with | final exact loss | 0.0758 | 0.0667 | 0.88 | 0.589 | yes |
-| gridworld-matched | prediction | shapley | without | final exact loss | 5.74e-10 | 9.05e-10 | 1.58 | 0.885 | yes |
-| hypercube-2x5 | behaviour | shapley | without | final exact loss | 0.000736 | 0.000779 | 1.06 | 0.566 | yes |
-| hypercube-2x5 | behaviour | shapley | without | batches to stop | 424 | 440 | 1.04 | 0.545 | yes |
-| hypercube-2x5 | prediction | shapley | without | final exact loss | 0.0087 | 0.00854 | 0.98 | 0.845 | yes |
-| hypercube-2x5 | prediction | shapley | without | batches to stop | 819 | 881 | 1.08 | 0.116 | yes |
-| hypercube-3x2 | behaviour | shapley | without | final exact loss | 6.54e-05 | 0.000227 | 3.47 | 0.408 | yes |
-| hypercube-3x2 | behaviour | shapley | without | batches to stop | 223 | 165 | 0.74 | 0.063 | yes |
-| hypercube-3x2 | prediction | shapley | without | final exact loss | 0.00351 | 0.00312 | 0.89 | 0.739 | yes |
-| hypercube-3x2 | prediction | shapley | without | batches to stop | 332 | 318 | 0.96 | 0.545 | yes |
-| hypercube-3x3 | behaviour | shapley | without | final exact loss | 0.000761 | 0.000668 | 0.88 | 0.322 | yes |
-| hypercube-3x3 | behaviour | shapley | without | batches to stop | 345 | 409 | 1.19 | 0.117 | yes |
-| hypercube-3x3 | prediction | shapley | without | final exact loss | 0.0067 | 0.00774 | 1.16 | 0.435 | yes |
-| hypercube-3x3 | prediction | shapley | without | batches to stop | 782 | 653 | 0.83 | 0.072 | yes |
-| mastermind222 | behaviour | characteristic | — | final exact loss | 0.00191 | 0.00187 | 0.98 | 0.376 | yes |
-| mastermind222 | behaviour | shapley | with | final exact loss | 0.00297 | 0.00283 | 0.95 | 0.732 | yes |
-| mastermind222 | behaviour | shapley | without | final exact loss | 0.000402 | 0.000426 | 1.06 | 0.797 | yes |
-| mastermind222 | prediction | characteristic | — | final exact loss | 0.000612 | 0.000677 | 1.11 | 0.692 | yes |
-| mastermind222 | prediction | shapley | with | final exact loss | 0.00135 | 0.000603 | 0.45 | 0.003 | **no** (confounded) |
-| mastermind222 | prediction | shapley | without | final exact loss | 0.000561 | 0.000452 | 0.81 | 0.527 | yes |
-| mastermind222-matched | behaviour | shapley | with | final exact loss | 0.00292 | 0.00291 | 1.00 | 0.980 | yes |
-| mastermind222-matched | behaviour | shapley | without | final exact loss | 0.000406 | 0.000431 | 1.06 | 0.787 | yes |
-| mastermind222-matched | prediction | shapley | with | final exact loss | 0.000927 | 0.000787 | 0.85 | 0.651 | yes |
-| mastermind222-matched | prediction | shapley | without | final exact loss | 0.000531 | 0.000464 | 0.87 | 0.685 | yes |
+| gridworld | behaviour | characteristic | — | final exact loss | 0.000103 | 0.000115 | 1.11 (0.93–1.34) | ×1.44 | equivalent |
+| gridworld | behaviour | shapley | with | final exact loss | 0.000199 | 0.00012 | 0.61 (0.61–0.61) | ×1.02 | **not equivalent** (paper-protocol confound) |
+| gridworld | behaviour | shapley | without | final exact loss | 1.03e-11 | 1.5e-11 | 1.46 (0.08–25.81) | ×128.05 | equivalent |
+| gridworld | prediction | characteristic | — | final exact loss | 0.117 | 0.102 | 0.87 (0.71–1.06) | ×1.37 | inconclusive |
+| gridworld | prediction | shapley | with | final exact loss | 0.0743 | 0.0451 | 0.61 (0.61–0.61) | ×1.02 | **not equivalent** (paper-protocol confound) |
+| gridworld | prediction | shapley | without | final exact loss | 8.21e-10 | 1.19e-10 | 0.15 (0.02–1.22) | ×29.27 | inconclusive |
+| gridworld-matched | behaviour | shapley | with | final exact loss | 0.000206 | 0.000179 | 0.87 (0.57–1.33) | ×2.00 | equivalent |
+| gridworld-matched | behaviour | shapley | without | final exact loss | 1.29e-11 | 1.86e-11 | 1.44 (0.08–24.60) | ×104.31 | equivalent |
+| gridworld-matched | prediction | shapley | with | final exact loss | 0.0755 | 0.0696 | 0.92 (0.76–1.12) | ×1.34 | equivalent |
+| gridworld-matched | prediction | shapley | without | final exact loss | 3.38e-10 | 2.35e-09 | 6.94 (0.91–53.13) | ×17.30 | inconclusive |
+| gridworld-outcome | behaviour | characteristic | — | final exact loss | 0.000103 | 0.000115 | 1.11 (0.93–1.34) | ×1.44 | equivalent |
+| gridworld-outcome | off_policy | outcome | with | final exact loss | 0.0236 | 0.0206 | 0.87 (0.39–1.94) | ×3.47 | equivalent |
+| gridworld-outcome | off_policy | outcome | without | final exact loss | 0.00537 | 0.00402 | 0.75 (0.38–1.48) | ×2.63 | inconclusive |
+| gridworld-outcome | on_policy | outcome | with | final exact loss | 0.0865 | 0.121 | 1.40 (0.96–2.05) | ×1.70 | inconclusive |
+| gridworld-outcome | on_policy | outcome | without | final exact loss | 0.119 | 0.146 | 1.22 (0.75–1.99) | ×1.61 | inconclusive |
+| gridworld-outcome | on_policy | shapley | w_policy | final exact loss | 0.0775 | 0.111 | 1.43 (0.95–2.16) | ×1.83 | inconclusive |
+| gridworld-outcome | on_policy | shapley | wo_perf | final exact loss | 7.73e-10 | 1.05e-09 | 1.36 (0.12–15.41) | ×47.60 | equivalent |
+| gridworld-outcome | on_policy | shapley | wo_policy | final exact loss | 0.104 | 0.132 | 1.27 (0.76–2.12) | ×1.69 | inconclusive |
+| hypercube-2x5 | behaviour | characteristic | — | batches to stop | 608 | 608 | 1.00 (1.00–1.00) | ×1.02 | equivalent |
+| hypercube-2x5 | behaviour | characteristic | — | final exact loss | 0.00816 | 0.00813 | 1.00 (0.94–1.05) | ×1.10 | equivalent |
+| hypercube-2x5 | behaviour | shapley | without | batches to stop | 446 | 458 | 1.03 (0.97–1.09) | ×1.09 | equivalent |
+| hypercube-2x5 | behaviour | shapley | without | final exact loss | 0.000749 | 0.000785 | 1.05 (0.97–1.13) | ×1.12 | inconclusive |
+| hypercube-2x5 | prediction | characteristic | — | batches to stop | 4.24e+03 | 4.25e+03 | 1.00 (0.97–1.04) | ×1.06 | equivalent |
+| hypercube-2x5 | prediction | characteristic | — | final exact loss | 0.00918 | 0.00919 | 1.00 (0.97–1.04) | ×1.06 | equivalent |
+| hypercube-2x5 | prediction | shapley | without | batches to stop | 936 | 936 | 1.00 (0.95–1.06) | ×1.07 | equivalent |
+| hypercube-2x5 | prediction | shapley | without | final exact loss | 0.00773 | 0.00769 | 0.99 (0.91–1.08) | ×1.16 | equivalent |
+| hypercube-3x2 | behaviour | characteristic | — | batches to stop | 389 | 367 | 0.94 (0.90–0.99) | ×1.07 | **not equivalent** (interval excludes 1) |
+| hypercube-3x2 | behaviour | characteristic | — | final exact loss | 0.00674 | 0.00683 | 1.01 (0.91–1.12) | ×1.19 | equivalent |
+| hypercube-3x2 | behaviour | shapley | without | batches to stop | 207 | 165 | 0.80 (0.71–0.89) | ×1.18 | **not equivalent** (interval excludes 1) |
+| hypercube-3x2 | behaviour | shapley | without | final exact loss | 0.000199 | 0.000253 | 1.27 (0.57–2.84) | ×3.62 | equivalent |
+| hypercube-3x2 | prediction | characteristic | — | batches to stop | 939 | 918 | 0.98 (0.91–1.05) | ×1.05 | inconclusive |
+| hypercube-3x2 | prediction | characteristic | — | final exact loss | 0.00783 | 0.00804 | 1.03 (0.94–1.12) | ×1.14 | equivalent |
+| hypercube-3x2 | prediction | shapley | without | batches to stop | 310 | 325 | 1.05 (0.99–1.11) | ×1.09 | inconclusive |
+| hypercube-3x2 | prediction | shapley | without | final exact loss | 0.00291 | 0.00246 | 0.85 (0.57–1.25) | ×2.11 | equivalent |
+| hypercube-3x3 | behaviour | characteristic | — | batches to stop | 612 | 648 | 1.06 (0.99–1.13) | ×1.12 | inconclusive |
+| hypercube-3x3 | behaviour | characteristic | — | final exact loss | 0.00857 | 0.00838 | 0.98 (0.93–1.03) | ×1.09 | equivalent |
+| hypercube-3x3 | behaviour | shapley | without | batches to stop | 365 | 373 | 1.02 (0.95–1.10) | ×1.11 | equivalent |
+| hypercube-3x3 | behaviour | shapley | without | final exact loss | 0.000735 | 0.000716 | 0.97 (0.89–1.07) | ×1.15 | equivalent |
+| hypercube-3x3 | prediction | characteristic | — | batches to stop | 2.68e+03 | 2.79e+03 | 1.04 (0.94–1.15) | ×1.18 | equivalent |
+| hypercube-3x3 | prediction | characteristic | — | final exact loss | 0.00868 | 0.00904 | 1.04 (1.00–1.09) | ×1.06 | inconclusive |
+| hypercube-3x3 | prediction | shapley | without | batches to stop | 757 | 727 | 0.96 (0.89–1.03) | ×1.12 | inconclusive |
+| hypercube-3x3 | prediction | shapley | without | final exact loss | 0.00771 | 0.00709 | 0.92 (0.81–1.05) | ×1.24 | equivalent |
+| mastermind222 | behaviour | characteristic | — | final exact loss | 0.00196 | 0.00191 | 0.97 (0.95–1.00) | ×1.03 | **not equivalent** (interval excludes 1) |
+| mastermind222 | behaviour | shapley | with | final exact loss | 0.00273 | 0.00272 | 1.00 (0.92–1.09) | ×1.18 | equivalent |
+| mastermind222 | behaviour | shapley | without | final exact loss | 0.000329 | 0.000433 | 1.32 (1.07–1.62) | ×1.37 | **not equivalent** (interval excludes 1) |
+| mastermind222 | prediction | characteristic | — | final exact loss | 0.000729 | 0.000676 | 0.93 (0.76–1.13) | ×1.37 | equivalent |
+| mastermind222 | prediction | shapley | with | final exact loss | 0.00114 | 0.00062 | 0.54 (0.44–0.66) | ×1.44 | **not equivalent** (paper-protocol confound) |
+| mastermind222 | prediction | shapley | without | final exact loss | 0.000521 | 0.000506 | 0.97 (0.77–1.23) | ×1.43 | equivalent |
+| mastermind222-matched | behaviour | shapley | with | final exact loss | 0.00266 | 0.00278 | 1.04 (0.95–1.14) | ×1.18 | equivalent |
+| mastermind222-matched | behaviour | shapley | without | final exact loss | 0.000336 | 0.000431 | 1.29 (1.05–1.58) | ×1.39 | **not equivalent** (interval excludes 1) |
+| mastermind222-matched | prediction | shapley | with | final exact loss | 0.000809 | 0.000778 | 0.96 (0.72–1.29) | ×1.56 | equivalent |
+| mastermind222-matched | prediction | shapley | without | final exact loss | 0.000465 | 0.000548 | 1.18 (0.92–1.50) | ×1.48 | inconclusive |
+| mastermind222-outcome | behaviour | characteristic | — | final exact loss | 0.00203 | 0.00197 | 0.97 (0.93–1.01) | ×1.07 | inconclusive |
+| mastermind222-outcome | off_policy | outcome | with | final exact loss | 0.00825 | 0.00838 | 1.02 (0.82–1.26) | ×1.50 | equivalent |
+| mastermind222-outcome | off_policy | outcome | without | final exact loss | 0.000478 | 0.00035 | 0.73 (0.43–1.24) | ×2.25 | inconclusive |
+| mastermind222-outcome | off_policy | shapley | w_policy | final exact loss | 0.00263 | 0.00308 | 1.17 (0.88–1.56) | ×1.74 | equivalent |
+| mastermind222-outcome | off_policy | shapley | wo_perf | final exact loss | 0.000753 | 0.000903 | 1.20 (0.88–1.64) | ×1.57 | inconclusive |
+| mastermind222-outcome | off_policy | shapley | wo_policy | final exact loss | 0.00093 | 0.00115 | 1.24 (0.94–1.63) | ×1.49 | inconclusive |
+| mastermind222-outcome | on_policy | outcome | with | final exact loss | 0.0131 | 0.011 | 0.84 (0.60–1.17) | ×1.69 | equivalent |
+| mastermind222-outcome | on_policy | outcome | without | final exact loss | 0.014 | 0.0111 | 0.79 (0.62–1.01) | ×1.41 | inconclusive |
 
-**Why the three confounded rows fail.** With the exact characteristic as ground truth, a Shapley model's exact loss is dominated by the error of the characteristic it was trained on. Under the paper's protocol that is one characteristic for all five Shapley seeds. In Gridworld the five with-exact losses within each framework agree to within 0.05% (coefficient of variation below 0.001), so the test compares two single samples of characteristic quality, with spuriously tiny variance. The characteristic comparisons themselves pass, and so do the without-exact-characteristic comparisons, which measure the Shapley fit alone. The matched protocol restores independent replicates, and all of its with-exact comparisons pass.
+**Paper-protocol confound.** With the exact characteristic as ground truth, a Shapley model's exact loss is dominated by the error of the characteristic it explains. Under the paper's protocol all 20 Shapley seeds explain one characteristic, so within each framework the 20 losses nearly coincide and the test compares two single samples of characteristic quality. The matched protocol restores independent replicates, and its with-exact-characteristic comparisons pass or are inconclusive.
+
+**Agent dependence.** The Gridworld and Mastermind single-agent cases (both protocols) explain one agent per framework, so a difference between those two agents affects every row of that domain. The Mastermind behaviour Shapley rows without the exact characteristic (1.3× under both protocols) may reflect this; it is not tested here. The outcome cases, which train an agent per seed, include behaviour characteristics (0.97× for Mastermind, interval containing 1) but no behaviour Shapley models.
 
 ![Exact-loss curves for Gridworld and Mastermind-222](figures/explanations-port--exact-loss.svg)
 
+![Outcome characteristic and Shapley exact-loss curves](figures/explanations-port--outcome-exact-loss.svg)
+
 ![Hypercube batches until the exact-loss condition](figures/explanations-port--hypercube.svg)
+
+### Hypercube 3×2 Shapley stopping
+
+The one difference that recurred across independent runs (0.74× at 5 seeds, 0.80× at 20, p = 0.002) is the number of batches the Hypercube 3×2 behaviour Shapley model needs to reach exact loss 0.001. The metric only counts whole epochs: every run stops after epoch 1, 2 or 3 (76 batches each). JAX stops at epoch 1 in 16 of 20 seeds, upstream in 7. A controlled diagnostic (scratch scripts, not part of the repository) isolated the source:
+
+1. **Shapley stage, identical inputs.** Upstream's agents, characteristics and buffers were dumped for 6 seeds. On each characteristic, 32 upstream and 32 JAX Shapley models were trained for one epoch. The JAX/upstream ratio of the epoch-1 exact loss was 0.90–1.15 per characteristic (about 1.01 overall). **The Shapley stage matches.**
+2. **Characteristic stage on upstream's agents.** JAX characteristics trained on the same upstream agents (16 seeds each) reproduce each agent's difficulty: upstream's "hard" agents gave 4.0e-3 and 2.8e-3 in JAX against 3.6e-3 and 2.8e-3 upstream, the easy ones about 4–5e-4 on both sides.
+3. **Agents.** Difficulty is set by which of the equally short routes to the goal the greedy agent learns. Agents following an L-shaped route (all moves along one axis first) give Shapley problems about 7× harder than agents following a zigzag route. Over seeds 1–20, upstream agents learned an L-shaped route in 5 of 20 seeds and JAX agents in 1 of 20 (Fisher p ≈ 0.18).
+
+The difference therefore comes from the DQN agents' route preference, amplified by a heavy-tailed, epoch-quantised metric; the explanation code reproduces upstream given the same agent. Whether JAX DQN's route preference differs from upstream's in general is an open question for the DQN port; at 20 seeds the evidence is weak.
 
 ## Speed
 
 **How each column is measured:**
 
-- **Median epoch:** the median interval between consecutive epoch log entries, which is steady-state compute.
-- **Mean epoch:** the whole training loop divided by its epochs. It includes JAX's full-state checkpoints, about 0.1 s each, written every tenth of the epochs. Upstream only saves at the end, so for the 20–80-epoch Gridworld and Mastermind runs this overhead dominates the JAX mean. Hypercube runs stop long before their first checkpoint.
-- **Total wall:** each process from launch to exit, summed over seeds. It includes interpreter start-up, imports, buffer collection and, for JAX, compilation. A JAX Hypercube "combined" chain is three processes (agent, characteristic, Shapley); upstream runs them in one.
+- **Median epoch:** the median interval between consecutive epoch log entries, i.e. steady-state compute. A JAX sweep advances all 20 seeds in each step, so its interval is divided by 20 (time per seed and epoch). On-policy outcome runs log every 100 environment steps rather than per epoch.
+- **Total wall:** each process from launch to exit, summed. It includes interpreter start-up, imports, buffer collection and, for JAX, compilation. A JAX Hypercube chain runs one process per seed's agent plus one sweep per stage; upstream runs each seed's whole chain in one process.
 
-| Environment | Stage | Upstream median epoch (ms) | JAX median epoch (ms) | Median speedup | Upstream mean epoch (ms) | JAX mean epoch (ms) | Upstream total wall (s) | JAX total wall (s) | Wall speedup |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gridworld | agent | — | — | — | — | — | 27.8 | 4.4 | 6.3× |
-| gridworld | characteristic | 18.4 | 5.1 | 3.6× | 18.6 | 31.5 | 65.4 | 39.6 | 1.7× |
-| gridworld | shapley | 23.1 | 8.3 | 2.8× | 23.2 | 61.7 | 127.2 | 83.1 | 1.5× |
-| gridworld-matched | shapley | 22.9 | 8.4 | 2.7× | 23.3 | 62.2 | 128.7 | 82.3 | 1.6× |
-| hypercube-2x5 | characteristic | 27.5 | 6.6 | 4.2× | 28.4 | 6.6 | — | — | — |
-| hypercube-2x5 | shapley | 34.4 | 9.7 | 3.5× | 33.8 | 9.7 | — | — | — |
-| hypercube-2x5 | combined | — | — | — | — | — | 123.7 | 102.8 | 1.2× |
-| hypercube-3x2 | characteristic | 28.3 | 6.0 | 4.7× | 28.3 | 6.1 | — | — | — |
-| hypercube-3x2 | shapley | 34.8 | 7.5 | 4.7× | 34.6 | 7.6 | — | — | — |
-| hypercube-3x2 | combined | — | — | — | — | — | 121.1 | 89.2 | 1.4× |
-| hypercube-3x3 | characteristic | 27.4 | 6.3 | 4.3× | 27.4 | 6.4 | — | — | — |
-| hypercube-3x3 | shapley | 33.7 | 8.8 | 3.8× | 33.1 | 8.8 | — | — | — |
-| hypercube-3x3 | combined | — | — | — | — | — | 118.7 | 93.0 | 1.3× |
-| mastermind222 | agent | — | — | — | — | — | 18.5 | 4.0 | 4.6× |
-| mastermind222 | characteristic | 20.3 | 4.6 | 4.4× | 21.7 | 20.2 | 72.5 | 47.6 | 1.5× |
-| mastermind222 | shapley | 23.1 | 6.2 | 3.7× | 23.3 | 25.6 | 141.6 | 90.6 | 1.6× |
-| mastermind222-matched | shapley | 23.0 | 6.2 | 3.7× | 23.0 | 25.6 | 142.3 | 90.4 | 1.6× |
+| Environment | Stage | Upstream median epoch (ms) | JAX median seed-epoch (ms) | Speedup | Upstream total wall (s) | JAX total wall (s) | Speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| gridworld | agent | — | — | — | 25 | 4 | 6.4× |
+| gridworld | characteristic | 17.5 | 2.5 | 7.0× | 244 | 21 | 11.7× |
+| gridworld | shapley | 21.6 | 2.5 | 8.7× | 466 | 40 | 11.7× |
+| gridworld-matched | shapley | 21.6 | 2.5 | 8.7× | 466 | 40 | 11.7× |
+| gridworld-outcome | agent | — | — | — | 374 | 80 | 4.7× |
+| gridworld-outcome | characteristic | 18.0 | 2.5 | 7.2× | 130 | 11 | 11.8× |
+| gridworld-outcome | outcome | 169.4 | 17.0 | 10.0× | 2559 | 260 | 9.8× |
+| gridworld-outcome | shapley | 21.4 | 2.8 | 7.5× | 369 | 42 | 8.9× |
+| hypercube-2x5 | characteristic | 25.1 | 4.6 | 5.4× | — | — | — |
+| hypercube-2x5 | combined | — | — | — | 458 | 206 | 2.2× |
+| hypercube-2x5 | shapley | 31.6 | 5.6 | 5.7× | — | — | — |
+| hypercube-3x2 | characteristic | 24.4 | 4.2 | 5.8× | — | — | — |
+| hypercube-3x2 | combined | — | — | — | 442 | 174 | 2.5× |
+| hypercube-3x2 | shapley | 30.6 | 3.9 | 7.8× | — | — | — |
+| hypercube-3x3 | characteristic | 24.4 | 4.4 | 5.5× | — | — | — |
+| hypercube-3x3 | combined | — | — | — | 435 | 184 | 2.4× |
+| hypercube-3x3 | shapley | 31.0 | 4.5 | 6.8× | — | — | — |
+| mastermind222 | agent | — | — | — | 18 | 4 | 4.4× |
+| mastermind222 | characteristic | 18.5 | 2.9 | 6.3× | 271 | 46 | 5.9× |
+| mastermind222 | shapley | 21.3 | 3.1 | 6.9× | 525 | 79 | 6.7× |
+| mastermind222-matched | shapley | 21.2 | 3.1 | 6.9× | 527 | 73 | 7.3× |
+| mastermind222-outcome | agent | — | — | — | 355 | 81 | 4.4× |
+| mastermind222-outcome | characteristic | 19.1 | 3.0 | 6.4× | 130 | 22 | 5.8× |
+| mastermind222-outcome | outcome | 333.4 | 44.1 | 7.6× | 4489 | 1074 | 4.2× |
+| mastermind222-outcome | shapley | 34.5 | 4.1 | 8.5× | 592 | 72 | 8.2× |
 
-These are small CPU problems: a 64- or 128-wide MLP and batches of 128. The steady-state gain comes from compiling each whole epoch (batch sampling, coalition sampling, updates, validation and exact loss) into one XLA program instead of per-batch Python and PyTorch dispatch. The larger domains (Mastermind-443 to 463, the 6×5 Hypercube) and GPU execution are where batched compilation should matter most. They are not yet measured here.
+The steady-state gain comes from compiling each whole epoch (batch sampling, coalition sampling, updates, validation and exact loss) into one XLA program and running all seeds together; the problems themselves are small (64- or 128-wide MLPs). The larger domains and GPU execution are measured in milestone 3.
 
 ## Findings during validation
 
@@ -135,14 +201,16 @@ These are small CPU problems: a 64- or 128-wide MLP and batches of 128. The stea
 
 - **Mastermind exact-loss cost (fixed).** The exact characteristic loss originally evaluated every padded (coalition, unique-observation) slot each epoch: 256 × 8000 rows for Mastermind-222, against a few hundred valid entries. That made JAX characteristic epochs about 1.8× *slower* than upstream. Valid entries are now compacted once and only their chunks are evaluated, giving 4.4× faster epochs.
 - **Determinism.** Both sides reproduce bit for bit. The upstream sweep and the unchanged JAX configurations gave identical numbers across repeated full runs.
+- **Comparison harness bug (fixed).** Upstream labels Hypercube characteristic runs with exact-characteristic group "without", JAX leaves it empty, so the first comparison pass silently dropped all 12 Hypercube characteristic rows (reporting 24 of 48 instead of 32 of 60). `compare.py` now normalises the field for characteristics.
+- **Sweep timing (fixed).** Per-epoch times of a JAX sweep cover all seeds; the speed table now divides them by the sweep's seed count.
 
 ## Reproduction
 
 From the repository root:
 
 ```bash
-bash scripts/explanations_port/run.sh                  # both sides, all cases, 5 seeds
-bash scripts/explanations_port/run.sh --skip-upstream  # rerun only the JAX side
+bash scripts/explanations_port/run.sh --margins-only   # JAX side, then pre-registered margins (commit them)
+bash scripts/explanations_port/run.sh --skip-jax       # upstream side, then the comparison
 ```
 
-The script clones the pinned FastSVERL commit into a temporary directory and runs `./check.sh`. It then runs `run_jax.py` and `run_upstream.py` sequentially, followed by `compare.py`. Raw losses and timings are written to `docs/data/explanations-port--{jax,upstream}-{runs,timing}.csv`, the tables to `docs/data/explanations-port--{summary,speed}.csv`, and the figures to `docs/figures/explanations-port--*.svg`. Temporary run artifacts are removed on exit.
+The script clones the pinned FastSVERL commit into a temporary directory and runs `./check.sh`. `run_jax.py` and `run_upstream.py` run sequentially, followed by `compare.py`, which refuses to run without committed margins. Raw losses and timings go to `docs/data/explanations-port--{jax,upstream}-{runs,timing}.csv`, the margins to `docs/data/explanations-port--margins.csv`, the tables to `docs/data/explanations-port--{summary,speed}.csv`, and the figures to `docs/figures/explanations-port--*.svg`. Temporary run artifacts are removed on exit.
