@@ -1,13 +1,12 @@
 # Explanations
 
-FastSVERL explains an agent in two learnt stages. A **characteristic model** predicts what the agent would output when only a subset (coalition) of state features is known. A **Shapley model** is then trained against that characteristic, so it outputs per-feature Shapley values in a single forward pass. This guide covers the two explanation types ported so far:
+FastSVERL explains an agent in two learnt stages. A **characteristic model** predicts what the agent would output when only a subset (coalition) of state features is known. A **Shapley model** is then trained against that characteristic, so it outputs per-feature Shapley values in a single forward pass. This guide covers all three explanation types:
 
 | Paper name | Upstream classes | Explained quantity `v_F` |
 | --- | --- | --- |
 | Behaviour | `PolicyCharacteristicModel`, `PolicyShapley` | Agent policy: `pi_greedy`, or `pi_explore` when `policy="explore"` |
 | Prediction | `ValueCharacteristicModel`, `ValueShapley` | Agent value `V(s) = max_a Q(s, a)` |
-
-Outcome explanations (`Performance*`) depend on the behaviour characteristic and on exact transition models, so they come later.
+| Outcome | `PerformanceCharacteristicOffPolicy`, `PerformanceCharacteristicOnPolicy`, `PerformanceShapley` | The agent's return when, at state `e`, it acts on the behaviour characteristic given only `C` (see [Outcome explanations](#outcome-explanations)) |
 
 The behavioural reference is FastSVERL commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`: `characteristics.py`, `shapley.py`, `utils.py` (`ShapleySampler`), `models.py`, `dqn.py`, `training.py` and the `run_policy_prediction.py`/`run.py` experiment scripts.
 
@@ -25,6 +24,13 @@ uv run python -m jax_shapley.train_explanations shapley --agent runs/<dqn-run> -
 uv run python -m jax_shapley.train_explanations resume --run runs/<explanation-run>
 ```
 
+Outcome explanations add one stage: an outcome run explains the agent behind a completed *behaviour* characteristic run, and a Shapley run accepts the outcome run as its characteristic.
+
+```bash
+uv run python -m jax_shapley.train_explanations outcome --variant off_policy --agent runs/<dqn-run> --characteristic runs/<behaviour-run>
+uv run python -m jax_shapley.train_explanations shapley --agent runs/<dqn-run> --characteristic runs/<outcome-run>
+```
+
 The explained kind and policy of a Shapley run come from its characteristic. `--buffers characteristic` reuses the characteristic's train and validation buffers (the Hypercube experiments do this); `--buffers fresh` (the default) collects new ones. Exact values always use the characteristic's exact buffer.
 
 Recipes in `experiments/explanations/` hold the paper settings:
@@ -34,6 +40,8 @@ bash experiments/explanations/gridworld.sh characteristic --kind behaviour --age
 bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --characteristic runs/<characteristic-run>
 bash experiments/explanations/mastermind222.sh characteristic --kind prediction --agent runs/<dqn-run>
 bash experiments/explanations/hypercube.sh --kind behaviour --env.side-length 3 --env.dimension 3 --seed 1
+bash experiments/explanations/gridworld.sh outcome --variant on_policy --agent runs/<dqn-run> --characteristic runs/<behaviour-run>
+bash experiments/explanations/gridworld.sh outcome-shapley --agent runs/<dqn-run> --characteristic runs/<outcome-run>
 bash experiments/explanations/smoke.sh
 ```
 
@@ -48,8 +56,14 @@ The Gridworld and Mastermind recipes run seeds 1–20, or the one given by `--se
 | Mastermind-222 prediction characteristic | 80 | 10,000 | |
 | Mastermind-222 Shapley | 50 | 10,000 | |
 | Hypercube (all stages) | 10,000 | = epochs | validation fraction 0.016 (160 rows), exact buffer 100,000, exact condition 0.01 (characteristic) and 0.001 (behaviour Shapley) or 0.01 (prediction Shapley), `--no-with-exact-char`, `--train.track-batch` |
+| Gridworld outcome, off-policy | 128 | = epochs | replay prefix 50,000, validation 80, batch 64, τ 0.001, `--train.track-batch` |
+| Gridworld outcome, on-policy | — | — | 100,000 steps over 8 environments, batch 64, τ 0.001 |
+| Gridworld outcome Shapley | 20 | = epochs | explains the on-policy outcome characteristic upstream |
+| Mastermind-222 outcome, off-policy | 128 | = epochs | replay prefix 100,000, validation 160, batch 64, τ 0.01, `--train.track-batch` |
+| Mastermind-222 outcome, on-policy | — | — | 200,000 steps over 16 environments, batch 64, τ 0.01 |
+| Mastermind-222 outcome Shapley | 100 | = epochs | explains the off-policy outcome characteristic upstream |
 
-All runs use learning rate 2.5e-4, batch 128, a 10,000-observation buffer split into train and validation sets, 16 collection environments, and the greedy explained policy. Networks are 2×64 ReLU, or 2×128 for Hypercube.
+Except where the table says otherwise, runs use learning rate 2.5e-4, batch 128, a 10,000-observation buffer split into train and validation sets, 16 collection environments, and the greedy explained policy. Networks are 2×64 ReLU, or 2×128 for Hypercube. Outcome runs use γ = 1 and run both exact-value groups (`--with-exact-char`, `--no-with-exact-char`).
 
 The [PyTorch/JAX comparison report](Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md) validates these recipes end to end against the unchanged upstream code. 29 of 32 statistical comparisons pass, and the 3 exceptions are a protocol confound that the matched protocol resolves. Steady-state training epochs are 2.7–4.7× faster on CPU.
 
@@ -77,6 +91,55 @@ A run folder holds `config.json`, `metrics.csv` (`epoch, step, train_loss, valid
 **XLA CPU workaround.** With jax 0.11.0 on CPU, a jitted network applied to a broadcast-constant batch (for example `full_like(observations, MASK)`) can return wrong values from about 64 rows. The null value is therefore computed from one all-masked row and broadcast. `tests/test_jit_equivalence.py` checks compiled results against eager evaluation at production batch sizes.
 
 **Exact-loss cost.** The exact characteristic table is padded to a static bound on unique observations. Its valid entries are compacted once per run, and each epoch evaluates only the 512-row chunks that hold them.
+
+## Outcome explanations
+
+**The characteristic.** `v(e, C)` is the agent's expected return from `e` when, *at `e` only*, it follows the behaviour characteristic's prediction given `C`, and elsewhere its own explained policy. This conditioned policy is `π̂(a | s; e, C)`. A goal-conditioned network on `concat(s, e, C)` learns it with DQN-style updates and a soft-updated target (`OutcomeNetworks`):
+
+- **Off-policy** (`--variant off_policy`, upstream `PerformanceCharacteristicOffPolicy` with `train_models`). Learns `Q(s, a | e, C)` from the agent's replay and returns `v(e, C) = Σ_a π̂(a | e) Q(e, a | e, C)`.
+  - The train and validation sets are the first `train_size` and `validation_size` replay transitions, so they overlap.
+  - Each batch draws `e` rows independently from the same buffer, a uniform coalition per row, and next actions from `π̂`.
+  - The target is updated after every batch.
+  - Early stopping, `track_batch` and best-model restore follow the shared epoch loop.
+- **On-policy** (`--variant on_policy`, upstream `PerformanceCharacteristicOnPolicy` with `train_V_on_policy`). Learns `V(s | e, C)` while acting with `π̂` in `num_envs` environments, and returns `v(e, C) = V(e | e, C)`.
+  - Every decision resamples `e` from the behaviour characteristic's train buffer, plus one uniform coalition shared by every environment.
+  - Each step is stored with its `(e, C)`. Every `train_frequency` steps, a uniform batch is learnt from; every `target_network_frequency` steps, the target is updated.
+  - The loss and exact loss are logged every 100 global steps, as upstream does; `metrics.csv` leaves the validation column empty.
+  - The final model is the last one, and checkpoints are written every tenth of the run.
+
+**Exact values.** For every coalition and every unique state of the behaviour characteristic's exact buffer, the port evaluates `π̂` exactly in the environment's tabular model and returns `Σ_a π̂(a | e) Q(e, a)`. `π̂` uses the exact behaviour characteristic under `with_exact_char`, otherwise the learnt one.
+
+- **Tabular model.** `tabular.py` builds the model by enumerating the JAX environments' reachable hidden states. Mastermind's unseen goal is averaged with equal weight per hidden state, as `get_P` does.
+- **Solving.** `policy_q_values` solves `(I − γ C_π) V = R_π` directly. Upstream runs value iteration to a 1e-10 change, which approaches the same fixed point.
+- **Evaluated states.** Unique exact-buffer states are non-terminal, so the port evaluates the transition model's states and marks those present in the buffer.
+
+The exact loss is the mean squared error over all valid `(C, e)` pairs.
+
+**Shapley models.** `shapley --characteristic <outcome run>` trains upstream's `PerformanceShapley`:
+
+- Buffers follow the behaviour characteristic's explained policy.
+- Exact values use the behaviour characteristic's exact buffer.
+- `with_exact_char` explains the exact outcome values, conditioned as the outcome run chose. Otherwise it explains the learnt outcome characteristic.
+
+**Parity.** `scripts/explanations_port/collect_fastsverl_outcome.py` runs the unchanged upstream classes on fixed batches and coalitions, recording the off-policy target's sampled next actions. `tests/fixtures/fastsverl_outcome.npz` holds:
+
+- the transition tables and value-iteration Q tables
+- per variant: three updates' losses, step-0 gradients, final and target weights, `get_val` and `null`
+- exact tables and exact losses, with and without the exact behaviour characteristic
+- `PerformanceShapley` updates, values, exact values and exact losses
+
+`tests/test_outcome.py` matches all of these, and `tests/test_outcome_training.py` checks four properties of the pipelines:
+
+- off-policy buffers are the replay prefixes
+- each run's logged exact loss equals the eager exact loss of the restored model
+- on-policy replay invariants hold: one coalition per decision, `e` drawn from the pool, and continuity across steps
+- sweeps and interrupted runs resume byte-identically
+
+**Deviations from upstream:**
+
+- **Non-terminating policy.** Under γ = 1, a conditioned policy that can loop forever has no finite value. Upstream's value iteration then never terminates; the port's solve returns non-finite exact values, and the run logs them. The outcome fixture therefore explains the ε-greedy agent, because its greedy Gridworld policy loops.
+- **Off-policy target after early stopping.** Restoring the best off-policy model also restores the target that was saved with it; upstream restores only the model. The target is not used after training.
+- **Terminal transitions.** On-policy terminal transitions store the pre-reset next observation, where upstream stores the reset observation. The `(1 − terminated)` mask makes the two equivalent.
 
 ## Reference fixture
 
@@ -150,8 +213,10 @@ uv run --script scripts/explanations_port/collect_fastsverl_pipeline.py \
 | --- | --- |
 | `coalitions.py` | Shapley-kernel, paired and uniform sampling; masking; enumerating all coalitions in `cartesian_prod` order |
 | `characteristics.py` | Typed behaviour/prediction configuration; `v_F` from `greedy_probabilities`, `exploration_probabilities` and max-Q; on- and off-policy losses; exact characteristic |
-| `shapley.py` | Shapley loss, normalisation, exact values |
-| `train_explanations.py` | Typed run settings, buffer collection with the trained agent, and the compiled epoch/early-stopping loop; `main()` handles the host side and `run_characteristic()`/`run_shapley()` the compiled side |
+| `shapley.py` | Shapley loss, normalisation, exact values; the `CharacteristicFunction` protocol |
+| `outcome.py` | Outcome networks, conditioned policy, off-/on-policy losses and updates, conditioned replay, exact outcome values |
+| `tabular.py` | Observation-level transition models enumerated from the JAX environments; exact policy evaluation |
+| `train_explanations.py` | Typed run settings, buffer collection with the trained agent, the compiled epoch/early-stopping loop and the on-policy outcome loop; `main()` handles the host side and `run_characteristic()`, `run_shapley()`, `run_outcome()`, `run_outcome_on_policy()` and `run_outcome_shapley()` the compiled side |
 | `explanation_io.py` | Loading and identifying agents and characteristics, settings, CSV metrics, Orbax checkpoints and restore |
 
 The models reuse `MLP` and `LayerConfig` from `networks.py`, including the softmax output layer that the behaviour characteristic needs. Shapley outputs are reshaped with einops `"... (f a) -> ... f a"`.
@@ -165,4 +230,9 @@ uv run --script scripts/explanations_port/collect_fastsverl_explanations.py \
   /path/to/fastsverl tests/fixtures/fastsverl_explanations.npz
 ```
 
-The collector verifies the source commit, the committed bytes of every source file it executes, and the transition-fixture hash. Two runs produce identical files.
+The collector verifies the source commit, the committed bytes of every source file it executes, and the transition-fixture hash. Two runs produce identical files. The outcome fixture is regenerated the same way, after the explanation fixture it reads:
+
+```bash
+uv run --script scripts/explanations_port/collect_fastsverl_outcome.py \
+  /path/to/fastsverl tests/fixtures/fastsverl_outcome.npz
+```
