@@ -181,11 +181,19 @@ def summarize(finals: pd.DataFrame, margins: pd.DataFrame, alpha: float, tost_al
 
 
 def speeds(timing: pd.DataFrame) -> pd.DataFrame:
-    """Per-epoch seconds (mean including checkpoints, and median steady state) and total process wall time.
+    """Seconds per seed-epoch (mean including checkpoints, and median steady state) and total process wall time.
 
-    Upstream checkpoints only at the end of a run; JAX commits a full-state checkpoint every tenth of the
-    epochs, which dominates the mean for runs of a few seconds.
+    A JAX sweep advances every seed's epoch in one compiled step, so its logged epoch interval is divided by
+    the sweep's seed count; upstream runs one seed per process. Upstream checkpoints only at the end of a
+    run; JAX commits a full-state checkpoint every tenth of the epochs, which dominates the mean for short runs.
     """
+    timing = timing.copy()
+    group = ["framework", "environment", "kind", "stage", "exact_char"]
+    epochs = timing["measure"].isin(["loop", "epoch_median"])
+    seeds = timing[epochs].groupby(group)["seed"].transform("nunique")
+    timing.loc[epochs, "seconds"] = timing.loc[epochs, "seconds"] / seeds.where(
+        timing.loc[epochs, "framework"] == "jax", 1
+    )
     loop = timing[(timing["measure"] == "loop") & (timing["epochs"] > 1)].copy()
     loop["seconds_per_epoch"] = loop["seconds"] / (loop["epochs"] - 1)
     keys = ["environment", "stage", "framework"]
