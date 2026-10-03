@@ -1,0 +1,27 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": {
+    "utils.py": "2a0b8c35b5d62ca9dea0a74da7d5e1d2abba7f16302a6c98b288678e103ecc75",
+    "models.py": "ad427b514e460a03b36e69699ed8d7d4a892e9aa3a3e6a308b5b24e777bae62a",
+    "dqn.py": "e6aa5ee1213ea20a0a06f6002b97d657c623d5fb25d280ad9e21bb4505035a92",
+    "envs/gwb.py": "fa63ba4c4376f0ca3a4e6707c1758739a6fd5084b736ccd230b9188ecaca48bb",
+    "envs/mastermind.py": "16ae8c47583ddf506ab074c965f5c0099c048a23d9090b3704e257e758663b5a"
+  },
+  "explanations_sha256": "a955d0fab667780772b75cdcaebcc3ca140c19b1d90c178c9ece3ab9e0f7571d",
+  "fixture_sha256": "06cb15cb5b50caaa7aa4438cac7aa303b4dd36c9d3ec806455e037fc8c94c314",
+  "torch_version": "2.6.0",
+  "seed": 1729,
+  "epsilon": 0.2,
+  "gamma": 1.0,
+  "cases": {
+    "gridworld": {
+      "features": 2,
+      "actions": 4
+    },
+    "mastermind222": {
+      "features": 8,
+      "actions": 4
+    }
+  },
+  "collector": "unchanged GWB/Mastermind get_P and value_iteration, CPU"
+}
