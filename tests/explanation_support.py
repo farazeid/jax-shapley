@@ -37,26 +37,36 @@ class CaseLayout:
 
 @dataclass
 class RecordingSink:
-    """Inert explanation sink: records epoch rows and checkpoint (epoch, phase) pairs."""
+    """Inert explanation sink for seed-batched callbacks; `rows`/`checkpoints` are seed 0's."""
 
-    rows: list[tuple[int, int, float, float, float, int]] = field(default_factory=list)
-    checkpoints: list[tuple[int, int]] = field(default_factory=list)
+    seed_rows: dict[int, list[tuple[int, int, float, float, float, int]]] = field(default_factory=dict)
+    seed_checkpoints: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
+
+    @property
+    def rows(self) -> list[tuple[int, int, float, float, float, int]]:
+        return self.seed_rows.get(0, [])
+
+    @property
+    def checkpoints(self) -> list[tuple[int, int]]:
+        return self.seed_checkpoints.get(0, [])
 
     def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken:
         epoch, step, train_loss, validation_loss, exact_loss, best_epoch, active = (np.asarray(m) for m in metrics)
-        for index in np.flatnonzero(active):
-            self.rows.append((
-                int(epoch[index]),
-                int(step[index]),
-                float(train_loss[index]),
-                float(validation_loss[index]),
-                float(exact_loss[index]),
-                int(best_epoch[index]),
+        for index, seed in zip(*np.nonzero(active), strict=True):
+            self.seed_rows.setdefault(int(seed), []).append((
+                int(epoch[index, seed]),
+                int(step[index, seed]),
+                float(train_loss[index, seed]),
+                float(validation_loss[index, seed]),
+                float(exact_loss[index, seed]),
+                int(best_epoch[index, seed]),
             ))
         return np.asarray(0, np.int32)
 
-    def checkpoint(self, snapshot: ExplanationSnapshot) -> CallbackToken:
-        self.checkpoints.append((int(snapshot.epoch), int(snapshot.phase)))
+    def checkpoint(self, snapshot: ExplanationSnapshot, due: Array) -> CallbackToken:
+        epochs, phases = np.asarray(snapshot.epoch), np.asarray(snapshot.phase)
+        for seed in np.flatnonzero(np.asarray(due)):
+            self.seed_checkpoints.setdefault(int(seed), []).append((int(epochs[seed]), int(phases[seed])))
         return np.asarray(0, np.int32)
 
 

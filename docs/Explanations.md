@@ -53,6 +53,19 @@ All runs use learning rate 2.5e-4, batch 128, a 10,000-observation buffer split 
 
 The [PyTorch/JAX comparison report](Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md) validates these recipes end to end against the unchanged upstream code. 29 of 32 statistical comparisons pass, and the 3 exceptions are a protocol confound that the matched protocol resolves. Steady-state training epochs are 2.7–4.7× faster on CPU.
 
+## Seed sweeps
+
+`--seeds 1 2 … 20` trains every seed in **one compiled program**. All per-seed state carries a leading seed axis, built with `nnx.vmap`. Seeds that stop early do nothing while the others continue, and the loop ends when every seed is done. Each seed uses exactly the PRNG keys of a single run with that seed: tests check that a sweep's seeds reproduce single runs exactly in their buffers, and within 1e-5 in their losses and weights.
+
+**Artifacts.** A sweep writes a sweep folder containing `sweep.json` and one **ordinary run folder per seed** (`seed-<s>/`), each holding that seed's single-run settings. A seed folder can be loaded, explained or resumed on its own. `resume --run <sweep folder>` continues every seed together, even when an interruption left the seeds at different checkpoints.
+
+**Pairing.**
+
+- `--agent` may name one DQN run, which every seed explains, or a directory of DQN runs, where each seed explains the run trained with its own seed. The Hypercube recipe uses the directory form.
+- A Shapley `--characteristic` may name one characteristic run, which every seed explains (the paper's Gridworld/Mastermind protocol). It may also name a characteristic sweep, where Shapley seed s explains characteristic seed s (the Hypercube protocol, and the comparison's matched protocol).
+
+The recipes train all 20 paper seeds per stage as one sweep; `--seed N` selects a single ordinary run. For 20 Gridworld behaviour characteristics, a sweep takes about 11 s, against about 85 s for 20 separate processes (Apple M4 Pro, CPU).
+
 ## Execution, artifacts and resume
 
 Each run is compiled as one numerical invocation before it creates any artifacts. That invocation collects the buffers, computes the exact values and trains epochs in blocks of `--chunk-epochs` (default 1). Buffers are recorded before each step from 16 auto-resetting environments, with actions sampled from the explained policy. Each epoch runs `train_size // batch_size` batches sampled with replacement, then a validation loss over `val_size` resampled rows, then the exact loss (when enabled). Early stopping keeps the best-validation model, and training stops on patience or the exact condition. The run then restores the best model.
