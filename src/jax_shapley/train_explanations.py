@@ -9,7 +9,7 @@ resume. Shell recipes provide experiment values; explanation_io.py owns host I/O
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from functools import partial
 from math import isfinite, nan
@@ -63,7 +63,13 @@ from jax_shapley.train_dqn import (
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 if TYPE_CHECKING:
-    from jax_shapley.explanation_io import ExplanationSink, ExplanationSnapshot, ExplanationSummary, RunContext
+    from jax_shapley.explanation_io import (
+        ExplanationMetadata,
+        ExplanationSink,
+        ExplanationSnapshot,
+        ExplanationSummary,
+        RunContext,
+    )
 
 type BufferSource = Literal["fresh", "characteristic"]
 
@@ -156,18 +162,28 @@ class CharacteristicRunConfig:
     hidden_widths: tuple[int, ...] = (64, 64)
     train: ExplanationTrainConfig = field(default_factory=ExplanationTrainConfig)
     seed: int = 1
+    seeds: tuple[int, ...] = ()
     chunk_epochs: int = 1
     output: Path = Path("runs")
     validate_only: bool = False
     compile_only: bool = False
 
     def __post_init__(self) -> None:
-        _run_options(self.seed, self.chunk_epochs, self.validate_only, self.compile_only)
+        _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
         CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
 
     @property
     def characteristic(self) -> CharacteristicConfig:
         return CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
+
+    @property
+    def sweep(self) -> tuple[int, ...]:
+        """Seeds trained together in one compiled program; a single run is a sweep of one."""
+        return self.seeds or (self.seed,)
+
+    def for_seed(self, seed: int, agent: Path | None = None) -> CharacteristicRunConfig:
+        """The ordinary single-run settings each seed's folder records."""
+        return replace(self, seed=seed, seeds=(), agent=agent or self.agent)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,17 +197,28 @@ class ShapleyRunConfig:
     hidden_widths: tuple[int, ...] = (64, 64)
     train: ExplanationTrainConfig = field(default_factory=ExplanationTrainConfig)
     seed: int = 1
+    seeds: tuple[int, ...] = ()
     chunk_epochs: int = 1
     output: Path = Path("runs")
     validate_only: bool = False
     compile_only: bool = False
 
     def __post_init__(self) -> None:
-        _run_options(self.seed, self.chunk_epochs, self.validate_only, self.compile_only)
+        _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
         if self.buffers not in ("fresh", "characteristic"):
             raise ValueError("buffers must be fresh or characteristic")
         if any(width < 1 for width in self.hidden_widths):
             raise ValueError("hidden widths must be positive")
+
+    @property
+    def sweep(self) -> tuple[int, ...]:
+        """Seeds trained together; `characteristic` may name a characteristic sweep, pairing seed s with its seed s."""
+        return self.seeds or (self.seed,)
+
+    def for_seed(self, seed: int, agent: Path | None = None, characteristic: Path | None = None) -> ShapleyRunConfig:
+        return replace(
+            self, seed=seed, seeds=(), agent=agent or self.agent, characteristic=characteristic or self.characteristic
+        )
 
 
 type RunConfig = CharacteristicRunConfig | ShapleyRunConfig
@@ -239,6 +266,25 @@ class FrozenAgent:
     epsilon: Array
 
 
+@struct.dataclass
+class CharacteristicContext:
+    """Per-seed constants a characteristic learner reads: buffers, targets and exact values."""
+
+    buffers: Buffers
+    train_targets: Array
+    validation_targets: Array
+    exact: ExactCharacteristic | None
+
+
+@struct.dataclass
+class ShapleyContext:
+    """Per-seed constants a Shapley learner reads: buffers and the exact-loss ground truth."""
+
+    buffers: Buffers
+    exact: ExactCharacteristic | None
+    exact_values: Array | None
+
+
 class Draw(NamedTuple):
     """One batch's sampled buffer rows and coalition(s)."""
 
@@ -272,83 +318,170 @@ type CLIConfig = (
 )
 
 
-def main(args: list[str] | None = None) -> ExplanationSummary | None:
-    """Validate, restore, compile, execute once and finalize host artifacts."""
+def main(args: list[str] | None = None) -> ExplanationSummary | list[ExplanationSummary] | None:
+    """Validate, restore, compile, execute once and finalize host artifacts.
+
+    A run with `--seeds` trains every seed in one compiled program and returns one
+    summary per seed; each seed's folder is an ordinary run folder.
+    """
+    from contextlib import ExitStack
+
     from jax_shapley.explanation_io import (
         CallbackRouter,
-        ExplanationStore,
         ExplanationWriter,
+        SweepWriter,
         create_run,
+        create_sweep,
         describe_options,
         load_run_settings,
         prepare_context,
-        restore_state,
         summarize,
+        sweep_folders,
         write_summary,
     )
 
     options = parse_args(args)
     resume = options if isinstance(options, ResumeConfig) else None
     if resume is not None:
-        config = load_run_settings(resume.run / "config.json").config
+        folders: list[Path] | None = sweep_folders(resume.run)
+        configs = [load_run_settings(folder / "config.json").config for folder in folders]
+        config = configs[0]
     else:
         assert not isinstance(options, ResumeConfig)
-        config = options
-    if config.validate_only:
-        print(describe_options(config), end="")
-        return None
-    context = prepare_context(config)
-    restored: ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel] | None = None
-    sequence: int | None = None
-    metadata = None
-    if resume is not None:
-        saved = load_run_settings(resume.run / "config.json")
-        if saved.agent_sha256 != context.agent_sha256 or saved.characteristic_sha256 != context.characteristic_sha256:
-            raise ValueError("explained agent or characteristic changed since the run was created")
-        store = ExplanationStore(resume.run, read_only=True)
-        try:
-            restored, metadata = restore_state(store, template_state(context, config), config, context)
-            sequence = store.sequence
-        finally:
-            store.close()
+        config, folders = options, None
+        if config.validate_only:
+            print(describe_options(config), end="")
+            return None
+        configs = seed_configs(config)
+    contexts = [prepare_context(seed_config) for seed_config in configs]
+    restored = None
+    metadata: list[ExplanationMetadata | None] = [None] * len(configs)
+    sequences: list[int | None] = [None] * len(configs)
+    if resume is not None and folders is not None:
+        restored, metadata, sequences = restore_sweep(folders, configs, contexts)
         if resume.validate_only:
-            print(context.settings, end="")
+            print("".join(context.settings for context in contexts), end="")
             return None
     router = CallbackRouter()
-    runner = nnx.jit(_bind(context, config, router))
-    key = jax.random.key(config.seed)
+    runner = nnx.jit(_bind(contexts[0], configs[0], router))
+    keys = jnp.stack([jax.random.key(seed_config.seed) for seed_config in configs])
+    agents = stack_seeds([context.agent for context in contexts])
+    characteristics = _stack_optional([context.characteristic for context in contexts])
+    inherited = _stack_optional([context.inherited for context in contexts])
     abstract = nnx.eval_shape(lambda state: state, restored) if restored is not None else None
-    arguments = (
-        jax.ShapeDtypeStruct((), key.dtype),
-        context.agent,
-        context.characteristic,
-        context.inherited,
-        abstract,
-    )
-    compiled = cast(Runner, runner.trace(*arguments).lower().compile())
+    key_spec = jax.ShapeDtypeStruct(keys.shape, keys.dtype)
+    compiled = cast(Runner, runner.trace(key_spec, agents, characteristics, inherited, abstract).lower().compile())
     if config.compile_only or (resume is not None and resume.compile_only):
-        print(f"Compiled {context.environment} {_stage(config)} on {jax.default_backend()}; no run artifacts created.")
+        print(
+            f"Compiled {contexts[0].environment} {_stage(config)} on {jax.default_backend()}; no run artifacts created."
+        )
         return None
-    folder = resume.run.resolve() if resume is not None else create_run(config, context)
-    try:
-        with ExplanationWriter(folder, context.settings, metadata=metadata, checkpoint_sequence=sequence) as sink:
-            router.sink = sink
-            result = compiled(key, context.agent, context.characteristic, context.inherited, restored)
+    if folders is None:
+        folders = [create_run(configs[0], contexts[0])] if not config.seeds else create_sweep(config, contexts)
+    with ExitStack() as stack:
+        writers = [
+            stack.enter_context(
+                ExplanationWriter(folder, context.settings, metadata=saved, checkpoint_sequence=sequence)
+            )
+            for folder, context, saved, sequence in zip(folders, contexts, metadata, sequences, strict=True)
+        ]
+        sink = SweepWriter(writers)
+        router.sink = sink
+        try:
+            result = compiled(keys, agents, characteristics, inherited, restored)
             jax.block_until_ready(result.epoch)
             jax.effects_barrier()
-            sink.store.wait()
-            summary = summarize(folder, config, result, sink.elapsed())
+            sink.wait()
+        finally:
+            router.sink = None
+        summaries = []
+        for index, (folder, seed_config, writer) in enumerate(zip(folders, configs, writers, strict=True)):
+            summary = summarize(folder, seed_config, seed_slice(result, index), writer.elapsed())
             write_summary(folder, summary)
-    finally:
-        router.sink = None
-    print(f"Trained {context.environment} {_stage(config)}: {summary.epochs} epochs. Artifacts: {folder}")
-    return summary
+            summaries.append(summary)
+    for summary in summaries:
+        print(
+            f"Trained {contexts[0].environment} {_stage(config)}: {summary.epochs} epochs. Artifacts: {summary.folder}"
+        )
+    return summaries[0] if len(summaries) == 1 and not config.seeds else summaries
+
+
+def restore_sweep(
+    folders: list[Path], configs: list[RunConfig], contexts: list[RunContext]
+) -> tuple[
+    ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel],
+    list[ExplanationMetadata | None],
+    list[int | None],
+]:
+    """Restore each seed folder's checkpoint, check its explained models, and stack the states."""
+    from jax_shapley.explanation_io import ExplanationStore, load_run_settings, restore_state
+
+    states: list[ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel]] = []
+    metadata: list[ExplanationMetadata | None] = []
+    sequences: list[int | None] = []
+    for folder, seed_config, context in zip(folders, configs, contexts, strict=True):
+        saved = load_run_settings(folder / "config.json")
+        if (saved.agent_sha256, saved.characteristic_sha256) != (context.agent_sha256, context.characteristic_sha256):
+            raise ValueError("explained agent or characteristic changed since the run was created")
+        store = ExplanationStore(folder, read_only=True)
+        try:
+            state, saved_metadata = restore_state(store, template_state(context, seed_config), seed_config, context)
+            states.append(state)
+            metadata.append(saved_metadata)
+            sequences.append(store.sequence)
+        finally:
+            store.close()
+    return stack_seeds(states), metadata, sequences
+
+
+def seed_configs(config: RunConfig) -> list[RunConfig]:
+    """Each seed's single-run settings.
+
+    `agent` may name one DQN run (shared by every seed) or a directory of DQN runs,
+    paired by their training seed. A Shapley `characteristic` may name one run or a
+    characteristic sweep, pairing seed s with its seed s.
+    """
+    from jax_shapley.explanation_io import sweep_folders
+    from jax_shapley.run_io import load_settings
+
+    agents: dict[int, Path] | None = None
+    if not (config.agent / "config.json").exists():
+        runs = [folder for folder in sorted(config.agent.iterdir()) if (folder / "config.json").exists()]
+        agents = {load_settings(folder / "config.json").seed: folder for folder in runs}
+    characteristics: dict[int, Path] | None = None
+    if isinstance(config, ShapleyRunConfig):
+        paired = sweep_folders(config.characteristic)
+        if paired != [config.characteristic]:
+            characteristics = {int(folder.name.removeprefix("seed-")): folder for folder in paired}
+    for name, pairs in (("agent", agents), ("characteristic", characteristics)):
+        missing = [seed for seed in config.sweep if pairs is not None and seed not in pairs]
+        if missing:
+            raise ValueError(f"no {name} for seeds {missing}")
+    if isinstance(config, CharacteristicRunConfig):
+        return [config.for_seed(seed, agents[seed] if agents else None) for seed in config.sweep]
+    return [
+        config.for_seed(seed, agents[seed] if agents else None, characteristics[seed] if characteristics else None)
+        for seed in config.sweep
+    ]
+
+
+def stack_seeds[Tree](items: list[Tree]) -> Tree:
+    """Stack equally shaped pytrees (NNX modules included) along a new leading seed axis."""
+    graph, first = nnx.split(items[0])
+    states = [first, *(nnx.split(item)[1] for item in items[1:])]
+    return nnx.merge(graph, jax.tree.map(lambda *leaves: jnp.stack(leaves), *states))
+
+
+def seed_slice[Tree](tree: Tree, seed: int) -> Tree:
+    """One seed of a seed-stacked pytree."""
+    graph, state = nnx.split(tree)
+    return nnx.merge(graph, jax.tree.map(lambda leaf: leaf[seed], state))
 
 
 def run_characteristic[State, Params](
-    key: Array,
-    agent: FrozenAgent,
-    characteristic: CharacteristicModel | None,
+    keys: Array,
+    agents: FrozenAgent,
+    characteristics: CharacteristicModel | None,
     inherited: Buffers | None,
     state: ExplanationState[CharacteristicModel] | None = None,
     *,
@@ -357,25 +490,42 @@ def run_characteristic[State, Params](
     max_unique: int,
     sink: ExplanationSink,
 ) -> ExplanationState[CharacteristicModel]:
-    """Collect buffers (fresh runs), then train the characteristic to completion."""
-    del characteristic, inherited
+    """Collect buffers (fresh runs), then train every seed's characteristic to completion.
+
+    Inputs and state carry a leading seed axis; each seed uses exactly the keys a
+    single run with that seed would.
+    """
+    del characteristics, inherited
     env = EpisodeStatisticsWrapper(environment_factory())
     explained = config.characteristic
     training = config.train
     features, actions = _dimensions(env)
+    network = characteristic_network(features, actions, explained)
     if state is None:
-        key, buffers = collect_buffers(env, agent, explained.policy, training, key, None)
-        model_key, key = jax.random.split(key)
-        model = CharacteristicModel(characteristic_network(features, actions, explained), rngs=nnx.Rngs(model_key))
-        state = initialize_state(model, buffers, training, key)
-    learner = characteristic_learner(state.buffers, agent, explained, training, features, max_unique)
-    return train(state, learner, training, config.chunk_epochs, sink)
+
+        def initialize(key: Array, agent: FrozenAgent) -> ExplanationState[CharacteristicModel]:
+            key, buffers = collect_buffers(env, agent, explained.policy, training, key, None)
+            model_key, key = jax.random.split(key)
+            return initialize_state(CharacteristicModel(network, rngs=nnx.Rngs(model_key)), buffers, training, key)
+
+        state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, agents)
+
+    def context(buffers: Buffers, agent: FrozenAgent) -> CharacteristicContext:
+        return characteristic_context(buffers, agent, explained, training, features, max_unique)
+
+    contexts = nnx.vmap(context, in_axes=(0, 0), out_axes=0)(state.buffers, agents)
+
+    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel]:
+        del frozen
+        return characteristic_learner(context, training, features)
+
+    return train(state, contexts, None, learner, training, config.chunk_epochs, sink)
 
 
 def run_shapley[State, Params](
-    key: Array,
-    agent: FrozenAgent,
-    characteristic: CharacteristicModel | None,
+    keys: Array,
+    agents: FrozenAgent,
+    characteristics: CharacteristicModel | None,
     inherited: Buffers | None,
     state: ExplanationState[ShapleyModel] | None = None,
     *,
@@ -385,47 +535,63 @@ def run_shapley[State, Params](
     max_unique: int,
     sink: ExplanationSink,
 ) -> ExplanationState[ShapleyModel]:
-    """Explain a frozen characteristic; exact values always use its exact buffer."""
-    if characteristic is None or inherited is None:
-        raise ValueError("Shapley runs need the trained characteristic and its buffers")
+    """Explain each seed's frozen characteristic; exact values always use its exact buffer."""
+    if characteristics is None or inherited is None:
+        raise ValueError("Shapley runs need the trained characteristics and their buffers")
     env = EpisodeStatisticsWrapper(environment_factory())
     training = config.train
     features, actions = _dimensions(env)
     layout = ShapleyLayout(features, actions if explained.kind == "behaviour" else 1)
+    network = shapley_network(layout, config.hidden_widths)
     if state is None:
-        if config.buffers == "characteristic":
-            buffers = inherited
-        else:
-            key, collected = collect_buffers(env, agent, explained.policy, training, key, inherited.exact)
-            buffers = collected
-        model_key, key = jax.random.split(key)
-        model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(model_key))
-        state = initialize_state(model, buffers, training, key)
-    learner = shapley_learner(
-        state.buffers, agent, MaskedCharacteristic(characteristic), explained, config, features, max_unique
-    )
-    return train(state, learner, training, config.chunk_epochs, sink)
+
+        def initialize(key: Array, agent: FrozenAgent, inherited: Buffers) -> ExplanationState[ShapleyModel]:
+            if config.buffers == "characteristic":
+                buffers = inherited
+            else:
+                key, buffers = collect_buffers(env, agent, explained.policy, training, key, inherited.exact)
+            model_key, key = jax.random.split(key)
+            return initialize_state(ShapleyModel(network, layout, rngs=nnx.Rngs(model_key)), buffers, training, key)
+
+        state = nnx.vmap(initialize, in_axes=(0, 0, 0), out_axes=0)(keys, agents, inherited)
+
+    def context(buffers: Buffers, agent: FrozenAgent, characteristic: CharacteristicModel) -> ShapleyContext:
+        function = MaskedCharacteristic(characteristic)
+        return shapley_context(buffers, agent, function, explained, config, features, max_unique)
+
+    contexts = nnx.vmap(context, in_axes=(0, 0, 0), out_axes=0)(state.buffers, agents, characteristics)
+
+    def learner(context: ShapleyContext, characteristic: CharacteristicModel) -> Learner[ShapleyModel]:
+        return shapley_learner(context, MaskedCharacteristic(characteristic), config, features)
+
+    return train(state, contexts, characteristics, learner, training, config.chunk_epochs, sink)
 
 
-def characteristic_learner(
+def characteristic_context(
     buffers: Buffers,
     agent: FrozenAgent,
     explained: CharacteristicConfig,
     training: ExplanationTrainConfig,
     features: int,
     max_unique: int,
-) -> Learner[CharacteristicModel]:
-    """Targets are the frozen agent's explained outputs; exact values use the exact buffer."""
+) -> CharacteristicContext:
+    """Per-run constants: the frozen agent's explained outputs and the exact values on the exact buffer."""
 
     def targets(observations: Array) -> Array:
         return explained_values(agent.model(observations).q_values, explained, agent.epsilon)
 
-    train_targets, validation_targets = targets(buffers.train), targets(buffers.validation)
     exact = (
         exact_characteristic(buffers.exact, targets(buffers.exact), all_coalitions(features), max_unique=max_unique)
         if training.exact_loss
         else None
     )
+    return CharacteristicContext(buffers, targets(buffers.train), targets(buffers.validation), exact)
+
+
+def characteristic_learner(
+    context: CharacteristicContext, training: ExplanationTrainConfig, features: int
+) -> Learner[CharacteristicModel]:
+    """Uniform coalitions per row; targets and exact values come from the precomputed context."""
 
     def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
         del epoch, batch
@@ -444,20 +610,22 @@ def characteristic_learner(
         model: CharacteristicModel, optimizer: nnx.Optimizer[CharacteristicModel], buffers: Buffers, draw: Draw
     ) -> Array:
         rows = draw.rows
-        return update_characteristic(model, optimizer, buffers.train[rows], train_targets[rows], draw.coalitions).loss
+        targets = context.train_targets[rows]
+        return update_characteristic(model, optimizer, buffers.train[rows], targets, draw.coalitions).loss
 
     def validation_loss(model: CharacteristicModel, buffers: Buffers, draw: Draw) -> Array:
         rows = draw.rows
-        return characteristic_loss(model, buffers.validation[rows], validation_targets[rows], draw.coalitions)[0]
+        targets = context.validation_targets[rows]
+        return characteristic_loss(model, buffers.validation[rows], targets, draw.coalitions)[0]
 
     def exact_loss(model: CharacteristicModel) -> Array:
-        assert exact is not None
-        return exact_characteristic_loss(model, exact)
+        assert context.exact is not None
+        return exact_characteristic_loss(model, context.exact)
 
     return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
 
-def shapley_learner(
+def shapley_context(
     buffers: Buffers,
     agent: FrozenAgent,
     characteristic: CharacteristicFunction,
@@ -465,23 +633,26 @@ def shapley_learner(
     config: ShapleyRunConfig,
     features: int,
     max_unique: int,
+) -> ShapleyContext:
+    """Exact Shapley values on the characteristic's exact buffer; with_exact_char selects the ground truth."""
+    if not config.train.exact_loss:
+        return ShapleyContext(buffers, None, None)
+    observations = buffers.exact
+    targets = explained_values(agent.model(observations).q_values, explained, agent.epsilon)
+    coalitions = all_coalitions(features)
+    exact = exact_characteristic(observations, targets, coalitions, max_unique=max_unique)
+    # Training always uses the learnt characteristic; with_exact_char only changes the ground truth.
+    values = (
+        exact.at_states if config.with_exact_char else characteristic_table(characteristic, exact.states, coalitions)
+    )
+    return ShapleyContext(buffers, exact, exact_shapley(values))
+
+
+def shapley_learner(
+    context: ShapleyContext, characteristic: CharacteristicFunction, config: ShapleyRunConfig, features: int
 ) -> Learner[ShapleyModel]:
-    """One Shapley-kernel coalition per batch; exact values use the characteristic's exact buffer."""
+    """One Shapley-kernel coalition per batch against the frozen characteristic."""
     training = config.train
-    exact_values: Array | None = None
-    exact: ExactCharacteristic | None = None
-    if training.exact_loss:
-        observations = buffers.exact
-        targets = explained_values(agent.model(observations).q_values, explained, agent.epsilon)
-        coalitions = all_coalitions(features)
-        exact = exact_characteristic(observations, targets, coalitions, max_unique=max_unique)
-        # with_exact_char only selects the ground truth; training always uses the learnt characteristic.
-        values = (
-            exact.at_states
-            if config.with_exact_char
-            else characteristic_table(characteristic, exact.states, coalitions)
-        )
-        exact_values = exact_shapley(values)
 
     def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
         del epoch, batch
@@ -502,53 +673,81 @@ def shapley_learner(
         return shapley_loss(model, characteristic, buffers.validation[draw.rows], draw.coalitions)[0]
 
     def exact_loss(model: ShapleyModel) -> Array:
-        assert exact is not None and exact_values is not None
-        return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, exact_values)
+        exact = context.exact
+        assert exact is not None and context.exact_values is not None
+        return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, context.exact_values)
 
     return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
 
-def train[Model: nnx.Module](
+def train[Model: nnx.Module, Context, Frozen](
     state: ExplanationState[Model],
-    learner: Learner[Model],
+    contexts: Context,
+    frozen: Frozen,
+    make_learner: Callable[[Context, Frozen], Learner[Model]],
     config: ExplanationTrainConfig,
     chunk_epochs: int,
     sink: ExplanationSink,
 ) -> ExplanationState[Model]:
-    """Whole epochs in compiled blocks; metrics flush per block, checkpoints every tenth of the epochs."""
+    """All seeds' epochs in compiled blocks: metrics flush per block, checkpoints every tenth of the epochs.
+
+    `state`, `contexts` and `frozen` carry a leading seed axis (`frozen` may be None).
+    Finished seeds no-op while others continue; the loop ends when every seed is done.
+    """
 
     def running(state: ExplanationState[Model]) -> Array:
         return (state.phase == ExplanationPhase.TRAINING) & (state.epoch < config.epochs) & ~state.stopped
 
-    def block(state: ExplanationState[Model]) -> ExplanationState[Model]:
+    def seed_step(
+        state: ExplanationState[Model], context: Context, frozen: Frozen
+    ) -> tuple[ExplanationState[Model], EpochMetrics]:
+        learner = make_learner(context, frozen)
+        result = nnx.cond(
+            running(state),
+            lambda value: epoch_step(value, learner, config),
+            lambda value: (value, _inactive_metrics()),
+            state,
+        )
+        return cast(tuple[ExplanationState[Model], EpochMetrics], result)  # NNX cond keeps the carry topology.
+
+    every_seed = nnx.vmap(seed_step, in_axes=(0, 0, None if frozen is None else 0), out_axes=(0, 0))
+
+    # Frozen models are graph nodes: NNX transforms only accept them at their own trace level,
+    # so they travel in the loop carries rather than being captured from the outer trace.
+    type Carry = tuple[ExplanationState[Model], Frozen]
+
+    def block(carry: Carry) -> Carry:
+        state, frozen = carry
         start = state.epoch
 
-        def step(state: ExplanationState[Model], index: Array) -> tuple[ExplanationState[Model], EpochMetrics]:
+        def step(carry: Carry, index: Array) -> tuple[Carry, EpochMetrics]:
             del index
-            result = nnx.cond(
-                running(state),
-                lambda value: epoch_step(value, learner, config),
-                lambda value: (value, _inactive_metrics()),
-                state,
-            )
-            return cast(tuple[ExplanationState[Model], EpochMetrics], result)  # NNX cond keeps the carry topology.
+            state, frozen = carry
+            state, metrics = every_seed(state, contexts, frozen)
+            return (state, frozen), metrics
 
-        state, metrics = nnx.scan(step, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
-            state, jnp.arange(chunk_epochs, dtype=jnp.int32)
+        (state, frozen), metrics = nnx.scan(step, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+            (state, frozen), jnp.arange(chunk_epochs, dtype=jnp.int32)
         )
         _flush(metrics, sink)
         due = (state.epoch // config.checkpoint_epochs > start // config.checkpoint_epochs) & running(state)
-        jax.lax.cond(due, lambda: _emit_checkpoint(state, sink), lambda: jnp.asarray(0, jnp.int32))
-        return state
+        jax.lax.cond(jnp.any(due), lambda: _emit_checkpoint(state, due, sink), lambda: jnp.asarray(0, jnp.int32))
+        return state, frozen
 
-    trained = nnx.while_loop(running, block, state)
-    result = nnx.cond(
-        trained.phase == ExplanationPhase.TRAINING,
-        lambda value: finalize(value, sink),
-        lambda value: value,
-        trained,
+    trained, _ = nnx.while_loop(lambda carry: jnp.any(running(carry[0])), block, (state, frozen))
+    finishing = trained.phase == ExplanationPhase.TRAINING
+
+    def finish(state: ExplanationState[Model]) -> ExplanationState[Model]:
+        result = nnx.cond(state.phase == ExplanationPhase.TRAINING, finalize, lambda value: value, state)
+        return cast(ExplanationState[Model], result)  # NNX cond keeps the carry topology.
+
+    finished = nnx.vmap(finish, in_axes=0, out_axes=0)(trained)
+    jax.lax.cond(
+        jnp.any(finishing),
+        lambda: _emit_checkpoint(finished, finishing, sink),
+        lambda: jnp.asarray(0, jnp.int32),
     )
-    return cast(ExplanationState[Model], result)  # NNX cond keeps the carry topology.
+    return finished
 
 
 def epoch_step[Model: nnx.Module](
@@ -599,10 +798,10 @@ def epoch_step[Model: nnx.Module](
     return next_state, metrics
 
 
-def finalize[Model: nnx.Module](state: ExplanationState[Model], sink: ExplanationSink) -> ExplanationState[Model]:
-    """Restore the best-validation model, mark completion and commit the final checkpoint."""
+def finalize[Model: nnx.Module](state: ExplanationState[Model]) -> ExplanationState[Model]:
+    """Restore the best-validation model and mark completion; the caller commits the checkpoint."""
     _copy_parameters(state.best, state.model)
-    complete = ExplanationState(
+    return ExplanationState(
         state.model,
         state.best,
         state.optimizer,
@@ -614,8 +813,6 @@ def finalize[Model: nnx.Module](state: ExplanationState[Model], sink: Explanatio
         jnp.asarray(ExplanationPhase.COMPLETE, jnp.int32),
         state.key,
     )
-    _emit_checkpoint(complete, sink)
-    return complete
 
 
 def collect_buffers[State, Params](
@@ -751,6 +948,15 @@ def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Call
     return partial(run_shapley, environment_factory=env.make, **options)
 
 
+def _stack_optional[Tree](items: list[Tree | None]) -> Tree | None:
+    present = [item for item in items if item is not None]
+    if not present:
+        return None
+    if len(present) != len(items):
+        raise ValueError("every seed needs the same frozen inputs")
+    return stack_seeds(present)
+
+
 def _flush(metrics: EpochMetrics, sink: ExplanationSink) -> None:
     jax.lax.cond(
         jnp.any(metrics.active),
@@ -759,9 +965,11 @@ def _flush(metrics: EpochMetrics, sink: ExplanationSink) -> None:
     )
 
 
-def _emit_checkpoint[Model: nnx.Module](state: ExplanationState[Model], sink: ExplanationSink) -> Array:
+def _emit_checkpoint[Model: nnx.Module](state: ExplanationState[Model], due: Array, sink: ExplanationSink) -> Array:
+    """Commit the seeds marked `due`; snapshot leaves carry the seed axis."""
     return cast(
-        Array, io_callback(sink.checkpoint, jax.ShapeDtypeStruct((), jnp.int32), make_snapshot(state), ordered=True)
+        Array,
+        io_callback(sink.checkpoint, jax.ShapeDtypeStruct((), jnp.int32), make_snapshot(state), due, ordered=True),
     )  # Callback result has the declared scalar int32 specification.
 
 
@@ -789,10 +997,12 @@ def _array_leaves(tree: object) -> tuple[Array, ...]:
     return tuple(cast(list[Array], jax.tree.leaves(tree)))  # Only numerical structs and NNX state cross this boundary.
 
 
-def _run_options(seed: int, chunk_epochs: int, validate_only: bool, compile_only: bool) -> None:
+def _run_options(seed: int, seeds: tuple[int, ...], chunk_epochs: int, validate_only: bool, compile_only: bool) -> None:
     _positive("chunk_epochs", chunk_epochs)
-    if not 0 <= seed <= 2**32 - 1:
-        raise ValueError("seed must be in [0, 2**32 - 1]")
+    if any(not 0 <= value <= 2**32 - 1 for value in (seed, *seeds)):
+        raise ValueError("seeds must be in [0, 2**32 - 1]")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError("sweep seeds must be distinct")
     if validate_only and compile_only:
         raise ValueError("validate_only and compile_only are mutually exclusive")
 

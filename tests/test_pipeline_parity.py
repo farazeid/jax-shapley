@@ -6,6 +6,7 @@ restored best weights must match.
 """
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -24,16 +25,22 @@ from jax_shapley.shapley import MaskedCharacteristic, ShapleyLayout, ShapleyMode
 from jax_shapley.train_dqn import epsilon_at
 from jax_shapley.train_explanations import (
     Buffers,
+    CharacteristicContext,
     Draw,
     ExplanationState,
     ExplanationTrainConfig,
     FrozenAgent,
     Learner,
+    ShapleyContext,
     ShapleyRunConfig,
+    characteristic_context,
     characteristic_learner,
     collect_observations,
     initialize_state,
+    seed_slice,
+    shapley_context,
     shapley_learner,
+    stack_seeds,
     train,
 )
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
@@ -71,8 +78,13 @@ def test_characteristic_loop_matches_upstream_train_models(case: str) -> None:
     model = CharacteristicModel(characteristic_network(8, 4, explained), rngs=nnx.Rngs(0))
     assign(model.mlp, fixture, f"{prefix}_initial")
     buffers = _buffers(fixture)
-    learner = characteristic_learner(buffers, _agent(fixture), explained, training, 8, 32)
-    sink, result = _replay(model, buffers, training, _recorded(learner, fixture, prefix))
+    context = characteristic_context(buffers, _agent(fixture), explained, training, 8, 32)
+
+    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel]:
+        del frozen
+        return _recorded(characteristic_learner(context, training, 8), fixture, prefix)
+
+    sink, result = _replay(model, buffers, training, context, None, learner)
     _assert_rows(sink, fixture, prefix)
     assert_parameters(result.model.mlp, fixture, f"{prefix}_final", rtol=2e-4, atol=1e-5)
 
@@ -88,8 +100,14 @@ def test_shapley_loop_matches_upstream_train_models() -> None:
     assign(model.mlp, fixture, "loop_shapley_initial")
     buffers = _buffers(fixture)
     config = ShapleyRunConfig(agent=Path("unused"), characteristic=Path("unused"), with_exact_char=True, train=training)
-    learner = shapley_learner(buffers, _agent(fixture), MaskedCharacteristic(characteristic), explained, config, 8, 32)
-    sink, result = _replay(model, buffers, training, _recorded(learner, fixture, "loop_shapley", single=True))
+    function = MaskedCharacteristic(characteristic)
+    context = shapley_context(buffers, _agent(fixture), function, explained, config, 8, 32)
+
+    def learner(context: ShapleyContext, frozen: CharacteristicModel) -> Learner[ShapleyModel]:
+        learner = shapley_learner(context, MaskedCharacteristic(frozen), config, 8)
+        return _recorded(learner, fixture, "loop_shapley", single=True)
+
+    sink, result = _replay(model, buffers, training, context, stack_seeds([characteristic]), learner)
     _assert_rows(sink, fixture, "loop_shapley")
     assert_parameters(result.model.mlp, fixture, "loop_shapley_final", rtol=2e-4, atol=1e-5)
 
@@ -124,13 +142,22 @@ def test_reloaded_epsilon_follows_the_upstream_save_rule(tmp_path: Path) -> None
     np.testing.assert_allclose(loaded.epsilon, epsilon_at(config.train, last_step), rtol=0, atol=1e-7)
 
 
-def _replay[Model: nnx.Module](
-    model: Model, buffers: Buffers, training: ExplanationTrainConfig, learner: Learner[Model]
+def _replay[Model: nnx.Module, Context, Frozen](
+    model: Model,
+    buffers: Buffers,
+    training: ExplanationTrainConfig,
+    context: Context,
+    frozen: Frozen,
+    learner: Callable[[Context, Frozen], Learner[Model]],
 ) -> tuple[RecordingSink, ExplanationState[Model]]:
+    """The production loop as a one-seed sweep, with recorded draws injected by `learner`."""
     sink = RecordingSink()
-    state = initialize_state(model, buffers, training, jax.random.key(0))
-    result = nnx.jit(lambda state: train(state, learner, training, 1, sink))(state)
-    return sink, result
+    state = stack_seeds([initialize_state(model, buffers, training, jax.random.key(0))])
+    contexts = stack_seeds([context])
+    result = nnx.jit(lambda state, contexts, frozen: train(state, contexts, frozen, learner, training, 1, sink))(
+        state, contexts, frozen
+    )
+    return sink, seed_slice(result, 0)
 
 
 def _recorded[Model: nnx.Module](

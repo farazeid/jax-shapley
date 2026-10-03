@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from jax_shapley.explanation_io import sweep_folders
+
 HYPERCUBES = ((3, 2), (3, 3), (2, 5))
 KINDS = ("behaviour", "prediction")
 RUN_COLUMNS = ("framework", "environment", "kind", "stage", "exact_char", "seed", "step", "train_loss", "exact_loss")
@@ -62,53 +64,48 @@ def single_agent(root: Path, case: str, seeds: int) -> list[Invocation]:
     agent_run = agent.runs[0]
     invocations = [Invocation(case, "", "agent", 1, agent.seconds, agent.runs)]
     recipe = f"experiments/explanations/{case}.sh"
+    sweep = ["--seeds", *(str(seed) for seed in range(1, seeds + 1))]
     for kind in KINDS:
-        characteristics: list[Path] = []
-        for seed in range(1, seeds + 1):
-            output = root / kind / f"characteristic-{seed}"
-            command = [recipe, "characteristic", "--kind", kind, "--agent", str(agent_run), "--seed", str(seed)]
-            result = _invoke([*command, "--output", str(output)], output)
-            invocations.append(Invocation(case, kind, "characteristic", seed, result.seconds, result.runs))
-            characteristics.append(result.runs[0])
+        # One compiled sweep per stage: every seed trains in the same program.
+        output = root / kind / "characteristic"
+        command = [recipe, "characteristic", "--kind", kind, "--agent", str(agent_run), *sweep]
+        result = _invoke([*command, "--output", str(output)], output)
+        invocations.append(Invocation(case, kind, "characteristic", 0, result.seconds, result.runs))
+        characteristic_root = result.runs[0].parent
         # Paper protocol (every seed explains the first characteristic), then the matched protocol
-        # (seed s explains characteristic s), which makes seeds independent replicates of both stages.
-        for label, matched in ((case, False), (f"{case}-matched", True)):
-            for seed in range(1, seeds + 1):
-                characteristic = characteristics[seed - 1 if matched else 0]
-                output = root / kind / f"{label}-shapley-{seed}"
-                command = [recipe, "shapley", "--agent", str(agent_run), "--characteristic", str(characteristic)]
-                result = _invoke([*command, "--seed", str(seed), "--output", str(output)], output)
-                invocations.append(Invocation(label, kind, "shapley", seed, result.seconds, result.runs))
+        # (naming the characteristic sweep pairs seed s with characteristic seed s).
+        for label, characteristic in ((case, result.runs[0]), (f"{case}-matched", characteristic_root)):
+            output = root / kind / f"{label}-shapley"
+            command = [recipe, "shapley", "--agent", str(agent_run), "--characteristic", str(characteristic), *sweep]
+            shapley = _invoke([*command, "--output", str(output)], output)
+            invocations.append(Invocation(label, kind, "shapley", 0, shapley.seconds, shapley.runs))
     return invocations
 
 
 def hypercube(root: Path, seeds: int) -> list[Invocation]:
+    """Per kind and cube: every seed's agent, then one characteristic sweep and one Shapley sweep."""
     invocations: list[Invocation] = []
     for kind in KINDS:
         for side, dimension in HYPERCUBES:
-            for seed in range(1, seeds + 1):
-                command = [
-                    "experiments/explanations/hypercube.sh",
-                    "--kind",
-                    kind,
-                    "--seed",
-                    str(seed),
-                    "--env.side-length",
-                    str(side),
-                    "--env.dimension",
-                    str(dimension),
-                    "--output-root",
-                    str(root),
-                ]
-                chain = root / kind / f"{side}x{dimension}" / f"seed-{seed}"
-                started = time.perf_counter()
-                _run(command)
-                runs = (_single(chain / "characteristic"), _single(chain / "shapley"))
-                invocations.append(
-                    Invocation(
-                        f"hypercube-{side}x{dimension}", kind, "combined", seed, time.perf_counter() - started, runs
-                    )
-                )
+            command = [
+                "experiments/explanations/hypercube.sh",
+                "--kind",
+                kind,
+                "--num-seeds",
+                str(seeds),
+                "--env.side-length",
+                str(side),
+                "--env.dimension",
+                str(dimension),
+                "--output-root",
+                str(root),
+            ]
+            cube = root / kind / f"{side}x{dimension}"
+            started = time.perf_counter()
+            _run(command)
+            runs = (*sweep_folders(_single(cube / "characteristic")), *sweep_folders(_single(cube / "shapley")))
+            elapsed = time.perf_counter() - started
+            invocations.append(Invocation(f"hypercube-{side}x{dimension}", kind, "combined", 0, elapsed, runs))
     return invocations
 
 
@@ -136,6 +133,7 @@ def export(invocations: list[Invocation], runs_path: Path, timing_path: Path) ->
                 settings = json.loads((folder / "config.json").read_text())
                 stage = settings["stage"]
                 config = settings["config"]
+                seed = int(config["seed"])
                 exact_char = "" if stage == "characteristic" else ("with" if config["with_exact_char"] else "without")
                 with (folder / "metrics.csv").open() as source:
                     metrics = list(csv.DictReader(source))
@@ -146,20 +144,20 @@ def export(invocations: list[Invocation], runs_path: Path, timing_path: Path) ->
                         invocation.kind,
                         stage,
                         exact_char,
-                        invocation.seed,
+                        seed,
                         row["step"],
                         row["train_loss"],
                         row["exact_loss"],
                     ))
                 seconds = [float(row["seconds"]) for row in metrics]
-                timing.writerow(_epoch_median("jax", invocation, stage, exact_char, seconds))
+                timing.writerow(_epoch_median("jax", invocation, stage, exact_char, seed, seconds))
                 timing.writerow((
                     "jax",
                     invocation.environment,
                     invocation.kind,
                     stage,
                     exact_char,
-                    invocation.seed,
+                    seed,
                     "loop",
                     round(seconds[-1] - seconds[0], 6) if len(seconds) > 1 else 0.0,
                     len(seconds),
@@ -167,7 +165,7 @@ def export(invocations: list[Invocation], runs_path: Path, timing_path: Path) ->
 
 
 def _epoch_median(
-    framework: str, invocation: Invocation, stage: str, exact_char: str, seconds: list[float]
+    framework: str, invocation: Invocation, stage: str, exact_char: str, seed: int, seconds: list[float]
 ) -> tuple[object, ...]:
     """Median epoch duration: steady-state compute, robust to checkpoint epochs."""
     gaps = sorted(later - earlier for earlier, later in itertools.pairwise(seconds))
@@ -178,7 +176,7 @@ def _epoch_median(
         invocation.kind,
         stage,
         exact_char,
-        invocation.seed,
+        seed,
         "epoch_median",
         round(median, 6),
         len(seconds),
@@ -186,10 +184,13 @@ def _epoch_median(
 
 
 def _invoke(command: list[str], output: Path) -> Invocation:
+    """Run a recipe; its runs are the seed folders of every sweep (or run folder) it created, in seed order."""
     started = time.perf_counter()
     _run(command)
-    runs = tuple(sorted(path for path in output.iterdir() if path.is_dir()))
-    return Invocation("", "", "", 0, time.perf_counter() - started, runs)
+    runs: list[Path] = []
+    for created in sorted(path for path in output.iterdir() if path.is_dir()):
+        runs.extend(sweep_folders(created))
+    return Invocation("", "", "", 0, time.perf_counter() - started, tuple(runs))
 
 
 def _run(command: list[str]) -> None:

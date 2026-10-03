@@ -14,6 +14,7 @@ import pytest
 from jax_shapley import train_dqn
 from jax_shapley.explanation_io import (
     ExplanationSnapshot,
+    ExplanationSummary,
     ExplanationWriter,
     load_characteristic,
     load_run_settings,
@@ -58,7 +59,7 @@ def test_cli_artifacts_and_inspection_modes(tmp_path: Path, agent: Path, capsys:
     assert json.loads(capsys.readouterr().out)["stage"] == "characteristic"
     assert main([*_characteristic(agent, tmp_path), "--compile-only"]) is None
     assert not tmp_path.exists() or not any(tmp_path.iterdir())
-    summary = main(_characteristic(agent, tmp_path))
+    summary = _single(main(_characteristic(agent, tmp_path)))
     assert summary is not None and summary.stage == "characteristic" and summary.epochs == 6
     folder = Path(summary.folder)
     assert {path.name for path in folder.iterdir()} >= {"config.json", "metrics.csv", "summary.json", "checkpoints"}
@@ -72,7 +73,7 @@ def test_cli_artifacts_and_inspection_modes(tmp_path: Path, agent: Path, capsys:
     assert main(["resume", "--run", str(folder)]) is not None
     assert (folder / "metrics.csv").read_bytes() == metrics and (folder / "summary.json").exists()
     for buffers in ("fresh", "characteristic"):
-        shapley = main(_shapley(agent, folder, tmp_path / buffers, buffers))
+        shapley = _single(main(_shapley(agent, folder, tmp_path / buffers, buffers)))
         assert shapley is not None and shapley.stage == "shapley"
         saved = load_run_settings(Path(shapley.folder) / "config.json")
         assert isinstance(saved.config, ShapleyRunConfig) and saved.characteristic_sha256 == loaded.sha256
@@ -81,7 +82,7 @@ def test_cli_artifacts_and_inspection_modes(tmp_path: Path, agent: Path, capsys:
 def test_interruption_resumes_to_the_uninterrupted_result(
     tmp_path: Path, agent: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    baseline = main(_characteristic(agent, tmp_path / "baseline"))
+    baseline = _single(main(_characteristic(agent, tmp_path / "baseline")))
     assert baseline is not None
     original = ExplanationWriter.checkpoint
 
@@ -102,14 +103,14 @@ def test_interruption_resumes_to_the_uninterrupted_result(
     assert not (folder / "summary.json").exists()
     with (folder / "metrics.csv").open("a") as output:
         output.write("uncommitted tail\n")
-    resumed = main(["resume", "--run", str(folder)])
+    resumed = _single(main(["resume", "--run", str(folder)]))
     assert resumed is not None and resumed.epochs == baseline.epochs
     assert _rows(folder) == _rows(Path(baseline.folder))
     assert _arrays(folder) == _arrays(Path(baseline.folder))
 
 
 def test_resume_and_shapley_reject_changed_inputs(tmp_path: Path, agent: Path) -> None:
-    summary = main(_characteristic(agent, tmp_path / "characteristic"))
+    summary = _single(main(_characteristic(agent, tmp_path / "characteristic")))
     assert summary is not None
     folder = Path(summary.folder)
     settings = (folder / "config.json").read_text()
@@ -130,6 +131,11 @@ def test_resume_and_shapley_reject_changed_inputs(tmp_path: Path, agent: Path) -
         main([*_shapley(agent, folder, tmp_path / "shapley", "characteristic"), "--train.buffer-size", "80"])
     with pytest.raises(SystemExit):
         parse_args(["resume", "--run", str(folder), "--train.epochs", "3"])
+
+
+def _single(result: ExplanationSummary | list[ExplanationSummary] | None) -> ExplanationSummary:
+    assert isinstance(result, ExplanationSummary)
+    return result
 
 
 def _characteristic(agent: Path, output: Path) -> list[str]:

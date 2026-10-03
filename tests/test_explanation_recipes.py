@@ -25,26 +25,34 @@ def test_single_agent_recipes_encode_source_settings(
     tmp_path: Path, script: str, behaviour: int, prediction: int, shapley: int, patience: int | None
 ) -> None:
     for kind, epochs in (("behaviour", behaviour), ("prediction", prediction)):
-        commands = _capture(tmp_path, script, ("characteristic", "--kind", kind, *AGENT))
-        assert len(commands) == 20
-        for seed, command in enumerate(commands, start=1):
-            config = parse_args(command[4:])
-            assert isinstance(config, CharacteristicRunConfig)
-            assert (config.kind, config.policy, config.seed, config.hidden_widths) == (kind, "greedy", seed, (64, 64))
-            assert (config.train.epochs, config.train.patience) == (epochs, patience)
-            assert (config.train.train_size, config.train.validation_size, config.train.num_envs) == (8000, 2000, 16)
-            assert config.train.exact_loss and config.train.exact_buffer_size is None
+        # All 20 paper seeds train in one compiled sweep.
+        (command,) = _capture(tmp_path, script, ("characteristic", "--kind", kind, *AGENT))
+        config = parse_args(command[4:])
+        assert isinstance(config, CharacteristicRunConfig)
+        assert config.sweep == tuple(range(1, 21))
+        assert (config.kind, config.policy, config.hidden_widths) == (kind, "greedy", (64, 64))
+        assert (config.train.epochs, config.train.patience) == (epochs, patience)
+        assert (config.train.train_size, config.train.validation_size, config.train.num_envs) == (8000, 2000, 16)
+        assert config.train.exact_loss and config.train.exact_buffer_size is None
+        (single,) = _capture(tmp_path, script, ("characteristic", "--kind", kind, *AGENT, "--seed", "7"))
+        selected = parse_args(single[4:])
+        assert isinstance(selected, CharacteristicRunConfig) and selected.sweep == (7,)
     commands = _capture(tmp_path, script, ("shapley", *AGENT, "--characteristic", "runs/c", "--seed", "4"))
     configs = [parse_args(command[4:]) for command in commands]
     assert [config.with_exact_char for config in configs if isinstance(config, ShapleyRunConfig)] == [True, False]
     for config in configs:
         assert isinstance(config, ShapleyRunConfig)
-        assert (config.seed, config.buffers, config.train.epochs, config.train.patience) == (
-            4,
+        assert (config.sweep, config.buffers, config.train.epochs, config.train.patience) == (
+            (4,),
             "fresh",
             shapley,
             patience,
         )
+    swept = [
+        parse_args(command[4:])
+        for command in _capture(tmp_path, script, ("shapley", *AGENT, "--characteristic", "runs/c"))
+    ]
+    assert all(isinstance(config, ShapleyRunConfig) and config.sweep == tuple(range(1, 21)) for config in swept)
 
 
 def test_characteristic_recipes_require_a_kind(tmp_path: Path) -> None:
@@ -68,7 +76,9 @@ def test_hypercube_chain_settings(tmp_path: Path) -> None:
     assert (explained.with_exact_char, explained.buffers) == (False, "characteristic")
     # Source hypercube_value.py stops prediction Shapley models at 0.01; behaviour uses 0.001.
     assert explained.train.exact_condition == pytest.approx(0.01)
-    assert explained.characteristic.parent == char.output and explained.agent.parent == dqn.output
+    # Every seed's agent trains into one directory; the sweeps pair seed s with agent and characteristic s.
+    assert char.agent == explained.agent == dqn.output and char.sweep == explained.sweep == (2,)
+    assert explained.characteristic.parent == char.output
     sweep = _capture(tmp_path, "hypercube.sh", ("--kind", "behaviour", "--seed", "1"))
     assert len(sweep) == 20 * 3
     behaviour = parse_args(sweep[2][4:])

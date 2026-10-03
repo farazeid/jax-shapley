@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Pinned experiments/hypercube/{hypercube_policy,hypercube_value}.py and run.py: each seed trains
 # its own DQN agent, then a characteristic, then a Shapley model on the characteristic's buffers.
-# Selectors: --kind behaviour|prediction, --seed N, --env.side-length N, --env.dimension N.
-# --output-root DIR places runs under DIR (default runs/explanations/hypercube).
+# Per kind and cube, every seed's agent trains first; the characteristics then train as one
+# compiled sweep (seed s explains agent s), and the Shapley models as another (seed s explains
+# characteristic s).
+# Selectors: --kind behaviour|prediction, --seed N (one seed), --num-seeds N (seeds 1..N),
+# --env.side-length N, --env.dimension N. --output-root DIR places runs under DIR
+# (default runs/explanations/hypercube).
 # Inspection: --validate-only validates every stage; --compile-only compiles the agent stage only,
 # because later stages compile against artifacts that do not exist yet.
 set -euo pipefail
@@ -15,6 +19,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --kind) kinds=("$2"); shift 2 ;;
         --seed) seeds=("$2"); shift 2 ;;
+        --num-seeds) seeds=($(seq 1 "$2")); shift 2 ;;
         --env.side-length) selected_side=$2; shift 2 ;;
         --env.dimension) selected_dimension=$2; shift 2 ;;
         --output-root) output_root=$2; shift 2 ;;
@@ -45,8 +50,8 @@ while read -r side dimension timesteps; do
         else
             shapley_kind=prediction shapley_condition=0.01
         fi
+        root="$output_root/$shapley_kind/${side}x${dimension}"
         for seed in "${seeds[@]}"; do
-            root="$output_root/$shapley_kind/${side}x${dimension}/seed-$seed"
             uv run python -m jax_shapley.train_dqn hypercube \
                 --env.side-length "$side" \
                 --env.dimension "$dimension" \
@@ -69,46 +74,45 @@ while read -r side dimension timesteps; do
                 --train.adam.beta1 0.9 \
                 --train.adam.beta2 0.999 \
                 --train.adam.epsilon 0.00000001 \
-                --output "$root/agent" \
-                ${inspection[@]+"${inspection[@]}"}
-            if [[ "${inspection[*]-}" == --compile-only ]]; then continue; fi
-            if [[ "${inspection[*]-}" == --validate-only ]]; then
-                agent="$root/agent/pending" characteristic="$root/characteristic/pending"
-            else
-                agent=$(single_run "$root/agent")
-            fi
-            common=(
-                --seed "$seed"
-                --hidden-widths 128 128
-                --train.epochs 10000
-                --train.learning-rate 0.00025
-                --train.batch-size 128
-                --train.buffer-size 10000
-                --train.val-fraction 0.016
-                --train.num-envs 16
-                --train.exact-loss
-                --train.track-batch
-            )
-            uv run python -m jax_shapley.train_explanations characteristic \
-                --agent "$agent" \
-                --kind "$shapley_kind" \
-                --policy greedy \
-                --train.exact-buffer-size 100000 \
-                --train.exact-condition 0.01 \
-                --output "$root/characteristic" \
-                "${common[@]}" \
-                ${inspection[@]+"${inspection[@]}"}
-            if [[ "${inspection[*]-}" != --validate-only ]]; then characteristic=$(single_run "$root/characteristic"); fi
-            uv run python -m jax_shapley.train_explanations shapley \
-                --agent "$agent" \
-                --characteristic "$characteristic" \
-                --no-with-exact-char \
-                --buffers characteristic \
-                --train.exact-condition "$shapley_condition" \
-                --output "$root/shapley" \
-                "${common[@]}" \
+                --output "$root/agents" \
                 ${inspection[@]+"${inspection[@]}"}
         done
+        if [[ "${inspection[*]-}" == --compile-only ]]; then continue; fi
+        common=(
+            --seeds "${seeds[@]}"
+            --hidden-widths 128 128
+            --train.epochs 10000
+            --train.learning-rate 0.00025
+            --train.batch-size 128
+            --train.buffer-size 10000
+            --train.val-fraction 0.016
+            --train.num-envs 16
+            --train.exact-loss
+            --train.track-batch
+        )
+        uv run python -m jax_shapley.train_explanations characteristic \
+            --agent "$root/agents" \
+            --kind "$shapley_kind" \
+            --policy greedy \
+            --train.exact-buffer-size 100000 \
+            --train.exact-condition 0.01 \
+            --output "$root/characteristic" \
+            "${common[@]}" \
+            ${inspection[@]+"${inspection[@]}"}
+        if [[ "${inspection[*]-}" == --validate-only ]]; then
+            characteristic="$root/characteristic/pending"
+        else
+            characteristic=$(single_run "$root/characteristic")
+        fi
+        uv run python -m jax_shapley.train_explanations shapley \
+            --agent "$root/agents" \
+            --characteristic "$characteristic" \
+            --no-with-exact-char \
+            --buffers characteristic \
+            --train.exact-condition "$shapley_condition" \
+            --output "$root/shapley" \
+            "${common[@]}" \
+            ${inspection[@]+"${inspection[@]}"}
     done
 done <<'TABLE'
 2 2 100000

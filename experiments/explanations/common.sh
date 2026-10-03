@@ -10,12 +10,12 @@ explanation_stage() {
     local stage=$1 behaviour_epochs=$2 prediction_epochs=$3 shapley_epochs=$4 patience=$5
     shift 6
     dqn_gates "$@"
-    local selected_seed seed epochs exact
+    local epochs exact
     local -a seeds patience_args
-    seeds=({1..20})
+    # All 20 paper seeds train as one compiled sweep; --seed N selects a single ordinary run.
+    seeds=(--seeds {1..20})
     patience_args=()
-    selected_seed=$(dqn_option --seed "$@")
-    if [[ -n "$selected_seed" ]]; then seeds=("$selected_seed"); fi
+    if [[ -n "$(dqn_option --seed "$@")" ]]; then seeds=(); fi
     if [[ -n "$patience" ]]; then patience_args=(--train.patience "$patience"); fi
     case "$stage" in
         characteristic)
@@ -24,12 +24,30 @@ explanation_stage() {
                 prediction) epochs=$prediction_epochs ;;
                 *) echo "characteristic runs require --kind behaviour|prediction" >&2; return 2 ;;
             esac
-            for seed in "${seeds[@]}"; do
-                uv run python -m jax_shapley.train_explanations characteristic \
-                    --seed "$seed" \
-                    --policy greedy \
+            uv run python -m jax_shapley.train_explanations characteristic \
+                ${seeds[@]+"${seeds[@]}"} \
+                --policy greedy \
+                --hidden-widths 64 64 \
+                --train.epochs "$epochs" \
+                ${patience_args[@]+"${patience_args[@]}"} \
+                --train.learning-rate 0.00025 \
+                --train.batch-size 128 \
+                --train.buffer-size 10000 \
+                --train.val-fraction 0.2 \
+                --train.num-envs 16 \
+                --train.exact-loss \
+                "$@"
+            ;;
+        shapley)
+            # Paper protocol: --characteristic names one run that every seed explains. Naming a
+            # characteristic sweep instead pairs Shapley seed s with characteristic seed s.
+            for exact in --with-exact-char --no-with-exact-char; do
+                uv run python -m jax_shapley.train_explanations shapley \
+                    ${seeds[@]+"${seeds[@]}"} \
+                    "$exact" \
+                    --buffers fresh \
                     --hidden-widths 64 64 \
-                    --train.epochs "$epochs" \
+                    --train.epochs "$shapley_epochs" \
                     ${patience_args[@]+"${patience_args[@]}"} \
                     --train.learning-rate 0.00025 \
                     --train.batch-size 128 \
@@ -38,27 +56,6 @@ explanation_stage() {
                     --train.num-envs 16 \
                     --train.exact-loss \
                     "$@"
-            done
-            ;;
-        shapley)
-            # Every seed explains the same (first) characteristic, with both exact-loss ground truths.
-            for seed in "${seeds[@]}"; do
-                for exact in --with-exact-char --no-with-exact-char; do
-                    uv run python -m jax_shapley.train_explanations shapley \
-                        --seed "$seed" \
-                        "$exact" \
-                        --buffers fresh \
-                        --hidden-widths 64 64 \
-                        --train.epochs "$shapley_epochs" \
-                        ${patience_args[@]+"${patience_args[@]}"} \
-                        --train.learning-rate 0.00025 \
-                        --train.batch-size 128 \
-                        --train.buffer-size 10000 \
-                        --train.val-fraction 0.2 \
-                        --train.num-envs 16 \
-                        --train.exact-loss \
-                        "$@"
-                done
             done
             ;;
         *)

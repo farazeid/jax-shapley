@@ -26,6 +26,8 @@ from jax_shapley.train_explanations import (
     collect_observations,
     run_characteristic,
     run_shapley,
+    seed_slice,
+    stack_seeds,
 )
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.explanation_support import RecordingSink
@@ -126,9 +128,8 @@ def test_shapley_run_reuses_characteristic_buffers_and_trains() -> None:
             sink=sink,
         )
     )
-    result = cast(
-        ExplanationState[CharacteristicModel], runner(jax.random.key(0), agent, characteristic, inherited, None)
-    )
+    batched = runner(_keys(0), stack_seeds([agent]), stack_seeds([characteristic]), stack_seeds([inherited]), None)
+    result = cast(ExplanationState[CharacteristicModel], seed_slice(batched, 0))  # One-seed sweep.
     np.testing.assert_array_equal(result.buffers.train, inherited.train)
     assert int(result.epoch) == SMALL.epochs and all(np.isfinite(row[4]) for row in sink.rows)
 
@@ -172,7 +173,12 @@ def _characteristic(
             sink=sink,
         )
     )
-    return sink, runner(jax.random.key(0), _agent(), None, None, None)
+    result = runner(_keys(0), stack_seeds([_agent()]), None, None, None)
+    return sink, seed_slice(result, 0)
+
+
+def _keys(*seeds: int) -> jax.Array:
+    return jnp.stack([jax.random.key(seed) for seed in seeds])
 
 
 def _agent() -> FrozenAgent:

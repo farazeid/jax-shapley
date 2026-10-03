@@ -20,11 +20,14 @@ from jax_shapley.train_explanations import (
     ShapleyRunConfig,
     run_characteristic,
     run_shapley,
+    stack_seeds,
 )
 from jax_shapley.wrappers import EnvironmentProtocol
 from tests.explanation_support import RecordingSink
 
-KEY = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
+# A three-seed sweep: the production path for single runs (one seed) and sweeps alike.
+SEEDS = 3
+KEYS = jax.ShapeDtypeStruct((SEEDS,), jax.random.key(0).dtype)
 # Source settings: Gridworld/Mastermind defaults; Hypercube's separate exact buffer and validation fraction.
 DEFAULT = ExplanationTrainConfig()
 HYPERCUBE = ExplanationTrainConfig(
@@ -68,7 +71,8 @@ def _compile[State, Params](
     run = partial(
         run_characteristic, environment_factory=factory, config=char_config, max_unique=max_unique, sink=RecordingSink()
     )
-    nnx.jit(run).trace(KEY, agent, None, None, None).lower().compile()
+    agents = stack_seeds([agent] * SEEDS)
+    nnx.jit(run).trace(KEYS, agents, None, None, None).lower().compile()
     inherited = Buffers(
         jnp.zeros((training.train_size, features), jnp.int32),
         jnp.zeros((training.validation_size, features), jnp.int32),
@@ -91,7 +95,8 @@ def _compile[State, Params](
             max_unique=max_unique,
             sink=RecordingSink(),
         )
-        nnx.jit(shapley).trace(KEY, agent, characteristic, inherited, None).lower().compile()
+        characteristics, buffers = stack_seeds([characteristic] * SEEDS), stack_seeds([inherited] * SEEDS)
+        nnx.jit(shapley).trace(KEYS, agents, characteristics, buffers, None).lower().compile()
 
 
 def _unused() -> Path:

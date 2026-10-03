@@ -42,6 +42,8 @@ from jax_shapley.train_explanations import (
     ShapleyRunConfig,
     collect_buffers,
     run_shapley,
+    seed_slice,
+    stack_seeds,
 )
 from jax_shapley.wrappers import EpisodeStatisticsWrapper
 from tests.explanation_support import RecordingSink
@@ -135,7 +137,14 @@ def test_logged_exact_loss_matches_eager_evaluation_of_the_returned_model() -> N
             sink=sink,
         )
     )
-    result = runner(jax.random.key(0), agent, characteristic, inherited, None)
+    batched = runner(
+        jnp.stack([jax.random.key(0)]),
+        stack_seeds([agent]),
+        stack_seeds([characteristic]),
+        stack_seeds([inherited]),
+        None,
+    )
+    result = seed_slice(batched, 0)
     exact = exact_characteristic(
         inherited.exact, jnp.zeros((training.exact_size, 4)), all_coalitions(8), max_unique=training.exact_size
     )

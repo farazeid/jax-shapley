@@ -156,9 +156,11 @@ class ExplanationSnapshot:
 
 
 class ExplanationSink(Protocol):
+    """Compiled-code callbacks; every leaf carries the seed axis (after the chunk axis for metrics)."""
+
     def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken: ...
 
-    def checkpoint(self, snapshot: ExplanationSnapshot) -> CallbackToken: ...
+    def checkpoint(self, snapshot: ExplanationSnapshot, due: Array) -> CallbackToken: ...
 
 
 class CallbackRouter:
@@ -170,8 +172,8 @@ class CallbackRouter:
     def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken:
         return self._sink().epochs(metrics)
 
-    def checkpoint(self, snapshot: ExplanationSnapshot) -> CallbackToken:
-        return self._sink().checkpoint(snapshot)
+    def checkpoint(self, snapshot: ExplanationSnapshot, due: Array) -> CallbackToken:
+        return self._sink().checkpoint(snapshot, due)
 
     def _sink(self) -> ExplanationSink:
         if self.sink is None:
@@ -216,8 +218,34 @@ class ExplanationStore(OrbaxStore):
         return metadata
 
 
+class SweepWriter:
+    """The compiled run's sink: fans seed-batched callbacks out to one writer per seed folder."""
+
+    def __init__(self, writers: list[ExplanationWriter]) -> None:
+        self.writers = writers
+
+    def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken:
+        values = tuple(host_array(value) for value in metrics)
+        for seed, writer in enumerate(self.writers):
+            # EpochMetrics leaves are (chunk, seeds); the last field is the active flag.
+            if bool(np.any(values[-1][:, seed])):
+                writer.epochs(tuple(value[:, seed] for value in values))
+        return np.asarray(0, np.int32)
+
+    def checkpoint(self, snapshot: ExplanationSnapshot, due: Array) -> CallbackToken:
+        flags = host_array(due)
+        for seed, writer in enumerate(self.writers):
+            if bool(flags[seed]):
+                writer.checkpoint(seed_snapshot(snapshot, seed))
+        return np.asarray(0, np.int32)
+
+    def wait(self) -> None:
+        for writer in self.writers:
+            writer.store.wait()
+
+
 class ExplanationWriter:
-    """Host-only writer; numerical code sees only the ExplanationSink protocol."""
+    """One run folder's metrics and checkpoints; SweepWriter routes each seed's callbacks here."""
 
     def __init__(
         self,
@@ -262,8 +290,8 @@ class ExplanationWriter:
     ) -> None:
         self.close()
 
-    def epochs(self, metrics: tuple[Array, ...]) -> CallbackToken:
-        write_epochs(self.folder / "metrics.csv", tuple(host_array(value) for value in metrics), self.elapsed())
+    def epochs(self, metrics: tuple[HostArray, ...]) -> CallbackToken:
+        write_epochs(self.folder / "metrics.csv", metrics, self.elapsed())
         return np.asarray(0, np.int32)
 
     def checkpoint(self, snapshot: ExplanationSnapshot) -> CallbackToken:
@@ -412,17 +440,63 @@ def restore_state[Model: nnx.Module](
 
 def create_run(config: RunConfig, context: RunContext) -> Path:
     """Create fresh artifacts only after successful numerical compilation."""
-    label = (
-        f"characteristic-{config.kind}"
-        if isinstance(config, CharacteristicRunConfig)
-        else f"shapley-{context.explained.kind}"
+    folder = config.output / f"{context.environment}-{_label(config, context)}-{config.seed}-{time_ns()}"
+    _initialize_folder(folder, context.settings)
+    return folder
+
+
+def create_sweep(config: RunConfig, contexts: list[RunContext]) -> list[Path]:
+    """A sweep folder with one ordinary run folder per seed and a `sweep.json` index for resume."""
+    root = config.output / f"{contexts[0].environment}-{_label(config, contexts[0])}-sweep-{time_ns()}"
+    folders = [root / f"seed-{seed}" for seed in config.sweep]
+    for folder, context in zip(folders, contexts, strict=True):
+        _initialize_folder(folder, context.settings)
+    index = {"seeds": list(config.sweep), "folders": [folder.name for folder in folders]}
+    (root / "sweep.json").write_text(json.dumps(index, indent=2) + "\n")
+    return folders
+
+
+def sweep_folders(folder: Path) -> list[Path]:
+    """Seed folders of a sweep, or the folder itself for a single run."""
+    index_path = folder / "sweep.json"
+    if not index_path.exists():
+        return [folder]
+    index = _mapping(json.loads(index_path.read_text()))
+    names = index["folders"]
+    if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
+        raise ValueError("invalid sweep index")
+    return [folder / name for name in cast(list[str], names)]  # Element types checked above.
+
+
+def seed_snapshot(snapshot: ExplanationSnapshot, seed: int) -> ExplanationSnapshot:
+    """One seed's arrays from a seed-batched snapshot."""
+
+    def pick(values: tuple[Array, ...]) -> tuple[Array, ...]:
+        return tuple(value[seed] for value in values)
+
+    return ExplanationSnapshot(
+        pick(snapshot.model),
+        pick(snapshot.best),
+        pick(snapshot.optimizer),
+        pick(snapshot.buffers),
+        pick(snapshot.runtime),
+        snapshot.epoch[seed],
+        snapshot.phase[seed],
+        snapshot.key_implementation,
     )
-    folder = config.output / f"{context.environment}-{label}-{config.seed}-{time_ns()}"
+
+
+def _initialize_folder(folder: Path, settings: str) -> None:
     folder.mkdir(parents=True, exist_ok=False)
-    (folder / "config.json").write_text(context.settings)
+    (folder / "config.json").write_text(settings)
     with (folder / "metrics.csv").open("w", newline="") as output:
         csv.writer(output).writerow(METRIC_COLUMNS)
-    return folder
+
+
+def _label(config: RunConfig, context: RunContext) -> str:
+    if isinstance(config, CharacteristicRunConfig):
+        return f"characteristic-{config.kind}"
+    return f"shapley-{context.explained.kind}"
 
 
 def write_epochs(path: Path, metrics: tuple[HostArray, ...], seconds: float) -> None:
@@ -535,6 +609,7 @@ def _characteristic_config(value: dict[str, object]) -> CharacteristicRunConfig:
         _widths(value),
         _train_config(_mapping(value["train"])),
         _integer(value, "seed"),
+        _seeds(value),
         _integer(value, "chunk_epochs"),
         Path(_string(value, "output")),
         _boolean(value, "validate_only"),
@@ -555,6 +630,7 @@ def _shapley_config(value: dict[str, object]) -> ShapleyRunConfig:
         _widths(value),
         _train_config(_mapping(value["train"])),
         _integer(value, "seed"),
+        _seeds(value),
         _integer(value, "chunk_epochs"),
         Path(_string(value, "output")),
         _boolean(value, "validate_only"),
@@ -615,6 +691,13 @@ def _environment(config: EnvironmentConfig) -> tuple[str, int, HostArray, HostAr
 def _space[State, Params](env: EnvironmentProtocol[State, Params]) -> tuple[str, int, HostArray, HostArray]:
     space = env.observation_space(env.default_params)
     return env.name, env.num_actions, np.asarray(space.low), np.asarray(space.high)
+
+
+def _seeds(value: dict[str, object]) -> tuple[int, ...]:
+    seeds = value["seeds"]
+    if not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds):
+        raise ValueError("invalid saved sweep seeds")
+    return tuple(cast(list[int], seeds))  # Element types checked above.
 
 
 def _widths(value: dict[str, object]) -> tuple[int, ...]:
