@@ -73,6 +73,17 @@ class Transitions:
 
 
 @struct.dataclass
+class ConditionedReplay:
+    """On-policy experience and the (e, C) each decision was conditioned on (source V.buffer with e_obs, C)."""
+
+    transitions: Transitions
+    explained: Batch
+    coalitions: BatchCoalitions
+    pointer: Array
+    size: Array
+
+
+@struct.dataclass
 class ExactOutcome:
     """Exact v(e, C) for every coalition and every unique exact-buffer state (padded, with validity)."""
 
@@ -251,11 +262,76 @@ def on_policy_loss(
     return loss, LossMetrics(loss, jnp.mean(targets), jnp.mean(predictions))
 
 
-def sample_next_actions(
-    policy: ConditionedPolicy, key: Array, next_observations: Batch, explained: Batch, coalitions: BatchCoalitions
+def empty_conditioned_replay(capacity: int, features: int) -> ConditionedReplay:
+    if capacity < 1 or features < 1:
+        raise ValueError("replay capacity and features must be positive")
+    rows = jnp.zeros((capacity, features), jnp.int32)
+    transitions = Transitions(
+        rows,
+        jnp.zeros((capacity,), jnp.int32),
+        jnp.zeros((capacity,), jnp.float32),
+        rows,
+        jnp.zeros((capacity,), jnp.bool_),
+    )
+    return ConditionedReplay(
+        transitions,
+        rows,
+        jnp.zeros((capacity, features), jnp.bool_),
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(0, jnp.int32),
+    )
+
+
+def append_conditioned(
+    replay: ConditionedReplay, transitions: Transitions, explained: Batch, coalitions: BatchCoalitions
+) -> ConditionedReplay:
+    """Insert one vector step's rows in environment order, as the source Buffer.add does."""
+    capacity = replay.explained.shape[0]
+    count = transitions.observations.shape[0]
+    if count > capacity:
+        raise ValueError("a vector step exceeds the replay capacity")
+    rows = (replay.pointer + jnp.arange(count, dtype=jnp.int32)) % capacity
+
+    def insert(storage: Array, values: Array) -> Array:
+        return storage.at[rows].set(values)
+
+    stored = Transitions(
+        insert(replay.transitions.observations, transitions.observations),
+        insert(replay.transitions.actions, transitions.actions),
+        insert(replay.transitions.rewards, transitions.rewards),
+        insert(replay.transitions.next_observations, transitions.next_observations),
+        insert(replay.transitions.terminated, transitions.terminated),
+    )
+    return ConditionedReplay(
+        stored,
+        insert(replay.explained, explained),
+        insert(replay.coalitions, coalitions),
+        (replay.pointer + count) % capacity,
+        jnp.minimum(replay.size + count, capacity).astype(jnp.int32),
+    )
+
+
+def sample_conditioned(
+    replay: ConditionedReplay, key: Array, batch_size: int
+) -> tuple[Transitions, Batch, BatchCoalitions]:
+    """Uniform rows with replacement from the filled prefix (source Buffer.sample)."""
+    rows = jax.random.randint(key, (batch_size,), 0, replay.size, dtype=jnp.int32)
+    stored = replay.transitions
+    batch = Transitions(
+        stored.observations[rows],
+        stored.actions[rows],
+        stored.rewards[rows],
+        stored.next_observations[rows],
+        stored.terminated[rows],
+    )
+    return batch, replay.explained[rows], replay.coalitions[rows]
+
+
+def sample_actions(
+    policy: ConditionedPolicy, key: Array, observations: Batch, explained: Batch, coalitions: BatchCoalitions
 ) -> BatchActions:
-    """Next actions for the off-policy target, sampled from the conditioned policy."""
-    probabilities = policy(next_observations, explained, coalitions)
+    """a ~ pi_hat(. | s; e, C): source choose_action, and the off-policy target's next actions."""
+    probabilities = policy(observations, explained, coalitions)
     return jax.random.categorical(key, jnp.log(probabilities), axis=-1).astype(jnp.int32)
 
 

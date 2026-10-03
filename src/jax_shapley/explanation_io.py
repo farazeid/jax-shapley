@@ -33,7 +33,7 @@ from jax_shapley.characteristics import (
     characteristic_network,
     max_unique_states,
 )
-from jax_shapley.outcome import OutcomeNetworks, Variant, outcome_network
+from jax_shapley.outcome import ConditionedReplay, OutcomeNetworks, Variant, outcome_network
 from jax_shapley.replay import ReplayState
 from jax_shapley.run_io import (
     REFERENCE_COMMIT,
@@ -63,6 +63,7 @@ from jax_shapley.train_explanations import (
     ExplanationState,
     ExplanationTrainConfig,
     FrozenAgent,
+    OnPolicyState,
     OutcomeInputs,
     OutcomeRunConfig,
     OutcomeTrainConfig,
@@ -70,7 +71,7 @@ from jax_shapley.train_explanations import (
     ShapleyRunConfig,
     replay_prefix,
 )
-from jax_shapley.wrappers import EnvironmentProtocol
+from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState
 
 type Stage = Literal["characteristic", "shapley", "outcome"]
 
@@ -159,7 +160,7 @@ class ExplanationMetadata:
         if self.key_implementation not in ("threefry2x32", "rbg", "unsafe_rbg"):
             raise ValueError("unsupported checkpoint PRNG implementation")
         config = parse_run_settings(self.settings).config
-        if not 1 <= self.epoch <= config.train.epochs:
+        if not 1 <= self.epoch <= config.progress_limit:
             raise ValueError("checkpoint epoch outside the configured training duration")
 
 
@@ -169,7 +170,8 @@ class ExplanationSummary:
     stage: Stage
     epochs: int
     best_epoch: int
-    best_validation_loss: float
+    best_validation_loss: float | None
+    """None for on-policy outcome runs, which neither validate nor stop early on validation."""
     stopped_early: bool
     seconds: float
     backend: str
@@ -358,7 +360,8 @@ class ExplanationWriter:
 def prepare_context(config: RunConfig) -> RunContext:
     """Load and identify the explained models; derive static shapes and the saved settings."""
     agent_settings = load_settings(config.agent / "config.json")
-    loaded = load_agent(config.agent, agent_settings.network, load_replay=isinstance(config, OutcomeRunConfig))
+    replay = isinstance(config, OutcomeRunConfig) and config.variant == "off_policy"
+    loaded = load_agent(config.agent, agent_settings.network, load_replay=replay)
     if loaded.vector_step != agent_settings.train.vector_steps:
         raise ValueError("explanations require a completed DQN training run")
     agent = FrozenAgent(loaded.model, jnp.asarray(loaded.epsilon, jnp.float32))
@@ -483,6 +486,51 @@ def restore_state[Model: nnx.Module](
     return restored, metadata
 
 
+def restore_on_policy[State](
+    store: ExplanationStore, template: OnPolicyState[State], config: OutcomeRunConfig, context: RunContext
+) -> tuple[OnPolicyState[State], ExplanationMetadata]:
+    """Restore an on-policy outcome checkpoint into a template with the run's static shapes."""
+    metadata = store.metadata()
+    if metadata.settings != context.settings:
+        raise ValueError("resume requires identical saved settings")
+    for item, module in (("model", template.networks), ("optimizer", template.optimizer)):
+        state = nnx.state(module)
+        nnx.update(module, jax.tree.unflatten(jax.tree.structure(state), store.arrays(item, _leaves(state))))
+    layout = (template.replay, template.observations, template.env_state, template.explained, template.coalitions)
+    restored = store.arrays("buffers", _leaves(layout))
+    restored_layout = cast(
+        tuple[ConditionedReplay, Array, EpisodeStatisticsState[State], Array, Array],
+        jax.tree.unflatten(jax.tree.structure(layout), restored),
+    )  # Unflattening with the template's own structure returns its topology.
+    replay, observations, env_state, explained, coalitions = restored_layout
+    key_data = jax.random.key_data(jax.random.key(0, impl=metadata.key_implementation))
+    stopped, key, step, phase = store.arrays("runtime", (template.stopped, key_data, template.step, template.phase))
+    if int(step) != metadata.epoch or int(phase) != metadata.phase:
+        raise ValueError("checkpoint counters disagree with metadata")
+    training = config.train
+    updates = sum(
+        1 for index in range(int(step)) if index * training.num_envs % training.train_frequency < training.num_envs
+    )
+    if int(template.optimizer.step[...]) != updates:
+        raise ValueError("optimizer step disagrees with completed vector steps")
+    if int(phase) == ExplanationPhase.TRAINING and bool(stopped):
+        raise ValueError("a stopped run must be complete")
+    state = OnPolicyState(
+        template.networks,
+        template.optimizer,
+        replay,
+        observations,
+        env_state,
+        explained,
+        coalitions,
+        step,
+        stopped,
+        phase,
+        jax.random.wrap_key_data(key, impl=metadata.key_implementation),
+    )
+    return state, metadata
+
+
 def create_run(config: RunConfig, context: RunContext) -> Path:
     """Create fresh artifacts only after successful numerical compilation."""
     folder = config.output / f"{context.environment}-{_label(config, context)}-{config.seed}-{time_ns()}"
@@ -544,6 +592,11 @@ def _outcome_sources(config: OutcomeRunConfig, replay: ReplayState | None, agent
         raise ValueError("the behaviour characteristic explains a different agent")
     if source.config.kind != "behaviour":
         raise ValueError("outcome characteristics condition on a behaviour characteristic")
+    if config.variant == "on_policy":
+        # On-policy runs draw e_obs from the behaviour characteristic's train buffer and interact.
+        return _Sources(
+            source.config.characteristic, source.model, source.sha256, source.buffers, source.config.train.exact_size
+        )
     rows = max(config.train.train_size, config.train.validation_size)
     if replay is None or int(replay.size) < rows:
         raise ValueError(f"outcome runs need at least {rows} transitions in the agent's replay")
@@ -599,20 +652,23 @@ def _label(config: RunConfig, context: RunContext) -> str:
 
 
 def write_epochs(path: Path, metrics: tuple[HostArray, ...], seconds: float) -> None:
-    """Active epoch rows, in EpochMetrics field order; a disabled exact loss is left empty."""
+    """Active epoch rows, in EpochMetrics field order; a loss a run does not compute is left empty.
+
+    On-policy outcome rows have no validation loss, and no exact loss when it is disabled.
+    """
     epoch, step, train_loss, validation_loss, exact_loss, best_epoch, active = metrics
-    rows = []
-    for index in np.flatnonzero(active):
-        exact = float(exact_loss[index])
-        rows.append((
+    rows = [
+        (
             int(epoch[index]),
             int(step[index]),
-            float(train_loss[index]),
-            float(validation_loss[index]),
-            "" if np.isnan(exact) else exact,
+            _cell(train_loss[index]),
+            _cell(validation_loss[index]),
+            _cell(exact_loss[index]),
             int(best_epoch[index]),
             round(seconds, 6),
-        ))
+        )
+        for index in np.flatnonzero(active)
+    ]
     with path.open("a", newline="") as output:
         csv.writer(output).writerows(rows)
 
@@ -623,16 +679,34 @@ def summarize(
     result: AnyState,
     seconds: float,
 ) -> ExplanationSummary:
+    """`epochs` counts progress units: epochs, or vector steps for on-policy outcome runs."""
+    if isinstance(result, OnPolicyState):
+        steps = int(result.step)
+        return ExplanationSummary(
+            str(folder),
+            _stage(config),
+            steps,
+            steps,
+            None,
+            steps < config.progress_limit,
+            seconds,
+            jax.default_backend(),
+        )
     return ExplanationSummary(
         str(folder),
         _stage(config),
         int(result.epoch),
         int(result.best_epoch),
         float(result.best_loss),
-        int(result.epoch) < config.train.epochs,
+        int(result.epoch) < config.progress_limit,
         seconds,
         jax.default_backend(),
     )
+
+
+def _cell(value: HostArray) -> float | str:
+    number = float(value)
+    return "" if np.isnan(number) else number
 
 
 def write_summary(folder: Path, summary: ExplanationSummary) -> None:
@@ -771,6 +845,10 @@ def _outcome_train_config(value: dict[str, object]) -> OutcomeTrainConfig:
         exact_loss=_boolean(value, "exact_loss"),
         exact_condition=None if value["exact_condition"] is None else _number(value, "exact_condition"),
         track_batch=_boolean(value, "track_batch"),
+        total_timesteps=_integer(value, "total_timesteps"),
+        num_envs=_integer(value, "num_envs"),
+        train_frequency=_integer(value, "train_frequency"),
+        target_network_frequency=_integer(value, "target_network_frequency"),
         adam=_adam(_mapping(value["adam"])),
     )
 

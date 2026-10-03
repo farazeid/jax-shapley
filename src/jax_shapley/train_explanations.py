@@ -40,25 +40,31 @@ from jax_shapley.characteristics import (
     update_characteristic,
 )
 from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_coalitions
-from jax_shapley.envs import Gridworld, Mastermind222
-from jax_shapley.networks import QNetwork
+from jax_shapley.envs import Gridworld, GridworldState, HypercubeState, Mastermind222, Mastermind222State
+from jax_shapley.networks import MLPConfig, QNetwork
 from jax_shapley.outcome import (
     AgentPolicy,
     ConditionedPolicy,
+    ConditionedReplay,
     ExactOutcome,
     OutcomeCharacteristic,
     OutcomeConfig,
     OutcomeNetworks,
     Transitions,
     Variant,
+    append_conditioned,
+    empty_conditioned_replay,
     exact_behaviour_table,
     exact_outcome,
     exact_outcome_loss,
     learnt_behaviour_table,
     off_policy_loss,
     outcome_network,
-    sample_next_actions,
+    sample_actions,
+    sample_conditioned,
+    soft_update,
     update_off_policy,
+    update_on_policy,
 )
 from jax_shapley.replay import TransitionBatch
 from jax_shapley.shapley import (
@@ -96,6 +102,9 @@ if TYPE_CHECKING:
     )
 
 type BufferSource = Literal["fresh", "characteristic"]
+
+# The source logs on-policy losses (and exact losses) every 100 global steps.
+LOG_STEPS = 100
 
 
 class ExplanationPhase(IntEnum):
@@ -201,6 +210,10 @@ class CharacteristicRunConfig:
         return CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
 
     @property
+    def progress_limit(self) -> int:
+        return self.train.epochs
+
+    @property
     def sweep(self) -> tuple[int, ...]:
         """Seeds trained together in one compiled program; a single run is a sweep of one."""
         return self.seeds or (self.seed,)
@@ -239,6 +252,10 @@ class ShapleyRunConfig:
         """Seeds trained together; `characteristic` may name a characteristic sweep, pairing seed s with its seed s."""
         return self.seeds or (self.seed,)
 
+    @property
+    def progress_limit(self) -> int:
+        return self.train.epochs
+
     def for_seed(self, seed: int, agent: Path | None = None, characteristic: Path | None = None) -> ShapleyRunConfig:
         return replace(
             self, seed=seed, seeds=(), agent=agent or self.agent, characteristic=characteristic or self.characteristic
@@ -247,10 +264,12 @@ class ShapleyRunConfig:
 
 @dataclass(frozen=True, slots=True)
 class OutcomeTrainConfig:
-    """Source outcome settings: train_models over prefixes of the agent's replay (off-policy).
+    """Source outcome settings, shared like the source's CharacteristicArgs.
 
-    The source's train and validation buffers are the first `train_size` and
-    `validation_size` replay transitions, so they overlap.
+    Off-policy runs use train_models over prefixes of the agent's replay: the first
+    `train_size` and `validation_size` transitions, so they overlap. On-policy runs
+    use train_V_on_policy: `total_timesteps` environment steps across `num_envs`
+    environments, with a replay as large as the run.
     """
 
     epochs: int = 128
@@ -262,6 +281,10 @@ class OutcomeTrainConfig:
     exact_loss: bool = True
     exact_condition: float | None = None
     track_batch: bool = True
+    total_timesteps: int = 100_000
+    num_envs: int = 8
+    train_frequency: int = 1
+    target_network_frequency: int = 1
     adam: AdamConfig = field(default_factory=AdamConfig)
 
     def __post_init__(self) -> None:
@@ -270,8 +293,14 @@ class OutcomeTrainConfig:
             ("batch_size", self.batch_size),
             ("train_size", self.train_size),
             ("validation_size", self.validation_size),
+            ("total_timesteps", self.total_timesteps),
+            ("num_envs", self.num_envs),
+            ("train_frequency", self.train_frequency),
+            ("target_network_frequency", self.target_network_frequency),
         ):
             _positive(name, value)
+        if self.vector_steps < 1:
+            raise ValueError("total_timesteps must include at least one vector step")
         if self.patience is not None:
             _positive("patience", self.patience)
         if not isfinite(self.learning_rate) or self.learning_rate <= 0:
@@ -292,6 +321,11 @@ class OutcomeTrainConfig:
     @property
     def checkpoint_epochs(self) -> int:
         return max(1, self.epochs // 10)
+
+    @property
+    def vector_steps(self) -> int:
+        """On-policy loop length: the source's range(total_timesteps // num_envs)."""
+        return self.total_timesteps // self.num_envs
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,12 +355,15 @@ class OutcomeRunConfig:
     def __post_init__(self) -> None:
         _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
         OutcomeConfig(self.variant, self.tau, self.gamma, self.hidden_widths)
-        if self.variant != "off_policy":
-            raise ValueError("only the off-policy outcome characteristic is available")
 
     @property
     def outcome(self) -> OutcomeConfig:
         return OutcomeConfig(self.variant, self.tau, self.gamma, self.hidden_widths)
+
+    @property
+    def progress_limit(self) -> int:
+        """Checkpointed progress units: epochs (off-policy) or vector steps (on-policy)."""
+        return self.train.epochs if self.variant == "off_policy" else self.train.vector_steps
 
     @property
     def sweep(self) -> tuple[int, ...]:
@@ -343,7 +380,13 @@ type RunConfig = CharacteristicRunConfig | ShapleyRunConfig | OutcomeRunConfig
 type TrainConfig = ExplanationTrainConfig | OutcomeTrainConfig
 type ExplainedModel = CharacteristicModel | ShapleyModel | OutcomeNetworks
 type AnyState = (
-    ExplanationState[CharacteristicModel] | ExplanationState[ShapleyModel] | ExplanationState[OutcomeNetworks]
+    ExplanationState[CharacteristicModel]
+    | ExplanationState[ShapleyModel]
+    | ExplanationState[OutcomeNetworks]
+    | AnyOnPolicyState
+)
+type AnyOnPolicyState = (
+    OnPolicyState[GridworldState] | OnPolicyState[Mastermind222State] | OnPolicyState[HypercubeState]
 )
 
 
@@ -456,6 +499,40 @@ class OutcomeContext:
     train: Transitions
     validation: Transitions
     exact: ExactOutcome | None
+
+
+@struct.dataclass
+class OnPolicyState[EnvState]:
+    """Source train_V_on_policy loop state; `step` counts completed vector steps."""
+
+    networks: OutcomeNetworks
+    optimizer: nnx.Optimizer[OutcomeNetworks]
+    replay: ConditionedReplay
+    observations: Array
+    env_state: EpisodeStatisticsState[EnvState]
+    explained: Array
+    coalitions: Array
+    step: Array
+    stopped: Array
+    phase: Array
+    key: Array
+
+
+@struct.dataclass
+class OnPolicyContext:
+    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values."""
+
+    pool: Array
+    exact: ExactOutcome | None
+
+
+@struct.dataclass
+class OnPolicyUpdate:
+    networks: OutcomeNetworks
+    optimizer: nnx.Optimizer[OutcomeNetworks]
+    batch: Transitions
+    explained: Array
+    coalitions: Array
 
 
 class Draw(NamedTuple):
@@ -596,7 +673,7 @@ def main(args: list[str] | None = None) -> ExplanationSummary | list[Explanation
         router.sink = sink
         try:
             result = compiled(keys, agents, characteristics, inherited, restored)
-            jax.block_until_ready(result.epoch)
+            jax.block_until_ready(result)
             jax.effects_barrier()
             sink.wait()
         finally:
@@ -608,7 +685,8 @@ def main(args: list[str] | None = None) -> ExplanationSummary | list[Explanation
             summaries.append(summary)
     for summary in summaries:
         print(
-            f"Trained {contexts[0].environment} {_stage(config)}: {summary.epochs} epochs. Artifacts: {summary.folder}"
+            f"Trained {contexts[0].environment} {_stage(config)}: {summary.epochs} {_unit(config)}. "
+            f"Artifacts: {summary.folder}"
         )
     return summaries[0] if len(summaries) == 1 and not config.seeds else summaries
 
@@ -621,7 +699,7 @@ def restore_sweep(
     list[int | None],
 ]:
     """Restore each seed folder's checkpoint, check its explained models, and stack the states."""
-    from jax_shapley.explanation_io import ExplanationStore, load_run_settings, restore_state
+    from jax_shapley.explanation_io import ExplanationStore, load_run_settings, restore_on_policy, restore_state
 
     states: list[AnyState] = []
     metadata: list[ExplanationMetadata | None] = []
@@ -632,7 +710,13 @@ def restore_sweep(
             raise ValueError("explained agent or characteristic changed since the run was created")
         store = ExplanationStore(folder, read_only=True)
         try:
-            state, saved_metadata = restore_state(store, template_state(context, seed_config), seed_config, context)
+            template = template_state(context, seed_config)
+            if isinstance(template, OnPolicyState):
+                if not isinstance(seed_config, OutcomeRunConfig):
+                    raise TypeError("on-policy state belongs to an outcome run")
+                state, saved_metadata = restore_on_policy(store, template, seed_config, context)
+            else:
+                state, saved_metadata = restore_state(store, template, seed_config, context)
             states.append(state)
             metadata.append(saved_metadata)
             sequences.append(store.sequence)
@@ -891,9 +975,7 @@ def outcome_learner(
             transitions.terminated[rows],
         )
         explained_rows = transitions.observations[sample.explained]
-        next_actions = sample_next_actions(
-            policy, sample.key, batch.next_observations, explained_rows, sample.coalitions
-        )
+        next_actions = sample_actions(policy, sample.key, batch.next_observations, explained_rows, sample.coalitions)
         return batch, explained_rows, next_actions
 
     def train_batch(
@@ -1021,6 +1103,264 @@ def outcome_function(
 ) -> OutcomeCharacteristic:
     policy = conditioned_policy(OutcomeFrozen(frozen.agent, frozen.explained.behaviour), explained)
     return OutcomeCharacteristic(frozen.explained.networks, policy, outcome.variant)
+
+
+def run_outcome_on_policy[State, Params](
+    keys: Array,
+    agents: FrozenAgent,
+    characteristics: CharacteristicModel | None,
+    inherited: Buffers | None,
+    state: OnPolicyState[State] | None = None,
+    *,
+    environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
+    config: OutcomeRunConfig,
+    explained: CharacteristicConfig,
+    tabular: TabularModel | None,
+    sink: ExplanationSink,
+) -> OnPolicyState[State]:
+    """Source train_V_on_policy for every seed: act with pi_hat, store (e, C) with each step, learn V.
+
+    e_obs rows come from the behaviour characteristic's train buffer and one
+    coalition is shared by all environments; both are resampled every decision.
+    """
+    if characteristics is None or inherited is None:
+        raise ValueError("on-policy outcome runs need the behaviour characteristics and their buffers")
+    env = EpisodeStatisticsWrapper(environment_factory())
+    network = outcome_network(*_dimensions(env), config.outcome)
+    if state is None:
+
+        def initialize(key: Array, inherited: Buffers) -> OnPolicyState[State]:
+            return initial_on_policy_state(env, network, config.train, key, inherited.train)
+
+        state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
+
+    def context(inherited: Buffers, agent: FrozenAgent, behaviour: CharacteristicModel) -> OnPolicyContext:
+        if not config.train.exact_loss:
+            return OnPolicyContext(inherited.train, None)
+        if tabular is None:
+            raise ValueError("exact outcome values need the environment's transition model")
+        policy = conditioned_policy(OutcomeFrozen(agent, behaviour), explained)
+        exact = outcome_exact(inherited.exact, policy, tabular, config.with_exact_char, config.gamma)
+        return OnPolicyContext(inherited.train, exact)
+
+    contexts = nnx.vmap(context, in_axes=(0, 0, 0), out_axes=0)(inherited, agents, characteristics)
+    return train_on_policy(state, contexts, OutcomeFrozen(agents, characteristics), env, explained, config, sink)
+
+
+def initial_on_policy_state[State, Params](
+    env: EpisodeStatisticsWrapper[State, Params],
+    network: MLPConfig,
+    config: OutcomeTrainConfig,
+    key: Array,
+    pool: Array,
+) -> OnPolicyState[State]:
+    keys: Array = jax.random.split(key, 4)
+    networks = OutcomeNetworks(network, rngs=nnx.Rngs(keys[0]))
+    optimizer = make_adam(networks, config.learning_rate, config.adam)
+    reset_keys: Array = jax.random.split(keys[1], config.num_envs)
+    observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env.default_params)
+    explained, coalitions = condition_draw(keys[2], pool, config.num_envs)
+    return OnPolicyState(
+        networks,
+        optimizer,
+        empty_conditioned_replay(config.total_timesteps, pool.shape[-1]),
+        observations.astype(jnp.int32),
+        env_state,
+        explained,
+        coalitions,
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(False),
+        jnp.asarray(ExplanationPhase.TRAINING, jnp.int32),
+        keys[3],
+    )
+
+
+def train_on_policy[State, Params](
+    state: OnPolicyState[State],
+    contexts: OnPolicyContext,
+    frozen: OutcomeFrozen,
+    env: EpisodeStatisticsWrapper[State, Params],
+    explained: CharacteristicConfig,
+    config: OutcomeRunConfig,
+    sink: ExplanationSink,
+) -> OnPolicyState[State]:
+    """All seeds' vector steps in compiled blocks, as `train` does for epochs.
+
+    Metrics flush per block; checkpoints follow the source's model saves every
+    tenth of the run, and the final state is committed on completion.
+    """
+    training = config.train
+    steps = training.vector_steps
+    every = max(1, steps // 10)
+
+    def running(state: OnPolicyState[State]) -> Array:
+        return (state.phase == ExplanationPhase.TRAINING) & (state.step < steps) & ~state.stopped
+
+    def seed_step(
+        state: OnPolicyState[State], context: OnPolicyContext, frozen: OutcomeFrozen
+    ) -> tuple[OnPolicyState[State], EpochMetrics]:
+        result = nnx.cond(
+            running(state),
+            lambda value: on_policy_step(value, context, frozen, env, explained, config),
+            lambda value: (value, _inactive_metrics()),
+            state,
+        )
+        return cast(tuple[OnPolicyState[State], EpochMetrics], result)  # NNX cond keeps the carry topology.
+
+    every_seed = nnx.vmap(seed_step, in_axes=(0, 0, 0), out_axes=(0, 0))
+    type Carry = tuple[OnPolicyState[State], OutcomeFrozen]
+
+    def block(carry: Carry) -> Carry:
+        state, frozen = carry
+        start = state.step
+
+        def step(carry: Carry, index: Array) -> tuple[Carry, EpochMetrics]:
+            del index
+            state, frozen = carry
+            state, metrics = every_seed(state, contexts, frozen)
+            return (state, frozen), metrics
+
+        (state, frozen), metrics = nnx.scan(step, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+            (state, frozen), jnp.arange(config.chunk_epochs, dtype=jnp.int32)
+        )
+        _flush(metrics, sink)
+        due = (state.step // every > start // every) & running(state)
+        jax.lax.cond(jnp.any(due), lambda: _emit_on_policy(state, due, sink), lambda: jnp.asarray(0, jnp.int32))
+        return state, frozen
+
+    looped, _ = nnx.while_loop(lambda carry: jnp.any(running(carry[0])), block, (state, frozen))
+    trained = cast(OnPolicyState[State], looped)  # NNX while_loop keeps the carry topology.
+    finishing = trained.phase == ExplanationPhase.TRAINING
+    finished = OnPolicyState(
+        trained.networks,
+        trained.optimizer,
+        trained.replay,
+        trained.observations,
+        trained.env_state,
+        trained.explained,
+        trained.coalitions,
+        trained.step,
+        trained.stopped,
+        jnp.full_like(trained.phase, ExplanationPhase.COMPLETE),
+        trained.key,
+    )
+    jax.lax.cond(
+        jnp.any(finishing), lambda: _emit_on_policy(finished, finishing, sink), lambda: jnp.asarray(0, jnp.int32)
+    )
+    return finished
+
+
+def on_policy_step[State, Params](
+    state: OnPolicyState[State],
+    context: OnPolicyContext,
+    frozen: OutcomeFrozen,
+    env: EpisodeStatisticsWrapper[State, Params],
+    explained: CharacteristicConfig,
+    config: OutcomeRunConfig,
+) -> tuple[OnPolicyState[State], EpochMetrics]:
+    """One source train_V_on_policy iteration for one seed."""
+    training, outcome = config.train, config.outcome
+    policy = conditioned_policy(frozen, explained)
+    global_step = state.step * training.num_envs
+    keys: Array = jax.random.split(state.key, 5)
+    actions = sample_actions(policy, keys[0], state.observations, state.explained, state.coalitions)
+    step_keys: Array = jax.random.split(keys[1], training.num_envs)
+    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+        step_keys, state.env_state, actions, env.default_params
+    )
+    # Terminal rows store the pre-reset observation; the (1 - terminated) mask makes the
+    # source's stored reset observation equivalent.
+    replay = append_conditioned(
+        state.replay,
+        Transitions(
+            state.observations,
+            actions,
+            transition.rewards,
+            transition.raw_observations.astype(jnp.int32),
+            transition.terminated,
+        ),
+        state.explained,
+        state.coalitions,
+    )
+    explained_rows, coalitions = condition_draw(keys[2], context.pool, training.num_envs)
+    learn = global_step % training.train_frequency < training.num_envs
+    batch, batch_explained, batch_coalitions = sample_conditioned(replay, keys[3], training.batch_size)
+    update = OnPolicyUpdate(state.networks, state.optimizer, batch, batch_explained, batch_coalitions)
+    loss = nnx.cond(
+        learn,
+        lambda value: (
+            update_on_policy(
+                value.networks, value.optimizer, value.batch, value.explained, value.coalitions, outcome
+            ).loss
+        ),
+        lambda value: jnp.asarray(nan, jnp.float32),
+        update,
+    )
+    log = learn & (global_step % LOG_STEPS < training.num_envs)
+    if context.exact is not None:
+        exact_values = context.exact
+
+        def exact_loss(networks: OutcomeNetworks) -> Array:
+            characteristic = OutcomeCharacteristic(networks, policy, outcome.variant)
+            return exact_outcome_loss(characteristic, exact_values, all_coalitions(state.coalitions.shape[-1]))
+
+        exact = nnx.cond(log, exact_loss, lambda networks: jnp.asarray(nan, jnp.float32), state.networks)
+    else:
+        exact = jnp.asarray(nan, jnp.float32)
+    stopped = jnp.asarray(False)
+    if training.exact_condition is not None:
+        stopped = log & (exact < training.exact_condition)
+    # The source breaks out of the loop before this step's target update.
+    target = (global_step % training.target_network_frequency < training.num_envs) & ~stopped
+    nnx.cond(target, soft_update, lambda networks, tau: None, state.networks, outcome.tau)
+    step = state.step + 1
+    next_state = OnPolicyState(
+        state.networks,
+        state.optimizer,
+        replay,
+        transition.observations.astype(jnp.int32),
+        transition.state,
+        explained_rows,
+        coalitions,
+        step,
+        stopped,
+        state.phase,
+        keys[4],
+    )
+    nothing = jnp.asarray(nan, jnp.float32)
+    return next_state, EpochMetrics(step, global_step, loss, nothing, exact, step, log)
+
+
+def condition_draw(key: Array, pool: Array, num_envs: int) -> tuple[Array, Array]:
+    """Source sample(): e_obs rows from the pool with replacement, one uniform coalition for every environment."""
+    keys: Array = jax.random.split(key)
+    rows = jax.random.randint(keys[0], (num_envs,), 0, pool.shape[0])
+    coalition = uniform_coalitions(keys[1], 1, pool.shape[-1])
+    return pool[rows], jnp.broadcast_to(coalition, (num_envs, pool.shape[-1]))
+
+
+def make_on_policy_snapshot[State](state: OnPolicyState[State]) -> ExplanationSnapshot:
+    """The final model is the last one, so `best` repeats the networks."""
+    from jax_shapley.explanation_io import ExplanationSnapshot
+
+    networks = _array_leaves(nnx.state(state.networks))
+    buffers = (
+        *_array_leaves(state.replay),
+        state.observations,
+        *_array_leaves(state.env_state),
+        state.explained,
+        state.coalitions,
+    )
+    return ExplanationSnapshot(
+        networks,
+        networks,
+        _array_leaves(nnx.state(state.optimizer)),
+        buffers,
+        (state.stopped, jax.random.key_data(state.key)),
+        state.step,
+        state.phase,
+        str(jax.random.key_impl(state.key)),
+    )
 
 
 def characteristic_context(
@@ -1360,8 +1700,10 @@ def template_state(context: RunContext, config: RunConfig) -> AnyState:
         network = characteristic_network(features, context.actions, config.characteristic)
         return initialize_state(CharacteristicModel(network, rngs=nnx.Rngs(0)), buffers, training, key)
     if isinstance(config, OutcomeRunConfig):
-        networks = OutcomeNetworks(outcome_network(features, context.actions, config.outcome), rngs=nnx.Rngs(0))
-        return initialize_state(networks, buffers, config.train, key)
+        network = outcome_network(features, context.actions, config.outcome)
+        if config.variant == "on_policy":
+            return _on_policy_template(context.env_config, network, config.train, features)
+        return initialize_state(OutcomeNetworks(network, rngs=nnx.Rngs(0)), buffers, config.train, key)
     outputs = context.actions if context.explained.kind == "behaviour" and context.outcome is None else 1
     layout = ShapleyLayout(features, outputs)
     model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(0))
@@ -1401,7 +1743,8 @@ def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Call
             "tabular": _tabular(env, config.train.exact_loss),
             "sink": sink,
         }
-        return _with_environment(run_outcome, env, options)
+        runner = run_outcome if config.variant == "off_policy" else run_outcome_on_policy
+        return _with_environment(runner, env, options)
     if context.outcome is not None:
         tabular = _tabular(env, config.train.exact_loss)
         options = {
@@ -1414,6 +1757,18 @@ def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Call
         return _with_environment(run_outcome_shapley, env, options)
     options = {"config": config, "explained": context.explained, "max_unique": context.max_unique, "sink": sink}
     return _with_environment(run_shapley, env, options)
+
+
+def _on_policy_template(
+    env: EnvironmentConfig, network: MLPConfig, config: OutcomeTrainConfig, features: int
+) -> AnyOnPolicyState:
+    pool = jnp.zeros((1, features), jnp.int32)
+    key = jax.random.key(0)
+    if isinstance(env, GridworldConfig):
+        return initial_on_policy_state(EpisodeStatisticsWrapper(Gridworld()), network, config, key, pool)
+    if isinstance(env, Mastermind222Config):
+        return initial_on_policy_state(EpisodeStatisticsWrapper(Mastermind222()), network, config, key, pool)
+    return initial_on_policy_state(EpisodeStatisticsWrapper(env.make()), network, config, key, pool)
 
 
 def _tabular(env: EnvironmentConfig, exact_loss: bool) -> TabularModel | None:
@@ -1457,6 +1812,15 @@ def _emit_checkpoint[Model: nnx.Module](state: ExplanationState[Model], due: Arr
     )  # Callback result has the declared scalar int32 specification.
 
 
+def _emit_on_policy[State](state: OnPolicyState[State], due: Array, sink: ExplanationSink) -> Array:
+    return cast(
+        Array,
+        io_callback(
+            sink.checkpoint, jax.ShapeDtypeStruct((), jnp.int32), make_on_policy_snapshot(state), due, ordered=True
+        ),
+    )  # Callback result has the declared scalar int32 specification.
+
+
 def _copy_parameters(source: nnx.Module, destination: nnx.Module) -> None:
     nnx.update(destination, nnx.state(source, nnx.Param))
 
@@ -1471,6 +1835,10 @@ def _dimensions[State, Params](env: EpisodeStatisticsWrapper[State, Params]) -> 
     if len(shape) != 1:
         raise ValueError("explanations require flat observations")
     return int(shape[0]), env.num_actions
+
+
+def _unit(config: RunConfig) -> str:
+    return "vector steps" if isinstance(config, OutcomeRunConfig) and config.variant == "on_policy" else "epochs"
 
 
 def _stage(config: RunConfig) -> str:

@@ -2,6 +2,7 @@
 
 import csv
 from contextlib import suppress
+from math import nan
 from pathlib import Path
 
 import jax
@@ -21,8 +22,16 @@ from jax_shapley.explanation_io import (
     load_characteristic,
     load_outcome,
     load_run_settings,
+    prepare_context,
+    restore_on_policy,
 )
-from jax_shapley.outcome import OutcomeCharacteristic, exact_outcome, exact_outcome_loss, learnt_behaviour_table
+from jax_shapley.outcome import (
+    ConditionedReplay,
+    OutcomeCharacteristic,
+    exact_outcome,
+    exact_outcome_loss,
+    learnt_behaviour_table,
+)
 from jax_shapley.run_io import CallbackToken, load_agent, load_replay, load_settings
 from jax_shapley.shapley import (
     ShapleyLayout,
@@ -36,13 +45,16 @@ from jax_shapley.tabular import transition_model
 from jax_shapley.train_explanations import (
     ExplainedOutcome,
     FrozenAgent,
+    OnPolicyState,
     OutcomeFrozen,
+    OutcomeRunConfig,
     OutcomeShapleyFrozen,
     conditioned_policy,
     main,
     outcome_exact,
     outcome_function,
     parse_args,
+    template_state,
 )
 
 
@@ -196,9 +208,61 @@ def test_shapley_explains_an_outcome_run(tmp_path: Path, explained: tuple[Path, 
         main([*_shapley(agent_folder, Path(outcome.folder), tmp_path / "reuse"), "--buffers", "characteristic"])
 
 
+def test_on_policy_run_follows_train_v_on_policy(tmp_path: Path, explained: tuple[Path, Path]) -> None:
+    agent_folder, characteristic_folder = explained
+    summary = _single(main(_on_policy(agent_folder, characteristic_folder, tmp_path)))
+    folder = Path(summary.folder)
+    assert summary.epochs == 50 and summary.best_validation_loss is None and not summary.stopped_early
+    rows = _csv(folder)
+    # Source logging: global_step % 100 < num_envs among multiples of 8.
+    assert [int(row["step"]) for row in rows] == [0, 104, 200, 304]
+    assert all(row["validation_loss"] == "" and float(row["exact_loss"]) > 0 for row in rows)
+    replay, steps, updates = _restored_on_policy(folder)
+    assert steps == updates == 50 and int(replay.size) == 400
+    coalitions = np.asarray(replay.coalitions).reshape(50, 8, 2)
+    assert (coalitions == coalitions[:, :1]).all()  # One coalition shared by every environment per decision.
+    pool = {tuple(row) for row in np.asarray(load_characteristic(characteristic_folder).buffers.train).tolist()}
+    assert {tuple(row) for row in np.asarray(replay.explained).tolist()} <= pool
+    observations = np.asarray(replay.transitions.observations).reshape(50, 8, 2)
+    following = np.asarray(replay.transitions.next_observations).reshape(50, 8, 2)
+    terminated = np.asarray(replay.transitions.terminated).reshape(50, 8)
+    continuing = ~terminated[:-1]
+    # Without termination the next decision starts from the stored next observation (no truncation here).
+    np.testing.assert_array_equal(observations[1:][continuing], following[:-1][continuing])
+    assert terminated.any()
+
+
+def test_on_policy_resume_and_shapley(
+    tmp_path: Path, explained: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_folder, characteristic_folder = explained
+    baseline = _single(main(_on_policy(agent_folder, characteristic_folder, tmp_path / "baseline")))
+    original = ExplanationWriter.checkpoint
+
+    def checkpoint(self: ExplanationWriter, snapshot: ExplanationSnapshot) -> CallbackToken:
+        token = original(self, snapshot)
+        self.store.wait()
+        if int(snapshot.epoch) >= 20:
+            raise OSError("injected interruption")
+        return token
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ExplanationWriter, "checkpoint", checkpoint)
+        with pytest.raises(Exception, match="injected interruption"):
+            main(_on_policy(agent_folder, characteristic_folder, tmp_path / "interrupted"))
+        with suppress(RuntimeError):
+            jax.effects_barrier()  # Clear the expected failed callback effect.
+    folder = next((tmp_path / "interrupted").iterdir())
+    resumed = _single(main(["resume", "--run", str(folder)]))
+    np.testing.assert_array_equal(_rows(Path(resumed.folder)), _rows(Path(baseline.folder)))  # NaN-aware.
+    assert load_outcome(Path(resumed.folder)).sha256 == load_outcome(Path(baseline.folder)).sha256
+    shapley = _single(main(_shapley(agent_folder, Path(baseline.folder), tmp_path / "shapley")))
+    assert shapley.epochs == 3 and all(row[4] >= 0 for row in _rows(Path(shapley.folder)))
+
+
 def test_outcome_validation(tmp_path: Path, explained: tuple[Path, Path]) -> None:
     agent_folder, characteristic_folder = explained
-    for invalid in (("--variant", "on_policy"), ("--tau", "0")):
+    for invalid in (("--variant", "outcome"), ("--tau", "0"), ("--train.num-envs", "0")):
         with pytest.raises(SystemExit):  # tyro reports configuration errors and exits.
             parse_args([*_outcome(agent_folder, characteristic_folder, tmp_path), *invalid])
     with pytest.raises(ValueError, match="transitions in the agent's replay"):
@@ -305,9 +369,53 @@ def _shapley_model(folder: Path) -> ShapleyModel:
     return model
 
 
-def _rows(folder: Path) -> list[list[float]]:
+def _on_policy(agent: Path, characteristic: Path, output: Path) -> list[str]:
+    return [
+        "outcome",
+        "--variant",
+        "on_policy",
+        "--agent",
+        str(agent),
+        "--characteristic",
+        str(characteristic),
+        "--hidden-widths",
+        "8",
+        "--tau",
+        "0.01",
+        "--train.total-timesteps",
+        "400",
+        "--train.num-envs",
+        "8",
+        "--train.batch-size",
+        "16",
+        "--chunk-epochs",
+        "7",
+        "--output",
+        str(output),
+    ]
+
+
+def _restored_on_policy(folder: Path) -> tuple[ConditionedReplay, int, int]:
+    """The checkpointed replay, completed vector steps and optimizer updates."""
+    config = load_run_settings(folder / "config.json").config
+    assert isinstance(config, OutcomeRunConfig)
+    context = prepare_context(config)
+    template = template_state(context, config)
+    assert isinstance(template, OnPolicyState)
+    store = ExplanationStore(folder, read_only=True)
+    try:
+        state = restore_on_policy(store, template, config, context)[0]
+    finally:
+        store.close()
+    return state.replay, int(state.step), int(state.optimizer.step[...])
+
+
+def _csv(folder: Path) -> list[dict[str, str]]:
     with (folder / "metrics.csv").open() as source:
-        return [
-            [float(row[key]) for key in ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "best_epoch")]
-            for row in csv.DictReader(source)
-        ]
+        return list(csv.DictReader(source))
+
+
+def _rows(folder: Path) -> list[list[float]]:
+    """Metric rows without timing; losses a run does not compute are NaN."""
+    keys = ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "best_epoch")
+    return [[nan if row[key] == "" else float(row[key]) for key in keys] for row in _csv(folder)]
