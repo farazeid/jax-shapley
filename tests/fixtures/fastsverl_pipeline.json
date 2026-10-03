@@ -1,0 +1,32 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": {
+    "characteristics.py": "39929f25b23af9416cd79c21f0a7532522eb8295f64e7339f6bb751fbf165ec0",
+    "shapley.py": "1bb823165546d39140b1fa8d64a7b4f15aee40ab0df88c1048ce65b3210a5490",
+    "utils.py": "2a0b8c35b5d62ca9dea0a74da7d5e1d2abba7f16302a6c98b288678e103ecc75",
+    "models.py": "ad427b514e460a03b36e69699ed8d7d4a892e9aa3a3e6a308b5b24e777bae62a",
+    "dqn.py": "e6aa5ee1213ea20a0a06f6002b97d657c623d5fb25d280ad9e21bb4505035a92",
+    "training.py": "f9f47faa0bb04faa08eee6dbfff2006d617656c4b12e46b74ea0d2cf16392e77",
+    "envs/hypercube.py": "af586a54482cd0606a8137ea6df54f0a1c8b594c6e4dfef7fb8c5aacf3361e75"
+  },
+  "explanations_sha256": "a955d0fab667780772b75cdcaebcc3ca140c19b1d90c178c9ece3ab9e0f7571d",
+  "fixture_sha256": "b325cd74ba76725bc908ad398682caa55eb837354feeef0ec5c1ec17fbdf5fe9",
+  "torch_version": "2.6.0",
+  "seed": 1729,
+  "learning_rate": 0.00025,
+  "buffer": {
+    "environments": 16,
+    "steps": 40,
+    "hypercube": [
+      3,
+      5
+    ]
+  },
+  "loop": {
+    "train_rows": 32,
+    "validation_rows": 8,
+    "batch_size": 8
+  },
+  "exact_condition": 0.002705839229747653,
+  "collector": "unchanged fill_buffer/get_data/train_models and model ASTs, CPU, recorded draws"
+}
