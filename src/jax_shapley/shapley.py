@@ -1,13 +1,14 @@
-"""Shapley models for behaviour and prediction explanations.
+"""Shapley models for behaviour, prediction and outcome explanations.
 
 A Shapley model maps a full observation to per-feature contributions `phi` of
-shape (..., features, outputs), trained against a frozen characteristic. The
-reference is FastSVERL's `Shapley`, `PolicyShapley` and `ValueShapley`.
+shape (..., features, outputs), trained against a frozen characteristic function
+`v(s, C)`. The reference is FastSVERL's `Shapley` and its Policy, Value and
+Performance subclasses, which differ only in the characteristic they explain.
 """
 
 from dataclasses import dataclass
 from math import comb
-from typing import NamedTuple, cast
+from typing import NamedTuple, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -18,7 +19,7 @@ from jax import Array
 from jaxtyping import Float
 
 from jax_shapley.characteristics import CharacteristicModel, LossMetrics, StateFlags, States, UniqueValues, Values
-from jax_shapley.coalitions import MASK, Coalition, CoalitionTable, Observations, coalition_table, mask
+from jax_shapley.coalitions import MASK, Coalition, Coalitions, CoalitionTable, Observations, coalition_table, mask
 from jax_shapley.networks import MLP, LayerConfig, MLPConfig
 
 type Contributions = Float[Array, "... features outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
@@ -36,6 +37,34 @@ class ShapleyLayout:
     def __post_init__(self) -> None:
         if self.features < 2 or self.outputs < 1:
             raise ValueError("Shapley models need at least two features and one output")
+
+
+@dataclass(frozen=True, slots=True)
+class MaskedCharacteristic:
+    """Behaviour/prediction characteristic: the model applied to masked observations."""
+
+    model: CharacteristicModel
+
+    def values(self, observations: Observations, coalitions: Coalitions) -> Values:
+        return self.model(mask(observations, coalitions)).values
+
+    def null(self, observations: Observations) -> Values:
+        """v(empty) for every row: one all-MASK row, broadcast over the leading axes.
+
+        The value is identical for every row. Evaluating a broadcast-constant batch also
+        miscompiles on XLA CPU (jax 0.11.0) from 64 rows; tests/test_jit_equivalence.py
+        guards the compiled result against eager evaluation.
+        """
+        null = self.model(jnp.full((1, observations.shape[-1]), MASK, jnp.int32)).values[0]
+        return jnp.broadcast_to(null, (*observations.shape[:-1], null.shape[-1]))
+
+
+class CharacteristicFunction(Protocol):
+    """A frozen characteristic v(s, C); coalitions broadcast against observations."""
+
+    def values(self, observations: Observations, coalitions: Coalitions) -> Values: ...
+
+    def null(self, observations: Observations) -> Values: ...
 
 
 class ShapleyOutput(NamedTuple):
@@ -67,14 +96,12 @@ def shapley_network(layout: ShapleyLayout, hidden_widths: tuple[int, ...]) -> ML
 
 def shapley_loss(
     model: ShapleyModel,
-    characteristic: CharacteristicModel,
+    characteristic: CharacteristicFunction,
     observations: Observations,
     coalition: Coalition,
 ) -> tuple[Array, LossMetrics]:
     """One coalition for the whole batch, as in the source: sum_{i in C} phi_i ~ v(C) - v(empty)."""
-    targets = jax.lax.stop_gradient(
-        characteristic(mask(observations, coalition)).values - null_values(characteristic, observations)
-    )
+    targets = jax.lax.stop_gradient(characteristic.values(observations, coalition) - characteristic.null(observations))
     predictions = jnp.sum(coalition[:, None].astype(jnp.float32) * model(observations).contributions, axis=-2)
     loss = jnp.mean(jnp.square(predictions - targets))
     return loss, LossMetrics(loss, jnp.mean(targets), jnp.mean(predictions))
@@ -83,7 +110,7 @@ def shapley_loss(
 def update_shapley(
     model: ShapleyModel,
     optimizer: nnx.Optimizer[ShapleyModel],
-    characteristic: CharacteristicModel,
+    characteristic: CharacteristicFunction,
     observations: Observations,
     coalition: Coalition,
 ) -> LossMetrics:
@@ -102,10 +129,10 @@ def update_shapley(
     return metrics
 
 
-def explain(model: ShapleyModel, characteristic: CharacteristicModel, observations: Observations) -> Contributions:
+def explain(model: ShapleyModel, characteristic: CharacteristicFunction, observations: Observations) -> Contributions:
     """Normalised Shapley values, using the learnt characteristic's grand and empty coalitions."""
-    grand = characteristic(observations).values
-    return normalise(model(observations).contributions, grand, null_values(characteristic, observations))
+    grand = characteristic.values(observations, jnp.ones(observations.shape[-1], jnp.bool_))
+    return normalise(model(observations).contributions, grand, characteristic.null(observations))
 
 
 def normalise(contributions: Contributions, grand: Values, null: Values) -> Contributions:
@@ -129,17 +156,17 @@ def exact_shapley(values: UniqueValues) -> StateContributions:
 
 
 def characteristic_table(
-    characteristic: CharacteristicModel,
+    characteristic: CharacteristicFunction,
     states: States,
     coalitions: CoalitionTable,
 ) -> UniqueValues:
     """The learnt characteristic at every coalition of every state."""
-    return characteristic(mask(states[None], coalitions[:, None])).values
+    return characteristic.values(states[None], coalitions[:, None])
 
 
 def exact_shapley_loss(
     model: ShapleyModel,
-    characteristic: CharacteristicModel,
+    characteristic: CharacteristicFunction,
     states: States,
     state_valid: StateFlags,
     exact: StateContributions,
@@ -148,17 +175,6 @@ def exact_shapley_loss(
     errors = jnp.square(explain(model, characteristic, states) - exact)
     valid = state_valid.astype(jnp.float32)
     return jnp.sum(errors * valid[:, None, None]) / (jnp.sum(valid) * exact.shape[-2] * exact.shape[-1])
-
-
-def null_values(characteristic: CharacteristicModel, observations: Observations) -> Values:
-    """v(empty) for every row: one all-MASK row, broadcast over the leading axes.
-
-    The value is identical for every row. Evaluating a broadcast-constant batch also
-    miscompiles on XLA CPU (jax 0.11.0) from 64 rows; tests/test_jit_equivalence.py
-    guards the compiled result against eager evaluation.
-    """
-    null = characteristic(jnp.full((1, observations.shape[-1]), MASK, jnp.int32)).values[0]
-    return jnp.broadcast_to(null, (*observations.shape[:-1], null.shape[-1]))
 
 
 def shapley_matrix(features: int) -> ShapleyMatrix:

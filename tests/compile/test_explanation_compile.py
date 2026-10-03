@@ -12,6 +12,7 @@ from jax_shapley.characteristics import (
     CharacteristicConfig,
     CharacteristicModel,
     Kind,
+    LossMetrics,
     OffPolicyConfig,
     Policy,
     characteristic_network,
@@ -23,6 +24,7 @@ from jax_shapley.characteristics import (
 )
 from jax_shapley.coalitions import all_coalitions, kernel_coalitions, mask, uniform_coalitions
 from jax_shapley.shapley import (
+    MaskedCharacteristic,
     ShapleyLayout,
     ShapleyModel,
     characteristic_table,
@@ -109,7 +111,17 @@ def test_characteristic_and_shapley_units_compile(
     model = ShapleyModel(shapley_network(layout, (width, width)), layout, rngs=nnx.Rngs(1))
     shapley_optimizer = make_adam(model, 2.5e-4, AdamConfig())
     coalition = jax.ShapeDtypeStruct((features,), jnp.bool_)
-    learn = nnx.jit(update_shapley).trace(model, shapley_optimizer, characteristic, batch, coalition)
+
+    def learn_shapley(
+        model: ShapleyModel,
+        optimizer: nnx.Optimizer[ShapleyModel],
+        characteristic: CharacteristicModel,
+        observations: jax.Array,
+        coalition: jax.Array,
+    ) -> LossMetrics:
+        return update_shapley(model, optimizer, MaskedCharacteristic(characteristic), observations, coalition)
+
+    learn = nnx.jit(learn_shapley).trace(model, shapley_optimizer, characteristic, batch, coalition)
     learnt = learn.lower().compile()(
         model, shapley_optimizer, characteristic, jnp.zeros(batch.shape, jnp.int32), every[1]
     )
@@ -119,11 +131,10 @@ def test_characteristic_and_shapley_units_compile(
         model: ShapleyModel, characteristic: CharacteristicModel, exact_values: jax.Array
     ) -> tuple[jax.Array, jax.Array]:
         # Both ground truths: the exact characteristic, and the learnt one (with_exact_char=False).
-        learnt = exact_shapley(characteristic_table(characteristic, exact.states, every))
-        exact_loss = exact_shapley_loss(
-            model, characteristic, exact.states, exact.state_valid, exact_shapley(exact_values)
-        )
-        return exact_loss, exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, learnt)
+        function = MaskedCharacteristic(characteristic)
+        learnt = exact_shapley(characteristic_table(function, exact.states, every))
+        exact_loss = exact_shapley_loss(model, function, exact.states, exact.state_valid, exact_shapley(exact_values))
+        return exact_loss, exact_shapley_loss(model, function, exact.states, exact.state_valid, learnt)
 
     compiled = nnx.jit(exact_losses).trace(model, characteristic, exact.at_states).lower().compile()
     assert all(jnp.isfinite(value) for value in compiled(model, characteristic, exact.at_states))

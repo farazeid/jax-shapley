@@ -40,6 +40,8 @@ from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_co
 from jax_shapley.envs import Gridworld, Mastermind222
 from jax_shapley.networks import QNetwork
 from jax_shapley.shapley import (
+    CharacteristicFunction,
+    MaskedCharacteristic,
     ShapleyLayout,
     ShapleyModel,
     characteristic_table,
@@ -237,12 +239,26 @@ class FrozenAgent:
     epsilon: Array
 
 
-class Learner[Model](NamedTuple):
-    """Model-specific steps closed over precomputed targets and frozen models."""
+class Draw(NamedTuple):
+    """One batch's sampled buffer rows and coalition(s)."""
 
-    train_batch: Callable[[Model, nnx.Optimizer[Model], Buffers, Array], Array]
-    validation_loss: Callable[[Model, Buffers, Array], Array]
+    rows: Array
+    coalitions: Array
+
+
+class Learner[Model](NamedTuple):
+    """Model-specific steps closed over precomputed targets and frozen models.
+
+    Sampling is separate from learning: `train_draw(key, epoch, batch)` and
+    `validation_draw(key, epoch)` default to the source's random draws, and
+    parity tests replay recorded upstream draws through them instead.
+    """
+
+    train_batch: Callable[[Model, nnx.Optimizer[Model], Buffers, Draw], Array]
+    validation_loss: Callable[[Model, Buffers, Draw], Array]
     exact_loss: Callable[[Model], Array]
+    train_draw: Callable[[Array, Array, Array], Draw]
+    validation_draw: Callable[[Array, Array], Draw]
 
 
 class Runner(Protocol):
@@ -352,38 +368,7 @@ def run_characteristic[State, Params](
         model_key, key = jax.random.split(key)
         model = CharacteristicModel(characteristic_network(features, actions, explained), rngs=nnx.Rngs(model_key))
         state = initialize_state(model, buffers, training, key)
-    buffers = state.buffers
-
-    def targets(observations: Array) -> Array:
-        return explained_values(agent.model(observations).q_values, explained, agent.epsilon)
-
-    train_targets, validation_targets = targets(buffers.train), targets(buffers.validation)
-    exact = (
-        exact_characteristic(buffers.exact, targets(buffers.exact), all_coalitions(features), max_unique=max_unique)
-        if training.exact_loss
-        else None
-    )
-
-    def train_batch(
-        model: CharacteristicModel, optimizer: nnx.Optimizer[CharacteristicModel], buffers: Buffers, key: Array
-    ) -> Array:
-        index_key, coalition_key = jax.random.split(key)
-        rows = jax.random.randint(index_key, (training.batch_size,), 0, training.train_size)
-        coalitions = uniform_coalitions(coalition_key, training.batch_size, features)
-        return update_characteristic(model, optimizer, buffers.train[rows], train_targets[rows], coalitions).loss
-
-    def validation_loss(model: CharacteristicModel, buffers: Buffers, key: Array) -> Array:
-        index_key, coalition_key = jax.random.split(key)
-        # Source validation resamples the whole validation size with replacement.
-        rows = jax.random.randint(index_key, (training.validation_size,), 0, training.validation_size)
-        coalitions = uniform_coalitions(coalition_key, training.validation_size, features)
-        return characteristic_loss(model, buffers.validation[rows], validation_targets[rows], coalitions)[0]
-
-    def exact_loss(model: CharacteristicModel) -> Array:
-        assert exact is not None
-        return exact_characteristic_loss(model, exact)
-
-    learner = Learner(train_batch, validation_loss, exact_loss)
+    learner = characteristic_learner(state.buffers, agent, explained, training, features, max_unique)
     return train(state, learner, training, config.chunk_epochs, sink)
 
 
@@ -416,10 +401,77 @@ def run_shapley[State, Params](
         model_key, key = jax.random.split(key)
         model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(model_key))
         state = initialize_state(model, buffers, training, key)
+    learner = shapley_learner(
+        state.buffers, agent, MaskedCharacteristic(characteristic), explained, config, features, max_unique
+    )
+    return train(state, learner, training, config.chunk_epochs, sink)
+
+
+def characteristic_learner(
+    buffers: Buffers,
+    agent: FrozenAgent,
+    explained: CharacteristicConfig,
+    training: ExplanationTrainConfig,
+    features: int,
+    max_unique: int,
+) -> Learner[CharacteristicModel]:
+    """Targets are the frozen agent's explained outputs; exact values use the exact buffer."""
+
+    def targets(observations: Array) -> Array:
+        return explained_values(agent.model(observations).q_values, explained, agent.epsilon)
+
+    train_targets, validation_targets = targets(buffers.train), targets(buffers.validation)
+    exact = (
+        exact_characteristic(buffers.exact, targets(buffers.exact), all_coalitions(features), max_unique=max_unique)
+        if training.exact_loss
+        else None
+    )
+
+    def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
+        del epoch, batch
+        index_key, coalition_key = jax.random.split(key)
+        rows = jax.random.randint(index_key, (training.batch_size,), 0, training.train_size)
+        return Draw(rows, uniform_coalitions(coalition_key, training.batch_size, features))
+
+    def validation_draw(key: Array, epoch: Array) -> Draw:
+        del epoch
+        index_key, coalition_key = jax.random.split(key)
+        # Source validation resamples the whole validation size with replacement.
+        rows = jax.random.randint(index_key, (training.validation_size,), 0, training.validation_size)
+        return Draw(rows, uniform_coalitions(coalition_key, training.validation_size, features))
+
+    def train_batch(
+        model: CharacteristicModel, optimizer: nnx.Optimizer[CharacteristicModel], buffers: Buffers, draw: Draw
+    ) -> Array:
+        rows = draw.rows
+        return update_characteristic(model, optimizer, buffers.train[rows], train_targets[rows], draw.coalitions).loss
+
+    def validation_loss(model: CharacteristicModel, buffers: Buffers, draw: Draw) -> Array:
+        rows = draw.rows
+        return characteristic_loss(model, buffers.validation[rows], validation_targets[rows], draw.coalitions)[0]
+
+    def exact_loss(model: CharacteristicModel) -> Array:
+        assert exact is not None
+        return exact_characteristic_loss(model, exact)
+
+    return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
+
+
+def shapley_learner(
+    buffers: Buffers,
+    agent: FrozenAgent,
+    characteristic: CharacteristicFunction,
+    explained: CharacteristicConfig,
+    config: ShapleyRunConfig,
+    features: int,
+    max_unique: int,
+) -> Learner[ShapleyModel]:
+    """One Shapley-kernel coalition per batch; exact values use the characteristic's exact buffer."""
+    training = config.train
     exact_values: Array | None = None
     exact: ExactCharacteristic | None = None
     if training.exact_loss:
-        observations = state.buffers.exact
+        observations = buffers.exact
         targets = explained_values(agent.model(observations).q_values, explained, agent.epsilon)
         coalitions = all_coalitions(features)
         exact = exact_characteristic(observations, targets, coalitions, max_unique=max_unique)
@@ -431,24 +483,29 @@ def run_shapley[State, Params](
         )
         exact_values = exact_shapley(values)
 
-    def train_batch(model: ShapleyModel, optimizer: nnx.Optimizer[ShapleyModel], buffers: Buffers, key: Array) -> Array:
+    def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
+        del epoch, batch
         index_key, coalition_key = jax.random.split(key)
         rows = jax.random.randint(index_key, (training.batch_size,), 0, training.train_size)
-        coalition = kernel_coalitions(coalition_key, 1, features)[0]
-        return update_shapley(model, optimizer, characteristic, buffers.train[rows], coalition).loss
+        return Draw(rows, kernel_coalitions(coalition_key, 1, features)[0])
 
-    def validation_loss(model: ShapleyModel, buffers: Buffers, key: Array) -> Array:
+    def validation_draw(key: Array, epoch: Array) -> Draw:
+        del epoch
         index_key, coalition_key = jax.random.split(key)
         rows = jax.random.randint(index_key, (training.validation_size,), 0, training.validation_size)
-        coalition = kernel_coalitions(coalition_key, 1, features)[0]
-        return shapley_loss(model, characteristic, buffers.validation[rows], coalition)[0]
+        return Draw(rows, kernel_coalitions(coalition_key, 1, features)[0])
+
+    def train_batch(model: ShapleyModel, optimizer: nnx.Optimizer[ShapleyModel], buffers: Buffers, draw: Draw) -> Array:
+        return update_shapley(model, optimizer, characteristic, buffers.train[draw.rows], draw.coalitions).loss
+
+    def validation_loss(model: ShapleyModel, buffers: Buffers, draw: Draw) -> Array:
+        return shapley_loss(model, characteristic, buffers.validation[draw.rows], draw.coalitions)[0]
 
     def exact_loss(model: ShapleyModel) -> Array:
         assert exact is not None and exact_values is not None
         return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, exact_values)
 
-    learner = Learner(train_batch, validation_loss, exact_loss)
-    return train(state, learner, training, config.chunk_epochs, sink)
+    return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
 
 def train[Model: nnx.Module](
@@ -501,15 +558,20 @@ def epoch_step[Model: nnx.Module](
     key, batch_key, validation_key = jax.random.split(state.key, 3)
 
     def batch(
-        carry: tuple[Model, nnx.Optimizer[Model]], key: Array
+        carry: tuple[Model, nnx.Optimizer[Model]], inputs: tuple[Array, Array]
     ) -> tuple[tuple[Model, nnx.Optimizer[Model]], Array]:
         model, optimizer = carry
-        return (model, optimizer), learner.train_batch(model, optimizer, state.buffers, key)
+        key, index = inputs
+        draw = learner.train_draw(key, state.epoch, index)
+        return (model, optimizer), learner.train_batch(model, optimizer, state.buffers, draw)
 
+    batches = (jax.random.split(batch_key, config.batches), jnp.arange(config.batches, dtype=jnp.int32))
     _, losses = nnx.scan(batch, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
-        (state.model, state.optimizer), jax.random.split(batch_key, config.batches)
+        (state.model, state.optimizer), batches
     )
-    validation = learner.validation_loss(state.model, state.buffers, validation_key)
+    validation = learner.validation_loss(
+        state.model, state.buffers, learner.validation_draw(validation_key, state.epoch)
+    )
     exact = learner.exact_loss(state.model) if config.exact_loss else jnp.asarray(nan, jnp.float32)
     epoch = state.epoch + 1
     improved = validation < state.best_loss
