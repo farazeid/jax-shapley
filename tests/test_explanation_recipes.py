@@ -127,6 +127,25 @@ def test_large_mastermind_recipe_encodes_source_settings(tmp_path: Path, size: s
     assert (explained.train.epochs, explained.train.patience, explained.sweep) == (50_000, 5_000, tuple(range(1, 11)))
 
 
+@pytest.mark.parametrize("size", ["443", "453", "463"])
+def test_large_mastermind_outcome_recipe_encodes_source_settings(tmp_path: Path, size: str) -> None:
+    arguments = ("outcome", *AGENT, "--characteristic", "runs/c")
+    (command,) = _capture(tmp_path, "mastermind.sh", arguments, leading=(size,))
+    config = parse_args(command[4:])
+    assert isinstance(config, OutcomeRunConfig) and config.variant == "off_policy" and not config.with_exact_char
+    assert (config.sweep, config.tau, config.gamma, config.hidden_widths) == ((1,), 0.01, 1.0, (128, 128))
+    training = config.train
+    # epochs = total_timesteps * batch_size // train_buffer_size over the agent's whole 10M replay.
+    assert (training.train_size, training.validation_size, training.batch_size) == (10_000_000, 160, 64)
+    assert (training.epochs, training.patience_epochs) == (64, 64)
+    assert training.track_batch and not training.exact_loss
+    arguments = ("outcome-shapley", *AGENT, "--characteristic", "runs/o")
+    (shapley,) = _capture(tmp_path, "mastermind.sh", arguments, leading=(size,))
+    explained = parse_args(shapley[4:])
+    assert isinstance(explained, ShapleyRunConfig) and not explained.train.exact_loss and not explained.with_exact_char
+    assert (explained.train.epochs, explained.train.patience, explained.sweep) == (50_000, 5_000, tuple(range(1, 11)))
+
+
 @pytest.mark.parametrize(
     "domain,timesteps,num_envs,groups",
     [
