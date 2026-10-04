@@ -1,0 +1,27 @@
+claim,check,values,result
+fig3a_is_helps,final(Off-policy (with IS)) < final(Off-policy (without IS)),0.006685 vs 0.007176,pass
+fig3a_onpolicy_best,final(On-policy) < final(Off-policy (with IS)),7.039e-06 vs 0.006685,pass
+fig7_is_helps,final(Off-policy (with IS)) < final(Off-policy (without IS)),0.003951 vs 0.006759,pass
+fig7_onpolicy_best,final(On-policy) < final(Off-policy (with IS)),5.54e-05 vs 0.003951,pass
+fig8_normalised_best_policy,final(Normalised IS) < final(Without IS),0.007483 vs 0.01451,pass
+fig8_unnormalised_worst_policy,final(Unnormalised IS) > final(Without IS),0.01268 vs 0.01451,fail
+fig8_normalised_best_value,final(Normalised IS) < final(Without IS),0.6244 vs 0.9892,pass
+fig8_unnormalised_worst_value,final(Unnormalised IS) > final(Without IS),0.9682 vs 0.9892,fail
+fig3b_ratio_mitigates,max(50:1) < max(1:1),0.00211 vs 0.0195,pass
+fig10_ratio_mitigates_policy,max(50:1) < max(1:1),0.01054 vs 0.01874,pass
+fig10_ratio_mitigates_outcome,max(50:1) < max(1:1),0.0272 vs 0.05243,pass
+fig10_ratio_mitigates_gwb_value,max(50:1) < max(1:1),0.2185 vs 0.9896,pass
+fig3c_sampling_beats_model,final(Sample) < final(Model),0.000234 vs 0.002825,pass
+fig3c_sampling_matches_exact,ratio(final(Sample) / final(Exact)) within [0.5; 2],0.5058,pass
+fig11_sampling_beats_model_value,final(Sample) < final(Model),0.0004816 vs 0.0008729,pass
+fig11_sampling_beats_model_333,final(Sample) < final(Model),no JAX series app_mastermind_333_policy_sampling / Sample,missing
+fig11_sampling_beats_model_gwb,final(Sample) < final(Model),no JAX series app_gwb_policy_sampling / Sample,missing
+fig4_error_propagation_222,final(Approx characteristic) > final(Exact characteristic),0.002765 vs 0.0004613,pass
+fig4_error_propagation_333,final(Approx characteristic) > final(Exact characteristic),0.0003784 vs 6.433e-05,pass
+fig4_error_propagation_gwb,final(Approx characteristic) > final(Exact characteristic),0.0001204 vs 6.504e-09,pass
+fig1_outcome_exact_behaviour,final(On-policy; exact behaviour) < final(On-policy; approx behaviour),0.01204 vs 0.01294,pass
+fig2_scaling_behaviour,spearman(states; updates) >= 0.8 per dimension (characteristic),incomplete Hypercube grid,missing
+fig5_scaling_prediction,spearman(states; updates) >= 0.8 per dimension (characteristic),incomplete Hypercube grid,missing
+tables_converge,final losses finite and positive for every domain and model,no table_3_prediction,missing
+tables_cost_manageable,max/min updates across 443/453/463 <= 3 per model,no table_3_prediction,missing
+table2_nullity,mean |scaled value| over empty board rows <= 0.25 x mean over filled rows; greedy Mastermind-463 states with 1-5 guesses made,"empty 0.01451, filled 0.267",pass

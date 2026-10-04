@@ -87,12 +87,16 @@ def main(args: Args) -> None:
         )
     ):
         domains, labels, groups = [], [], []
-        for size in SIZES:
-            for model in models:
-                label = f"Mastermind-{size} {model}"
-                domains.append(f"Mastermind-{size}")
-                labels.append(model)
-                groups.append(group_stats(label, sweep_folders(_sweep(args.root, size, kind, model))))
+        try:
+            for size in SIZES:
+                for model in models:
+                    label = f"Mastermind-{size} {model}"
+                    domains.append(f"Mastermind-{size}")
+                    labels.append(model)
+                    groups.append(group_stats(label, _completed(_sweep(args.root, size, kind, model))))
+        except ValueError as error:
+            print(f"missing {table}: {error}")
+            continue
         _write_table(args.output, table, domains, labels, groups)
     if args.table_2:
         explainer = load_explainer(args.root)
@@ -210,6 +214,14 @@ def board_html(board: Board) -> str:
         "td,th{border:1px solid #444;padding:6px 10px;text-align:center}.action{color:#16bd31;font-weight:bold}</style>"
         f"<table><tr>{header}</tr>{''.join(rows)}</table>\n"
     )
+
+
+def _completed(sweep: Path) -> list[Path]:
+    """A sweep's seed folders, when every seed has finished."""
+    seeds = sweep_folders(sweep)
+    if any(not (seed / "summary.json").exists() for seed in seeds):
+        raise ValueError(f"{sweep} has unfinished seeds")
+    return seeds
 
 
 def _sweep(root: Path, size: str, kind: str, model: str) -> Path:

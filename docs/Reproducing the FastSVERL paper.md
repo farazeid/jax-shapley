@@ -36,6 +36,29 @@ uv run --group benchmark python scripts/paper_port/compare.py
 - **Reused characteristics.** The sampling recipe reuses one learnt characteristic sweep for both model groups (upstream's same-seed processes train the same characteristic). The outcome groups reuse the behaviour characteristic sweep: upstream's outcome flow trains it with identical settings.
 - **Ledger.** The full list is in the deviation ledger in [Explanations](Explanations.md).
 
-## Results
+## Results (runs stopped 2026-10-04)
 
-Results are added when the runs complete.
+The runs were stopped before every experiment finished. Everything below comes from completed runs only. `docs/data/paper--comparison.csv` holds each compared quantity, `docs/data/paper--claims-results.csv` each claim, and `docs/figures/paper/` the published-versus-JAX overlays.
+
+**Coverage.** 42 of 51 published curve figures, 62 of 80 Hypercube bars, Table 1 and Table 2. 301 of 306 compared quantities meet the pre-registered criteria, and 18 of 26 claims hold.
+
+| Experiment | Status | Comparison |
+| --- | --- | --- |
+| Figs 1, 4: Mastermind-222, Gridworld, Mastermind-333 | Complete | All but four quantities pass (below) |
+| Figs 3a, 7–9: off-policy characteristics | Complete | All quantities pass. "IS helps" and "on-policy best" hold; "unnormalised IS worse than none" fails narrowly (below) |
+| Figs 3b, 10: continual learning | Complete | All quantities pass; all four "higher ratios mitigate spikes" claims hold |
+| Figs 3c, 11: sampled characteristics | Mastermind-222 behaviour and prediction only | All quantities pass; the three Mastermind-222 claims hold. Not run: Gridworld, Mastermind-333, and the sampled-behaviour outcome group |
+| Figs 2, 5: Hypercube | 31 of 40 cube × kind combinations; dimension 5 mostly missing | 61 of 62 bars pass. For dimensions 2–4, Spearman(states, updates) is 1.0, 1.0 and 0.9, but the pre-registered claim needs all four dimensions |
+| Table 1 (behaviour, Mastermind-443/453/463) | Complete | All 12 quantities pass; updates within 0.7–1.3× and final losses within 0.7–1.04× of the published values |
+| Table 2 (Mastermind-463 explanation) | Complete | Nullity claim holds: mean scaled value 0.015 on unused rows versus 0.267 on used rows. On the paper's board the JAX agent guesses ACBB, not CCCB: that board starts from the paper agent's own first guess, so the JAX agent never reaches it |
+| Tables 3, 4; Fig 6 (prediction, off-policy outcome) | Not run: stopped during the prediction stage | — |
+
+**Quantities outside tolerance (5 of 306):**
+
+- **Gridworld Shapley with the approximate characteristic, final value:** 1.2e-4 against a published 3.9e-4, a factor of 3.3. Every published run explains one shared characteristic of one agent, so the published standard error (3e-7) excludes agent and characteristic variance.
+- **Gridworld prediction Shapley with the exact characteristic, final value:** 1.3e-8 against 1.6e-6. Both have converged; the published value sits just above the 1e-6 floor that would count them as equal.
+- **Gridworld off-policy outcome characteristic (exact behaviour) at 25% of training:** a factor of 2.35 (z = 3.4); its final value passes.
+- **Mastermind-333 prediction characteristic at 25% of training:** a factor of 2.4; its final value passes.
+- **Hypercube 2×4 behaviour Shapley:** 376 updates against 232, a factor of 1.6 (the bar tolerance is 1.5).
+
+**Claims not reproduced.** "Unnormalised IS is worse than no reweighting" (Fig 8, behaviour and prediction) fails narrowly. In JAX, unnormalised IS ends 13% below no reweighting (behaviour) and 2% below (prediction); upstream ends 29% and 7% above. Every value in the figure is within tolerance and the gap is within about one standard error. The importance-weighting code path is identical to upstream's (ratio, identity weighting and weighted MSE).
