@@ -10,6 +10,7 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 import pytest
+from flax import nnx
 
 from jax_shapley import train_dqn
 from jax_shapley.explanation_io import (
@@ -18,6 +19,7 @@ from jax_shapley.explanation_io import (
     ExplanationWriter,
     load_characteristic,
     load_run_settings,
+    load_shapley,
     sweep_folders,
 )
 from jax_shapley.run_io import CallbackToken, load_settings
@@ -67,6 +69,21 @@ def test_matched_shapley_sweep_pairs_characteristic_seeds(tmp_path: Path, agent:
     for characteristic, summary in zip(characteristics, shapley, strict=True):
         saved = load_run_settings(Path(summary.folder) / "config.json")
         assert saved.characteristic_sha256 == load_characteristic(Path(characteristic.folder)).sha256
+        # load_shapley restores the completed (best) model with one output per action.
+        loaded = load_shapley(Path(summary.folder))
+        assert loaded.characteristic_sha256 == saved.characteristic_sha256
+        stored = _arrays(Path(summary.folder))["model"]
+        restored = [np.asarray(leaf) for leaf in jax.tree.leaves(nnx.state(loaded.model))]
+        assert len(stored) == len(restored)
+        for left_array, right_array in zip(stored, restored, strict=True):
+            np.testing.assert_array_equal(left_array, right_array)
+        observations = load_characteristic(Path(characteristic.folder)).buffers.validation
+        settings = load_settings(agent / "config.json")
+        assert loaded.model(observations).contributions.shape == (
+            observations.shape[0],
+            observations.shape[1],
+            settings.env.make().num_actions,
+        )
     shared = _summaries(
         main([*_shapley(agent, Path(characteristics[0].folder), tmp_path / "shared"), "--seeds", "1", "2"])
     )

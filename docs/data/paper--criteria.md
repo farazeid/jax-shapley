@@ -23,3 +23,7 @@ Hypercube runs train an agent per seed, so their standard errors include agent v
 ## Claims
 
 Each paper figure's stated finding is also checked on the JAX runs alone (`paper--claims.csv`). "Final" is the mean over runs at the end of the published x range. A claim passes when its relation holds.
+
+## Table 2 (added 2026-10-04, before any trained Mastermind-463 Shapley model existed)
+
+Table 2 explains one board reached by the paper's agent. Its opening guess (AACA) is the paper agent's own, so another agent need not reach that board or act well there. Values on that board are reported but not compared. The checked finding is the one that does not depend on the board: unused guess slots get a neutral influence (`table2_nullity`, over every greedy state of the JAX agent). The JAX agent's greedy guess on the paper's board is reported against the paper's CCCB.
