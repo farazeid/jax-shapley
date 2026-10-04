@@ -27,3 +27,7 @@ Each paper figure's stated finding is also checked on the JAX runs alone (`paper
 ## Table 2 (added 2026-10-04, before any trained Mastermind-463 Shapley model existed)
 
 Table 2 explains one board reached by the paper's agent. Its opening guess (AACA) is the paper agent's own, so another agent need not reach that board or act well there. Values on that board are reported but not compared. The checked finding is the one that does not depend on the board: unused guess slots get a neutral influence (`table2_nullity`, over every greedy state of the JAX agent). The JAX agent's greedy guess on the paper's board is reported against the paper's CCCB.
+
+## Correction to the published targets (2026-10-04)
+
+The outcome-characteristic figures (`app_gwb_perf_char`, `app_mastermind_222_perf_char`, `main_mastermind_222_perf_char`) draw on- and off-policy lines in the same colours, dashed and solid. Upstream's `plot()` honours the scripts' `colour` and `linestyle` keys, while its bands use the default colour cycle. The original extractor keyed lines by colour alone, so it merged each dashed/solid pair into one series. It now keys lines by colour and dash style, and pairs each band with the line drawn in the same order. Every other figure's extracted rows are unchanged. The fix was found while comparing JAX results, because the merged series spanned both runs' x ranges. The criteria themselves are unchanged.

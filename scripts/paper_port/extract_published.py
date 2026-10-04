@@ -42,6 +42,8 @@ CURVE_POINTS = 64
 TICK_MIN_LENGTH = 3.0
 TICK_MAX_LENGTH = 10.0
 OFFSET = re.compile(r"1e(-?\d+)")
+# Suffix for dashed line series: same-colour solid and dashed lines are different groups.
+DASHED = " (dashed)"
 TICK_LABEL = re.compile(r"[0-9.eE+\-\N{MINUS SIGN}]+")
 
 
@@ -70,6 +72,7 @@ class Shape:
     fill: Colour
     subpaths: tuple[tuple[Point, ...], ...]
     clip: Box | None
+    dashed: bool = False
 
     @property
     def points(self) -> tuple[Point, ...]:
@@ -207,22 +210,28 @@ def extract_curves(path: Path, figure: str) -> list[CurveRow]:
         if panel.x is None or panel.y is None:
             raise ValueError(f"{figure}: panel {index} could not be calibrated")
         title = " | ".join(panel.titles)
-        for shape in shapes:
-            if shape.clip != panel.box or _is_grey(shape.stroke if shape.operator == "S" else shape.fill):
-                continue
-            if shape.operator == "S" and len(shape.points) > 3:
-                series = legend.get(_key(shape.stroke), _name(shape.stroke))
+        coloured = [
+            shape
+            for shape in shapes
+            if shape.clip == panel.box and not _is_grey(shape.stroke if shape.operator == "S" else shape.fill)
+        ]
+        lines = [shape for shape in coloured if shape.operator == "S" and len(shape.points) > 3]
+        fills = [shape for shape in coloured if shape.operator in ("f", "B", "F") and len(shape.points) > 8]
+        names = [_line_name(legend, line) for line in lines]
+        for line, series in zip(lines, names, strict=True):
+            rows.extend(
+                CurveRow(figure, index, title, series, "mean", panel.x.value(x), panel.y.value(y))
+                for x, y in line.points
+            )
+        # plot() draws group k's band (fill_between, default colour cycle) and line (its `colour`, when
+        # set): matplotlib paints every band before every line, so the k-th band belongs to the k-th line.
+        paired = len(fills) == len(lines)
+        for position, band in enumerate(fills):
+            series = names[position] if paired else legend.get(_key(band.fill), _name(band.fill))
+            for kind, edge in zip(("high", "low"), _band_edges(band.points), strict=True):
                 rows.extend(
-                    CurveRow(figure, index, title, series, "mean", panel.x.value(x), panel.y.value(y))
-                    for x, y in shape.points
+                    CurveRow(figure, index, title, series, kind, panel.x.value(x), panel.y.value(y)) for x, y in edge
                 )
-            elif shape.operator in ("f", "B", "F") and len(shape.points) > 8:
-                series = legend.get(_key(shape.fill), _name(shape.fill))
-                for kind, edge in zip(("high", "low"), _band_edges(shape.points), strict=True):
-                    rows.extend(
-                        CurveRow(figure, index, title, series, kind, panel.x.value(x), panel.y.value(y))
-                        for x, y in edge
-                    )
     return rows
 
 
@@ -367,7 +376,8 @@ def legend_labels(texts: list[Text], shapes: list[Shape]) -> dict[str, str]:
         centre_y = (max(ys) + min(ys)) / 2
         candidates = [text for text in texts if 0 < text.x - max(xs) < 20 and abs(text.y + 3 - centre_y) < 6]
         if candidates:
-            labels.setdefault(_key(colour), min(candidates, key=lambda text: text.x).value)
+            key = _key(colour) + (DASHED if shape.operator == "S" and shape.dashed else "")
+            labels.setdefault(key, min(candidates, key=lambda text: text.x).value)
     return labels
 
 
@@ -463,6 +473,10 @@ def _shapes(operations: list[tuple[list[object], bytes]]) -> list[Shape]:
     page = _Painter()
     for operands, operator in operations:
         values = [float(value) for value in operands if isinstance(value, int | float)]
+        if operator == b"d":
+            pattern = operands[0] if operands else None
+            page.dashed = isinstance(pattern, list) and len(pattern) > 0
+            continue
         page.apply(operator.decode(), values)
     return page.shapes
 
@@ -474,11 +488,12 @@ class _Painter:
 
     def __init__(self) -> None:
         self.shapes: list[Shape] = []
-        self.stack: list[tuple[list[float], Colour, Colour, Box | None]] = []
+        self.stack: list[tuple[list[float], Colour, Colour, Box | None, bool]] = []
         self.ctm: list[float] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
         self.stroke: Colour = (0.0, 0.0, 0.0)
         self.fill: Colour = (0.0, 0.0, 0.0)
         self.clip: Box | None = None
+        self.dashed = False
         self.subpaths: list[list[Point]] = []
         self.pending_clip = False
 
@@ -496,9 +511,9 @@ class _Painter:
 
     def _state(self, name: str, values: list[float]) -> None:
         if name == "q":
-            self.stack.append((list(self.ctm), self.stroke, self.fill, self.clip))
+            self.stack.append((list(self.ctm), self.stroke, self.fill, self.clip, self.dashed))
         elif name == "Q" and self.stack:
-            self.ctm, self.stroke, self.fill, self.clip = self.stack.pop()
+            self.ctm, self.stroke, self.fill, self.clip, self.dashed = self.stack.pop()
         elif name == "cm" and len(values) == 6:
             a, b, c, d, e, f = values
             m = self.ctm
@@ -537,7 +552,7 @@ class _Painter:
             self.clip = (round(min(xs), 2), round(min(ys), 2), round(max(xs), 2), round(max(ys), 2))
         elif name != "n" and points:
             subpaths = tuple(tuple(subpath) for subpath in self.subpaths)
-            self.shapes.append(Shape(name.rstrip("*"), self.stroke, self.fill, subpaths, self.clip))
+            self.shapes.append(Shape(name.rstrip("*"), self.stroke, self.fill, subpaths, self.clip, self.dashed))
         self.subpaths, self.pending_clip = [], False
 
     def _transform(self, x: float, y: float) -> Point:
@@ -676,6 +691,13 @@ def _is_grey(colour: Colour) -> bool:
 
 def _is_black(shape: Shape) -> bool:
     return max(shape.stroke) < 0.05
+
+
+def _line_name(legend: dict[str, str], line: Shape) -> str:
+    """A line's legend label: by colour and dash style, so same-colour solid and dashed lines differ."""
+    if line.dashed:
+        return legend.get(_key(line.stroke) + DASHED, _name(line.stroke) + DASHED)
+    return legend.get(_key(line.stroke), _name(line.stroke))
 
 
 def _key(colour: Colour) -> str:
