@@ -23,6 +23,7 @@ from jax_shapley.networks import MLP, ActionValues, LayerConfig, MLPConfig
 from jax_shapley.train_dqn import exploration_probabilities, greedy_probabilities
 
 type Kind = Literal["behaviour", "prediction"]
+type Estimator = Literal["model", "sampled"]
 
 # Rows per exact-loss evaluation chunk; padding beyond the valid entries is never evaluated.
 EXACT_CHUNK = 512
@@ -41,11 +42,16 @@ type StateFlags = Bool[Array, "unique"]  # ruff: ignore[undefined-name] -- jaxty
 
 @dataclass(frozen=True, slots=True)
 class CharacteristicConfig:
-    """Which agent output is explained, and the characteristic's hidden ReLU widths."""
+    """Which agent output is explained, and the characteristic's hidden ReLU widths.
+
+    A `sampled` estimator has no model: values are single draws from its train buffer
+    (`jax_shapley.sampling`).
+    """
 
     kind: Kind
     policy: Policy = "greedy"
     hidden_widths: tuple[int, ...] = (64, 64)
+    estimator: Estimator = "model"
 
     def __post_init__(self) -> None:
         if self.kind not in ("behaviour", "prediction"):
@@ -54,6 +60,8 @@ class CharacteristicConfig:
             raise ValueError("explained policy must be greedy or explore")
         if any(width < 1 for width in self.hidden_widths):
             raise ValueError("hidden widths must be positive")
+        if self.estimator not in ("model", "sampled"):
+            raise ValueError("characteristic estimator must be model or sampled")
 
 
 @dataclass(frozen=True, slots=True)

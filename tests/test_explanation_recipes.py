@@ -227,6 +227,87 @@ def test_smoke_recipe_chains_three_short_stages(tmp_path: Path) -> None:
     assert char.train.epochs == explained.train.epochs == 4
 
 
+@pytest.mark.parametrize(
+    ("domain", "kind", "width", "characteristic_epochs", "shapley_epochs", "patience"),
+    [
+        ("mastermind222", "behaviour", 64, 50, 50, 10_000),
+        ("mastermind222", "prediction", 64, 80, 50, 10_000),
+        ("mastermind333", "behaviour", 128, 1000, 300, 10_000),
+        ("mastermind333", "prediction", 128, 2000, 500, 10_000),
+        ("gridworld", "behaviour", 64, 50, 20, None),
+        ("gridworld", "prediction", 64, 30, 20, None),
+    ],
+)
+def test_sampling_recipe_encodes_source_settings(
+    tmp_path: Path,
+    domain: str,
+    kind: str,
+    width: int,
+    characteristic_epochs: int,
+    shapley_epochs: int,
+    patience: int | None,
+) -> None:
+    root = ("--output-root", "runs/sampling")
+    model, sampled = _capture(tmp_path, "sampling.sh", ("characteristic", "--kind", kind, *AGENT, *root), (domain,))
+    learnt, pool = parse_args(model[4:]), parse_args(sampled[4:])
+    assert isinstance(learnt, CharacteristicRunConfig) and isinstance(pool, CharacteristicRunConfig)
+    assert (learnt.kind, learnt.estimator, learnt.policy, learnt.hidden_widths) == (
+        kind,
+        "model",
+        "greedy",
+        (width,) * 2,
+    )
+    assert (learnt.train.epochs, learnt.train.patience) == (characteristic_epochs, patience or characteristic_epochs)
+    assert (
+        learnt.train.exact_loss and learnt.sweep == tuple(range(1, 21)) and learnt.output == Path("runs/sampling/model")
+    )
+    assert (pool.kind, pool.estimator, pool.train.exact_loss, pool.train.exact_size) == (kind, "sampled", False, 8000)
+    for config in (learnt, pool):
+        training = config.train
+        assert (training.train_size, training.validation_size, training.batch_size, training.num_envs) == (
+            8000,
+            2000,
+            128,
+            16,
+        )
+    sources = ("--model", "runs/model", "--sampled", "runs/sampled")
+    commands = _capture(tmp_path, "sampling.sh", ("shapley", "--kind", kind, *AGENT, *sources, *root), (domain,))
+    groups = [parse_args(command[4:]) for command in commands]
+    expected = [("runs/model", "fresh", True), ("runs/model", "fresh", False), ("runs/sampled", "characteristic", True)]
+    for config, (characteristic, buffers, with_exact_char), group in zip(
+        groups, expected, ("w_exact_model", "wo_exact_model", "w_exact_sampling"), strict=True
+    ):
+        assert isinstance(config, ShapleyRunConfig)
+        assert (config.characteristic, config.buffers, config.with_exact_char) == (
+            Path(characteristic),
+            buffers,
+            with_exact_char,
+        )
+        assert (config.train.epochs, config.train.patience) == (shapley_epochs, patience or shapley_epochs)
+        assert config.train.exact_loss and config.hidden_widths == (width,) * 2
+        assert config.output == Path("runs/sampling") / group and config.sweep == tuple(range(1, 21))
+
+
+@pytest.mark.parametrize(
+    ("domain", "tau", "total"), [("mastermind222", 0.01, 1_000_000), ("gridworld", 0.001, 100_000)]
+)
+def test_sampling_outcome_recipe_encodes_source_settings(tmp_path: Path, domain: str, tau: float, total: int) -> None:
+    sources = ("--model", "runs/model", "--sampled", "runs/sampled", "--output-root", "runs/outcome")
+    commands = _capture(tmp_path, "sampling.sh", ("outcome", *AGENT, *sources), (domain,))
+    expected = [("runs/model", True), ("runs/model", False), ("runs/sampled", True)]
+    for command, (characteristic, with_exact_char) in zip(commands, expected, strict=True):
+        config = parse_args(command[4:])
+        assert isinstance(config, OutcomeRunConfig) and config.variant == "on_policy"
+        assert (config.characteristic, config.with_exact_char, config.tau) == (
+            Path(characteristic),
+            with_exact_char,
+            tau,
+        )
+        training = config.train
+        assert (training.total_timesteps, training.num_envs, training.batch_size) == (total, 16, 64)
+        assert training.exact_loss and config.hidden_widths == (64, 64) and config.sweep == tuple(range(1, 21))
+
+
 def _capture(tmp_path: Path, script: str, extra: tuple[str, ...], leading: tuple[str, ...] = ()) -> list[list[str]]:
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)

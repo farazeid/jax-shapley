@@ -30,6 +30,7 @@ from jax.experimental import io_callback
 from jax_shapley.characteristics import (
     CharacteristicConfig,
     CharacteristicModel,
+    Estimator,
     ExactCharacteristic,
     Kind,
     OffPolicyConfig,
@@ -72,14 +73,17 @@ from jax_shapley.outcome import (
     update_on_policy,
 )
 from jax_shapley.replay import TransitionBatch
+from jax_shapley.sampling import SampledCharacteristic, SampledPool, sampled_pool
 from jax_shapley.shapley import (
     CharacteristicFunction,
     MaskedCharacteristic,
     ShapleyLayout,
     ShapleyModel,
     characteristic_table,
+    contribution_loss,
     exact_shapley,
     exact_shapley_loss,
+    normalise,
     shapley_loss,
     shapley_network,
     update_shapley,
@@ -205,6 +209,10 @@ class CharacteristicRunConfig:
     explained policy, so `train.exact_buffer_size` is required. `off_policy` weights
     each row by the explained-to-behaviour policy ratio, normalised over the batch
     when `weighting` and clipped to `[1 - clip_coef, 1 + clip_coef]`.
+
+    `estimator="sampled"` trains nothing: the run collects the buffers whose train rows
+    a sampled characteristic draws from (upstream `sampling/shapleys`). Shapley runs
+    reuse them with `--buffers characteristic`, so pool, train and exact buffers agree.
     """
 
     agent: Path
@@ -215,6 +223,7 @@ class CharacteristicRunConfig:
     off_policy: bool = False
     weighting: bool = True
     clip_coef: float = inf
+    estimator: Estimator = "model"
     train: ExplanationTrainConfig = field(default_factory=ExplanationTrainConfig)
     seed: int = 1
     seeds: tuple[int, ...] = ()
@@ -225,7 +234,7 @@ class CharacteristicRunConfig:
 
     def __post_init__(self) -> None:
         _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
-        CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
+        CharacteristicConfig(self.kind, self.policy, self.hidden_widths, self.estimator)
         OffPolicyConfig(self.weighting, self.clip_coef)
         if self.data not in ("rollouts", "replay"):
             raise ValueError("data must be rollouts or replay")
@@ -233,10 +242,14 @@ class CharacteristicRunConfig:
             raise ValueError("off-policy weighting needs replay data")
         if self.data == "replay" and self.train.exact_loss and self.train.exact_buffer_size is None:
             raise ValueError("replay characteristics need a separate exact buffer (train.exact_buffer_size)")
+        if self.estimator == "sampled" and (
+            self.data != "rollouts" or self.train.exact_loss or self.train.exact_buffer_size is not None
+        ):
+            raise ValueError("sampled characteristics draw from rollouts, with exact values on their pool and no loss")
 
     @property
     def characteristic(self) -> CharacteristicConfig:
-        return CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
+        return CharacteristicConfig(self.kind, self.policy, self.hidden_widths, self.estimator)
 
     @property
     def importance(self) -> OffPolicyConfig | None:
@@ -245,7 +258,8 @@ class CharacteristicRunConfig:
 
     @property
     def progress_limit(self) -> int:
-        return self.train.epochs
+        """Training epochs; a sampled characteristic completes without any."""
+        return 0 if self.estimator == "sampled" else self.train.epochs
 
     @property
     def sweep(self) -> tuple[int, ...]:
@@ -517,6 +531,20 @@ class ShapleyContext:
 
 
 @struct.dataclass
+class SampledShapleyContext:
+    """A Shapley learner's constants against a sampled characteristic.
+
+    `grand` is v_F at the exact states, which the source's sampled v(s, F) returns for
+    states of the pool: the exact buffer is the pool, so normalisation is deterministic.
+    """
+
+    buffers: Buffers
+    pool: SampledPool
+    exact: ExactShapley | None
+    grand: Array | None
+
+
+@struct.dataclass
 class OutcomeInputs:
     """Per-seed inputs of an outcome run: the behaviour characteristic's buffers and the agent's replay prefixes."""
 
@@ -577,10 +605,14 @@ class OnPolicyState[EnvState]:
 
 @struct.dataclass
 class OnPolicyContext:
-    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values."""
+    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values.
+
+    `sampled` holds that buffer with v_F when the behaviour characteristic is sampled.
+    """
 
     pool: Array
     exact: ExactOutcome | None
+    sampled: SampledPool | None = None
 
 
 @struct.dataclass
@@ -597,6 +629,14 @@ class Draw(NamedTuple):
 
     rows: Array
     coalitions: Array
+
+
+class SampledDraw(NamedTuple):
+    """One batch's rows and coalition, and the key of its sampled characteristic values."""
+
+    rows: Array
+    coalitions: Array
+    key: Array
 
 
 class OutcomeDraw(NamedTuple):
@@ -864,6 +904,11 @@ def run_characteristic[State, Params](
                 keys, agents, inherited, environment_factory=environment_factory, config=config
             )
         state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
+    if config.estimator == "sampled":
+        # The source's sampled characteristic trains nothing; its pool is the train buffer.
+        finished = nnx.vmap(finalize, in_axes=0, out_axes=0)(state)
+        _emit_checkpoint(finished, jnp.ones(keys.shape[0], jnp.bool_), sink)
+        return finished
 
     def context(buffers: Buffers, agent: FrozenAgent) -> CharacteristicContext:
         return characteristic_context(buffers, agent, explained, training, features, max_unique)
@@ -968,6 +1013,18 @@ def run_shapley[State, Params](
             return initialize_state(ShapleyModel(network, layout, rngs=nnx.Rngs(model_key)), buffers, training, key)
 
         state = nnx.vmap(initialize, in_axes=(0, 0, 0), out_axes=0)(keys, agents, inherited)
+    if explained.estimator == "sampled":
+
+        def sampled_context(buffers: Buffers, agent: FrozenAgent) -> SampledShapleyContext:
+            return sampled_shapley_context(buffers, agent, explained, config, features, max_unique)
+
+        sampled = nnx.vmap(sampled_context, in_axes=(0, 0), out_axes=0)(state.buffers, agents)
+
+        def sampled_learner(context: SampledShapleyContext, frozen: None) -> Learner[ShapleyModel, SampledDraw]:
+            del frozen
+            return sampled_shapley_learner(context, config, features)
+
+        return train(state, sampled, None, sampled_learner, training, config.chunk_epochs, sink)
 
     def context(buffers: Buffers, agent: FrozenAgent, characteristic: CharacteristicModel) -> ShapleyContext:
         function = MaskedCharacteristic(characteristic)
@@ -1258,13 +1315,17 @@ def run_outcome_on_policy[State, Params](
         state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
 
     def context(inherited: Buffers, agent: FrozenAgent, behaviour: CharacteristicModel) -> OnPolicyContext:
+        sampled = None
+        if explained.estimator == "sampled":
+            values = explained_values(agent.model(inherited.train).q_values, explained, agent.epsilon)
+            sampled = sampled_pool(inherited.train, values)
         if not config.train.exact_loss:
-            return OnPolicyContext(inherited.train, None)
+            return OnPolicyContext(inherited.train, None, sampled)
         if tabular is None:
             raise ValueError("exact outcome values need the environment's transition model")
         policy = conditioned_policy(OutcomeFrozen(agent, behaviour), explained)
         exact = outcome_exact(inherited.exact, policy, tabular, config.with_exact_char, config.gamma)
-        return OnPolicyContext(inherited.train, exact)
+        return OnPolicyContext(inherited.train, exact, sampled)
 
     contexts = nnx.vmap(context, in_axes=(0, 0, 0), out_axes=0)(inherited, agents, characteristics)
     return train_on_policy(state, contexts, OutcomeFrozen(agents, characteristics), env, explained, config, sink)
@@ -1386,6 +1447,9 @@ def on_policy_step[State, Params](
     policy = conditioned_policy(frozen, explained)
     global_step = state.step * training.num_envs
     keys: Array = jax.random.split(state.key, 5)
+    if context.sampled is not None:
+        # A sampled behaviour draws its values afresh at every decision, as the source's get_val does.
+        policy = ConditionedPolicy(SampledCharacteristic(context.sampled, jax.random.fold_in(keys[0], 1)), policy.agent)
     actions = sample_actions(policy, keys[0], state.observations, state.explained, state.coalitions)
     step_keys: Array = jax.random.split(keys[1], training.num_envs)
     transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
@@ -1636,6 +1700,64 @@ def shapley_learner(
         exact = context.exact
         assert exact is not None
         return exact_shapley_loss(model, characteristic, exact.states, exact.state_valid, exact.values)
+
+    return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
+
+
+def sampled_shapley_context(
+    buffers: Buffers,
+    agent: FrozenAgent,
+    explained: CharacteristicConfig,
+    config: ShapleyRunConfig,
+    features: int,
+    max_unique: int,
+) -> SampledShapleyContext:
+    """The pool (train buffer with v_F) and, for exact losses, exact values on the exact buffer."""
+    pool = sampled_pool(buffers.train, explained_values(agent.model(buffers.train).q_values, explained, agent.epsilon))
+    if not config.train.exact_loss:
+        return SampledShapleyContext(buffers, pool, None, None)
+    observations = buffers.exact
+    targets = explained_values(agent.model(observations).q_values, explained, agent.epsilon)
+    exact = exact_characteristic(observations, targets, all_coalitions(features), max_unique=max_unique)
+    grand = explained_values(agent.model(exact.states).q_values, explained, agent.epsilon)
+    solved = ExactShapley(exact.states, exact.state_valid, exact_shapley(exact.at_states))
+    return SampledShapleyContext(buffers, pool, solved, grand)
+
+
+def sampled_shapley_learner(
+    context: SampledShapleyContext, config: ShapleyRunConfig, features: int
+) -> Learner[ShapleyModel, SampledDraw]:
+    """shapley_learner against single-draw characteristic values; each draw carries its sampling key."""
+    training = config.train
+
+    def train_draw(key: Array, epoch: Array, batch: Array) -> SampledDraw:
+        del epoch, batch
+        index_key, coalition_key, sample_key = jax.random.split(key, 3)
+        rows = jax.random.randint(index_key, (training.batch_size,), 0, training.train_size)
+        return SampledDraw(rows, kernel_coalitions(coalition_key, 1, features)[0], sample_key)
+
+    def validation_draw(key: Array, epoch: Array) -> SampledDraw:
+        del epoch
+        index_key, coalition_key, sample_key = jax.random.split(key, 3)
+        rows = jax.random.randint(index_key, (training.validation_size,), 0, training.validation_size)
+        return SampledDraw(rows, kernel_coalitions(coalition_key, 1, features)[0], sample_key)
+
+    def train_batch(
+        model: ShapleyModel, optimizer: nnx.Optimizer[ShapleyModel], buffers: Buffers, draw: SampledDraw
+    ) -> Array:
+        characteristic = SampledCharacteristic(context.pool, draw.key)
+        return update_shapley(model, optimizer, characteristic, buffers.train[draw.rows], draw.coalitions).loss
+
+    def validation_loss(model: ShapleyModel, buffers: Buffers, draw: SampledDraw) -> Array:
+        characteristic = SampledCharacteristic(context.pool, draw.key)
+        return shapley_loss(model, characteristic, buffers.validation[draw.rows], draw.coalitions)[0]
+
+    def exact_loss(model: ShapleyModel) -> Array:
+        exact, grand = context.exact, context.grand
+        assert exact is not None and grand is not None
+        null = jnp.broadcast_to(context.pool.null, grand.shape)
+        contributions = normalise(model(exact.states).contributions, grand, null)
+        return contribution_loss(contributions, exact.state_valid, exact.values)
 
     return Learner(train_batch, validation_loss, exact_loss, train_draw, validation_draw)
 
