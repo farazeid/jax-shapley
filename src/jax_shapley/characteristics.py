@@ -172,11 +172,19 @@ def update_characteristic(
     observations: Observations,
     targets: Values,
     coalitions: Coalitions,
+    weights: RowWeights | None = None,
 ) -> LossMetrics:
+    """One Adam step on the on-policy MSE, or on the importance-weighted MSE when `weights` are given."""
+
+    def loss(model: CharacteristicModel) -> tuple[Array, LossMetrics]:
+        if weights is None:
+            return characteristic_loss(model, observations, targets, coalitions)
+        return importance_weighted_loss(model, observations, targets, coalitions, weights)
+
     # NNX transformation has a dynamic return signature; assert its known loss/state boundary.
     result = cast(
         tuple[tuple[Array, LossMetrics], nnx.State[str | int, nnx.Param[Array]]],
-        nnx.value_and_grad(characteristic_loss, has_aux=True)(model, observations, targets, coalitions),
+        nnx.value_and_grad(loss, has_aux=True)(model),
     )
     (_, metrics), gradients = result
     optimizer.update(model, gradients)

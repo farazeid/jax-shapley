@@ -275,6 +275,25 @@ def capture_loop(
         {**stopping, "exact_condition": threshold},
     )
     arrays.update(_records("loop_prediction", records))
+
+    # Off-policy behaviour characteristic (paper Figure 3a): normalised importance weights over
+    # fixed replay actions and behaviour log-probabilities.
+    rows = TRAIN_ROWS + VALIDATION_ROWS
+    actions = (np.arange(rows) * 7 % 4).astype(np.int64)
+    log_probabilities = np.log(np.linspace(0.15, 0.95, rows)).astype(np.float32)
+    arrays["loop_offpolicy_actions"] = actions.astype(np.int32)
+    arrays["loop_offpolicy_log_probabilities"] = log_probabilities
+    _, records = _train_characteristic(
+        namespace,
+        torch,
+        env,
+        agent,
+        observations,
+        "PolicyCharacteristicModel",
+        {"off_policy": True, "weighting": True},
+        behaviour=(actions, log_probabilities),
+    )
+    arrays.update(_records("loop_offpolicy", records))
     return arrays, threshold
 
 
@@ -286,8 +305,9 @@ def _train_characteristic(
     observations: HostArray,
     name: str,
     overrides: dict[str, object],
+    behaviour: tuple[HostArray, HostArray] | None = None,
 ) -> tuple[Learned, dict[str, object]]:
-    train, validation = _buffers(namespace, env, observations)
+    train, validation = _buffers(namespace, env, observations, behaviour)
     softmax = name == "PolicyCharacteristicModel"
     args = SimpleNamespace(
         model_arch=_architecture(8, 64, softmax=softmax),
@@ -417,11 +437,21 @@ def _records(prefix: str, records: dict[str, object]) -> dict[str, HostArray]:
     return arrays
 
 
-def _buffers(namespace: dict[str, object], env: SimpleNamespace, observations: HostArray) -> tuple[Buffer, Buffer]:
+def _buffers(
+    namespace: dict[str, object],
+    env: SimpleNamespace,
+    observations: HostArray,
+    behaviour: tuple[HostArray, HostArray] | None = None,
+) -> tuple[Buffer, Buffer]:
+    """Train and validation buffers; with `behaviour`, also replay actions and old log-probabilities."""
     cls = cast(Callable[..., Buffer], namespace["Buffer"])
-    train, validation = cls(TRAIN_ROWS, env, "obs"), cls(VALIDATION_ROWS, env, "obs")
-    train.add(obs=observations[:TRAIN_ROWS].astype(np.float32))
-    validation.add(obs=observations[TRAIN_ROWS:].astype(np.float32))
+    fields = ("obs",) if behaviour is None else ("obs", "action", "logprob")
+    train, validation = cls(TRAIN_ROWS, env, *fields), cls(VALIDATION_ROWS, env, *fields)
+    for buffer, rows in ((train, slice(0, TRAIN_ROWS)), (validation, slice(TRAIN_ROWS, None))):
+        values: dict[str, HostArray] = {"obs": observations[rows].astype(np.float32)}
+        if behaviour is not None:
+            values.update(action=behaviour[0][rows], logprob=behaviour[1][rows])
+        buffer.add(**values)
     return train, validation
 
 

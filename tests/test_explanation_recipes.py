@@ -127,6 +127,49 @@ def test_large_mastermind_recipe_encodes_source_settings(tmp_path: Path, size: s
     assert (explained.train.epochs, explained.train.patience, explained.sweep) == (50_000, 5_000, tuple(range(1, 11)))
 
 
+@pytest.mark.parametrize(
+    "domain,timesteps,num_envs,groups",
+    [
+        ("mastermind222", 30_000, 16, ["exact", "wo_weight", "w_weight"]),
+        ("gridworld", 15_000, 8, ["exact", "wo_weight", "unnormalised", "normalised", "0.99", "0.995", "0.998"]),
+    ],
+)
+def test_offpolicy_recipes_encode_source_settings(
+    tmp_path: Path, domain: str, timesteps: int, num_envs: int, groups: list[str]
+) -> None:
+    commands = _capture(tmp_path, "offpolicy.sh", ("--kind", "behaviour", "--num-seeds", "3"), leading=(domain,))
+    agents = [train_dqn.parse_args(command[4:]) for command in commands if "jax_shapley.train_dqn" in command]
+    assert len(agents) == 3
+    for agent in agents:
+        assert isinstance(agent, train_dqn.DQNRunConfig)
+        assert (agent.train.total_timesteps, agent.train.buffer_size, agent.train.num_envs) == (
+            timesteps,
+            timesteps,
+            num_envs,
+        )
+        assert (agent.train.learning_starts, agent.train.train_frequency) == (10_000, 10)
+    characteristics = [parse_args(command[4:]) for command in commands if "jax_shapley.train_explanations" in command]
+    assert len(characteristics) == len(groups)
+    labels = []
+    for config in characteristics:
+        assert isinstance(config, CharacteristicRunConfig) and config.sweep == (1, 2, 3)
+        training = config.train
+        assert (training.train_size, training.validation_size) == (timesteps * 4 // 5, timesteps // 5)
+        assert training.exact_buffer_size == timesteps * 4 // 5 and training.exact_loss
+        assert training.epochs == training.patience == (2000 if domain == "mastermind222" else 50)
+        if config.data == "rollouts":
+            labels.append("exact")
+        elif not config.off_policy:
+            labels.append("wo_weight")
+        elif not config.weighting:
+            labels.append("unnormalised")
+        elif config.clip_coef != float("inf"):
+            labels.append(str(config.clip_coef))
+        else:
+            labels.append("w_weight" if domain == "mastermind222" else "normalised")
+    assert labels == groups
+
+
 def test_characteristic_recipes_require_a_kind(tmp_path: Path) -> None:
     with pytest.raises(subprocess.CalledProcessError):
         _capture(tmp_path, "gridworld.sh", ("characteristic", *AGENT))

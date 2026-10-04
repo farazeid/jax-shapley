@@ -10,7 +10,7 @@
     "envs/hypercube.py": "af586a54482cd0606a8137ea6df54f0a1c8b594c6e4dfef7fb8c5aacf3361e75"
   },
   "explanations_sha256": "a955d0fab667780772b75cdcaebcc3ca140c19b1d90c178c9ece3ab9e0f7571d",
-  "fixture_sha256": "b325cd74ba76725bc908ad398682caa55eb837354feeef0ec5c1ec17fbdf5fe9",
+  "fixture_sha256": "9bbd992f8b1c367fc196781a86e2ac908e688b59191fe31678878471c7e1fbf8",
   "torch_version": "2.6.0",
   "seed": 1729,
   "learning_rate": 0.00025,
