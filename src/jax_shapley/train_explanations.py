@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, Protocol, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import tyro
 from flax import nnx, struct
 from jax import Array
@@ -648,15 +649,17 @@ def main(args: list[str] | None = None) -> ExplanationSummary | list[Explanation
             print("".join(context.settings for context in contexts), end="")
             return None
     router = CallbackRouter()
-    runner = nnx.jit(_bind(contexts[0], configs[0], router))
     keys = jnp.stack([jax.random.key(seed_config.seed) for seed_config in configs])
     agents = stack_seeds([context.agent for context in contexts])
     characteristics = _stack_optional([context.characteristic for context in contexts])
     inherited = _stack_optional([context.inherited for context in contexts])
+    compile_only = config.compile_only or (resume is not None and resume.compile_only)
+    keys, inherited, max_unique = _exact_inputs(config, contexts[0], restored, compile_only, keys, agents, inherited)
+    runner = nnx.jit(_bind(contexts[0], configs[0], router, max_unique))
     abstract = nnx.eval_shape(lambda state: state, restored) if restored is not None else None
     key_spec = jax.ShapeDtypeStruct(keys.shape, keys.dtype)
     compiled = cast(Runner, runner.trace(key_spec, agents, characteristics, inherited, abstract).lower().compile())
-    if config.compile_only or (resume is not None and resume.compile_only):
+    if compile_only:
         print(
             f"Compiled {contexts[0].environment} {_stage(config)} on {jax.default_backend()}; no run artifacts created."
         )
@@ -785,9 +788,11 @@ def run_characteristic[State, Params](
     """Collect buffers (fresh runs), then train every seed's characteristic to completion.
 
     Inputs and state carry a leading seed axis; each seed uses exactly the keys a
-    single run with that seed would.
+    single run with that seed would. `inherited` buffers, with `keys` already advanced
+    past their collection (`collect_characteristic_buffers`), replace in-program
+    collection; `main` collects first to size the exact tables from the real buffers.
     """
-    del characteristics, inherited
+    del characteristics
     env = EpisodeStatisticsWrapper(environment_factory())
     explained = config.characteristic
     training = config.train
@@ -795,12 +800,15 @@ def run_characteristic[State, Params](
     network = characteristic_network(features, actions, explained)
     if state is None:
 
-        def initialize(key: Array, agent: FrozenAgent) -> ExplanationState[CharacteristicModel]:
-            key, buffers = collect_buffers(env, agent, explained.policy, training, key, None)
+        def initialize(key: Array, buffers: Buffers) -> ExplanationState[CharacteristicModel]:
             model_key, key = jax.random.split(key)
             return initialize_state(CharacteristicModel(network, rngs=nnx.Rngs(model_key)), buffers, training, key)
 
-        state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, agents)
+        if inherited is None:
+            keys, inherited = collect_characteristic_buffers(
+                keys, agents, environment_factory=environment_factory, config=config
+            )
+        state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
 
     def context(buffers: Buffers, agent: FrozenAgent) -> CharacteristicContext:
         return characteristic_context(buffers, agent, explained, training, features, max_unique)
@@ -812,6 +820,29 @@ def run_characteristic[State, Params](
         return characteristic_learner(context, training, features)
 
     return train(state, contexts, None, learner, training, config.chunk_epochs, sink)
+
+
+def collect_characteristic_buffers[State, Params](
+    keys: Array,
+    agents: FrozenAgent,
+    *,
+    environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
+    config: CharacteristicRunConfig,
+) -> tuple[Array, Buffers]:
+    """Every seed's characteristic buffers, and its key advanced past their collection."""
+    env = EpisodeStatisticsWrapper(environment_factory())
+    policy, training = config.characteristic.policy, config.train
+
+    def collect(key: Array, agent: FrozenAgent) -> tuple[Array, Buffers]:
+        return collect_buffers(env, agent, policy, training, key, None)
+
+    return nnx.vmap(collect, in_axes=(0, 0), out_axes=(0, 0))(keys, agents)
+
+
+def exact_bound(exact: Array) -> int:
+    """Static size for exact tables: the most unique observations in any seed's exact buffer."""
+    rows = np.asarray(exact)
+    return max(int(np.unique(seed_rows, axis=0).shape[0]) for seed_rows in rows.reshape(-1, *rows.shape[-2:]))
 
 
 def run_shapley[State, Params](
@@ -1731,11 +1762,11 @@ def parse_args(args: list[str] | None = None) -> CLIConfig:
     return tyro.cli(CLIConfig, args=args)
 
 
-def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Callable[..., object]:
+def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink, max_unique: int) -> Callable[..., object]:
     """Bind static configuration for the run's stage."""
     env = context.env_config
     if isinstance(config, CharacteristicRunConfig):
-        options: dict[str, object] = {"config": config, "max_unique": context.max_unique, "sink": sink}
+        options: dict[str, object] = {"config": config, "max_unique": max_unique, "sink": sink}
         return _with_environment(run_characteristic, env, options)
     if isinstance(config, OutcomeRunConfig):
         options = {
@@ -1756,7 +1787,7 @@ def _bind(context: RunContext, config: RunConfig, sink: ExplanationSink) -> Call
             "sink": sink,
         }
         return _with_environment(run_outcome_shapley, env, options)
-    options = {"config": config, "explained": context.explained, "max_unique": context.max_unique, "sink": sink}
+    options = {"config": config, "explained": context.explained, "max_unique": max_unique, "sink": sink}
     return _with_environment(run_shapley, env, options)
 
 
@@ -1775,6 +1806,34 @@ def _on_policy_template(
 def _tabular(env: EnvironmentConfig, exact_loss: bool) -> TabularModel | None:
     """The transition model exact outcome values need: a host-built constant shared by every seed."""
     return transition_model(env) if exact_loss else None
+
+
+def _exact_inputs(
+    config: RunConfig,
+    context: RunContext,
+    restored: AnyState | None,
+    compile_only: bool,
+    keys: Array,
+    agents: FrozenAgent,
+    inherited: Buffers | OutcomeInputs | None,
+) -> tuple[Array, Buffers | OutcomeInputs | None, int]:
+    """Size exact tables by the real buffers' unique observations.
+
+    Fresh characteristic runs collect their buffers first (the training program then
+    starts from them with the advanced keys); resumed runs use their checkpointed
+    buffers and Shapley runs the characteristic's exact buffer. Compile-only
+    inspection keeps the analytic bound (the observation space, or the buffer rows).
+    """
+    if isinstance(config, CharacteristicRunConfig):
+        if isinstance(restored, ExplanationState):
+            return keys, inherited, exact_bound(restored.buffers.exact)
+        if not compile_only:
+            collector = _with_environment(collect_characteristic_buffers, context.env_config, {"config": config})
+            keys, buffers = cast(tuple[Array, Buffers], nnx.jit(collector)(keys, agents))
+            return keys, buffers, exact_bound(buffers.exact)
+    elif isinstance(inherited, Buffers):
+        return keys, inherited, exact_bound(inherited.exact)
+    return keys, inherited, context.max_unique
 
 
 def _with_environment(
