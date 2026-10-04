@@ -112,6 +112,19 @@ The paper's Figures 3c and 11 compare Shapley models trained against a learnt ch
 
 `tests/fixtures/fastsverl_sampling.npz` (`scripts/explanations_port/collect_fastsverl_sampling.py`) runs the unchanged `get_val` and `null` with recorded pool permutations and `torch.rand` scores, including rows with no match. For every matched row, `tests/test_sampling.py` selects the same pool row as upstream.
 
+## Continual learning
+
+The paper's Figures 3b and 10 train explanation models while the agent learns (upstream `training.train_dqn` with explanation models, driven by `experiments/parallel`). `python -m jax_shapley.train_continual gridworld|mastermind222` runs every seed's agent and explanations in one compiled program. Each vector step follows the source's order:
+
+1. The agent acts, stores the transitions, learns and soft-updates its target. This is the unchanged DQN `training_step`, so each seed's agent trains exactly as a plain DQN run with that seed would (`tests/test_continual.py`).
+2. On exact steps (every 1,000 environment steps; 5,000 for outcome), the exact buffer is refilled with 10,000 observations from fresh explore-policy rollouts.
+3. The characteristic takes `update_ratio` steps on fresh replay batches. Each step is importance-weighted by the current explore policy against the stored behaviour log-probabilities, normalised over the batch.
+4. Outcome runs then take `update_ratio` off-policy outcome steps, conditioned on that characteristic.
+5. The Shapley model takes `update_ratio` steps.
+6. On exact steps, each model's exact loss is computed against the current agent.
+
+Explanation models learn whenever the agent does. `metrics.csv` holds the source's logged scalars (losses every 100 environment steps, exact losses on exact steps) and `episodes.csv` holds completed episodes. `experiments/explanations/continual.sh` runs the plotted groups (w_exact; w_policy for outcome) at ratios 1, 2, 10 and 50.
+
 ## Outcome explanations
 
 **The characteristic.** `v(e, C)` is the agent's expected return from `e` when, *at `e` only*, it follows the behaviour characteristic's prediction given `C`, and elsewhere its own explained policy. This conditioned policy is `π̂(a | s; e, C)`. A goal-conditioned network on `concat(s, e, C)` learns it with DQN-style updates and a soft-updated target (`OutcomeNetworks`):
@@ -175,6 +188,8 @@ Every known difference between the port and FastSVERL `25b2cbe`, and why it does
 | Truncated transitions | `final_observation` | Gymnax pre-reset observation | Same observation |
 | Processes | one process per seed | `--seeds` trains every seed in one compiled program | Each seed uses the keys of a single run with that seed; sweeps equal single runs |
 | Checkpoints | model saves every tenth of the run | full-state Orbax checkpoints every tenth of the run, with exact resume | No numerical effect |
+| Continual exact-buffer refresh | filled after acting, before the agent's update, from a reset copy of the environments | filled before the step's DQN `training_step` | Same pre-update policy and epsilon, and fresh rollouts from a reset |
+| Continual runs | one process per seed, models saved every tenth of the run | every seed in one compiled program; metrics returned at the end, no mid-run checkpoints | No numerical effect; a run takes minutes |
 | Sampled characteristic with no matching pool row | every score ties at MASK; `torch.topk`'s tie order picks a position of the freshly permuted pool | a uniformly random pool row | Both are one uniform pool row; matched rows select identically (fixture test) |
 
 ## Reference fixture
@@ -250,6 +265,7 @@ uv run --script scripts/explanations_port/collect_fastsverl_pipeline.py \
 | `coalitions.py` | Shapley-kernel, paired and uniform sampling; masking; enumerating all coalitions in `cartesian_prod` order |
 | `characteristics.py` | Typed behaviour/prediction configuration; `v_F` from `greedy_probabilities`, `exploration_probabilities` and max-Q; on- and off-policy losses; exact characteristic |
 | `shapley.py` | Shapley loss, normalisation, exact values; the `CharacteristicFunction` protocol |
+| `train_continual.py` | Continual learning: the DQN step with characteristic, outcome and Shapley updates at a fixed ratio |
 | `sampling.py` | Sampled characteristic: pool, single-draw matching and null |
 | `outcome.py` | Outcome networks, conditioned policy, off-/on-policy losses and updates, conditioned replay, exact outcome values |
 | `tabular.py` | Observation-level transition models enumerated from the JAX environments; exact policy evaluation |

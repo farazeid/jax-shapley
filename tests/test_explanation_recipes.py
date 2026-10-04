@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from jax_shapley import train_dqn
+from jax_shapley import train_continual, train_dqn
 from jax_shapley.train_explanations import CharacteristicRunConfig, OutcomeRunConfig, ShapleyRunConfig, parse_args
 
 ROOT = Path(__file__).parents[1]
@@ -306,6 +306,32 @@ def test_sampling_outcome_recipe_encodes_source_settings(tmp_path: Path, domain:
         training = config.train
         assert (training.total_timesteps, training.num_envs, training.batch_size) == (total, 16, 64)
         assert training.exact_loss and config.hidden_widths == (64, 64) and config.sweep == tuple(range(1, 21))
+
+
+@pytest.mark.parametrize(("domain", "exploration"), [("mastermind222", 0.25), ("gridworld", 0.5)])
+@pytest.mark.parametrize("kind", ["behaviour", "prediction", "outcome"])
+def test_continual_recipe_encodes_source_settings(tmp_path: Path, domain: str, exploration: float, kind: str) -> None:
+    commands = _capture(tmp_path, "continual.sh", (), (domain, kind))
+    configs = [train_continual.parse_args(command[4:]) for command in commands]
+    assert [config.explain.update_ratio for config in configs] == [1, 2, 10, 50]
+    for config in configs:
+        training, explain = config.train, config.explain
+        assert config.seeds == tuple(range(1, 21)) and config.hidden_widths == (64, 64)
+        assert (training.num_envs, training.total_timesteps, training.buffer_size, training.batch_size) == (
+            16,
+            100_000,
+            100_000,
+            64,
+        )
+        assert (training.exploration_fraction, training.learning_starts, training.train_frequency) == (
+            exploration,
+            0,
+            10,
+        )
+        assert (training.tau, training.target_network_frequency, training.gamma) == (0.01, 1, 1.0)
+        assert (explain.kind, explain.with_exact_char, explain.outcome_with_exact_char) == (kind, True, True)
+        assert explain.exact_frequency == (5_000 if kind == "outcome" else 1_000)
+        assert (explain.exact_buffer_size, explain.hidden_widths, explain.tau) == (10_000, (64, 64), 0.01)
 
 
 def _capture(tmp_path: Path, script: str, extra: tuple[str, ...], leading: tuple[str, ...] = ()) -> list[list[str]]:
