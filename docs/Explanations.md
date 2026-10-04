@@ -90,7 +90,7 @@ A run folder holds `config.json`, `metrics.csv` (`epoch, step, train_loss, valid
 
 **XLA CPU workaround.** With jax 0.11.0 on CPU, a jitted network applied to a broadcast-constant batch (for example `full_like(observations, MASK)`) can return wrong values from about 64 rows. The null value is therefore computed from one all-masked row and broadcast. `tests/test_jit_equivalence.py` checks compiled results against eager evaluation at production batch sizes.
 
-**Exact-loss cost.** The exact characteristic table is padded to a static bound on unique observations. Its valid entries are compacted once per run, and each epoch evaluates only the 512-row chunks that hold them.
+**Exact-value cost.** Exact characteristic values deduplicate the exact buffer into its unique observations (weighted by frequency) before looping over all `2^F` coalitions, so each coalition processes a few unique states rather than every row. Their tables are sized by the real buffers: a fresh characteristic run collects its buffers in a first compiled program and sizes the tables by the most unique observations in any seed, a resumed run uses its checkpointed buffers, and a Shapley run uses the characteristic's exact buffer. (`--compile-only` keeps the analytic bound, the observation space or the buffer rows.) This makes Mastermind-333 (15 features, 32,768 coalitions) take seconds for a 20-seed sweep instead of about 28 GB per seed. The per-epoch exact loss evaluates only the 512-row chunks holding each coalition's distinct masked observations.
 
 ## Outcome explanations
 

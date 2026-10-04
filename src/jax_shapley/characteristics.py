@@ -72,27 +72,23 @@ class OffPolicyConfig:
 class ExactCharacteristic:
     """Exact characteristic values under a buffer's empirical state distribution.
 
-    `keys`/`values`/`valid` hold each coalition's unique masked observations, padded
-    to a static size. `states` are the buffer's unique full observations (sorted,
-    padded) and `at_states` gives every coalition's value at each of them.
-    `compact_keys`/`compact_values` list the valid entries first (`count` of them),
-    padded to whole chunks, so the per-epoch exact loss evaluates only those chunks.
+    `states` are the buffer's unique observations (sorted, padded to a static size;
+    `state_valid` marks real ones) and `at_states[c, u]` is coalition c's exact value
+    at state u. `compact_keys`/`compact_values` list every coalition's distinct masked
+    observation and its value once (`count` of them, valid entries first, padded to
+    whole chunks), which the per-epoch exact loss evaluates. `null` is the empty
+    coalition's value and `distinct[c]` the number of distinct masked observations of
+    coalition c.
     """
 
-    keys: UniqueKeys
-    values: UniqueValues
-    valid: UniqueFlags
     states: States
     state_valid: StateFlags
     at_states: UniqueValues
     compact_keys: RowObservations
     compact_values: RowValues
     count: Array
-
-    @property
-    def null(self) -> Output:
-        """The empty coalition's value; coalition 0 masks every feature."""
-        return self.values[0, 0]
+    null: Output
+    distinct: Array
 
 
 class CharacteristicOutput(NamedTuple):
@@ -196,35 +192,36 @@ def exact_characteristic(
 ) -> ExactCharacteristic:
     """Conditional expectation of `v_F` given each coalition's known features.
 
-    Every buffer row has equal weight, which equals the source's Bayes rule over the
-    empirical distribution of unique states. `max_unique` must bound the number of
+    Each coalition's value is the mean target over buffer rows that agree on the known
+    features: the source's Bayes rule over the empirical distribution. Rows are first
+    deduplicated into unique states with summed targets, so every coalition processes
+    `max_unique` states rather than every row. `max_unique` must bound the number of
     unique observations; padded entries are marked invalid.
     """
     if observations.ndim != 2 or targets.ndim != 2 or targets.shape[0] != observations.shape[0]:
         raise ValueError("exact characteristics need (rows, features) observations and (rows, outputs) targets")
     if max_unique < 1:
         raise ValueError("max_unique must be positive")
-    states, state_rows, state_counts = jnp.unique(
-        observations, axis=0, size=max_unique, fill_value=0, return_index=True, return_counts=True
+    # jnp.unique's multi-output overloads are untyped; the requested outputs are arrays.
+    states, state_inverse, state_counts = cast(
+        tuple[Array, Array, Array],
+        jnp.unique(observations, axis=0, size=max_unique, fill_value=0, return_inverse=True, return_counts=True),
     )
+    weights = state_counts.astype(jnp.float32)  # Padded states weigh nothing.
+    # Each state's summed targets over its rows: the exact value is a row mean.
+    weighted_targets = jax.ops.segment_sum(targets, state_inverse.reshape(-1), num_segments=max_unique)
 
     def evaluate(coalition: Array) -> tuple[Array, Array, Array, Array]:
         # jnp.unique's multi-output overloads are untyped; the requested outputs are arrays.
-        keys, inverse, counts = cast(
-            tuple[Array, Array, Array],
-            jnp.unique(
-                mask(observations, coalition),
-                axis=0,
-                size=max_unique,
-                fill_value=0,
-                return_inverse=True,
-                return_counts=True,
-            ),
+        keys, inverse = cast(
+            tuple[Array, Array],
+            jnp.unique(mask(states, coalition), axis=0, size=max_unique, fill_value=0, return_inverse=True),
         )
         segments = inverse.reshape(-1)
-        sums = jax.ops.segment_sum(targets, segments, num_segments=max_unique)
-        values = sums / jnp.maximum(counts, 1).astype(jnp.float32)[:, None]
-        return keys, values, counts > 0, values[segments[state_rows]]
+        totals = jax.ops.segment_sum(weighted_targets, segments, num_segments=max_unique)
+        mass = jax.ops.segment_sum(weights, segments, num_segments=max_unique)
+        values = totals / jnp.maximum(mass, 1.0)[:, None]
+        return keys, values, mass > 0, values[segments]
 
     keys, values, valid, at_states = jax.lax.map(evaluate, coalitions)
     flat_valid = valid.reshape(-1)
@@ -237,8 +234,16 @@ def exact_characteristic(
         jnp.zeros((padded, values.shape[-1]), jnp.float32).at[:entries].set(values.reshape(entries, -1)[order])
     )
     count = jnp.sum(flat_valid, dtype=jnp.int32)
+    # Coalition 0 masks every feature, so every state shares its single key.
     return ExactCharacteristic(
-        keys, values, valid, states, state_counts > 0, at_states, compact_keys, compact_values, count
+        states,
+        state_counts > 0,
+        at_states,
+        compact_keys,
+        compact_values,
+        count,
+        values[0, 0],
+        jnp.sum(valid, axis=-1, dtype=jnp.int32),
     )
 
 

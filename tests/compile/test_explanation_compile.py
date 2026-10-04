@@ -35,8 +35,9 @@ from jax_shapley.shapley import (
 )
 from jax_shapley.train_dqn import AdamConfig, make_adam
 
-# (features, actions, width, exact rows, static unique bound) for Gridworld, Mastermind-222 and Hypercube 6x5.
-SHAPES = ((2, 4, 64, 40, 8), (8, 4, 64, 40, 40), (5, 10, 128, 40, 40))
+# (features, actions, width, exact rows, static unique bound) for Gridworld, Mastermind-222, Hypercube 6x5 and
+# Mastermind-333 (2^15 coalitions; the bound comes from the buffer's unique observations).
+SHAPES = ((2, 4, 64, 40, 8), (8, 4, 64, 40, 40), (5, 10, 128, 40, 40), (15, 27, 128, 40, 40))
 KEY = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
 
 
@@ -59,7 +60,7 @@ def test_samplers_and_mask_compile(features: int) -> None:
 
 
 @pytest.mark.compile
-@pytest.mark.parametrize("shape", SHAPES, ids=["gridworld", "mastermind222", "hypercube"])
+@pytest.mark.parametrize("shape", SHAPES, ids=["gridworld", "mastermind222", "hypercube", "mastermind333"])
 @pytest.mark.parametrize("kind,policy", [("behaviour", "greedy"), ("behaviour", "explore"), ("prediction", "greedy")])
 def test_characteristic_and_shapley_units_compile(
     shape: tuple[int, int, int, int, int], kind: Kind, policy: Policy

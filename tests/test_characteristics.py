@@ -167,7 +167,7 @@ def test_exact_values_weight_rows_by_frequency() -> None:
     np.testing.assert_allclose(exact.null, [15.0 / 4])
     # Knowing only feature 0 = 0 averages rows [0, 0], [0, 1], [0, 1].
     np.testing.assert_allclose(exact.at_states[2, :3, 0], [2.0, 2.0, 9.0])
-    np.testing.assert_array_equal(exact.valid[0], [True, False, False, False])
+    np.testing.assert_array_equal(exact.distinct, [1, 2, 2, 3])
     np.testing.assert_array_equal(exact.state_valid, [True, True, True, False])
 
 
@@ -179,9 +179,19 @@ def test_chunked_exact_loss_equals_the_dense_masked_mean() -> None:
     model = CharacteristicModel(
         characteristic_network(5, 1, CharacteristicConfig("prediction", hidden_widths=(8,))), rngs=nnx.Rngs(0)
     )
-    errors = jnp.square(model(exact.keys).values - exact.values)
-    valid = exact.valid.astype(jnp.float32)
-    dense = jnp.sum(errors * valid[..., None]) / jnp.sum(valid)
+    # Independent dense reference: every coalition's distinct masked observations, each valued
+    # at the mean target of the rows that share it, each counted once.
+    rows, values = np.asarray(observations), np.asarray(targets)
+    keys, means = [], []
+    for coalition in np.asarray(all_coalitions(5)):
+        masked = np.where(coalition, rows, MASK)
+        unique, inverse = np.unique(masked, axis=0, return_inverse=True)
+        keys.append(unique)
+        means.append(np.stack([values[inverse.reshape(-1) == index].mean(0) for index in range(len(unique))]))
+    reference_keys, reference_values = np.concatenate(keys), np.concatenate(means)
+    assert int(exact.count) == len(reference_keys)
+    errors = jnp.square(model(jnp.asarray(reference_keys, jnp.int32)).values - reference_values)
+    dense = jnp.mean(errors)
     np.testing.assert_allclose(exact_characteristic_loss(model, exact), dense, rtol=1e-5)
     np.testing.assert_allclose(nnx.jit(exact_characteristic_loss)(model, exact), dense, rtol=1e-5)
 
