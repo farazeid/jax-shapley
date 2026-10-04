@@ -1,0 +1,16 @@
+{
+  "fastsverl_commit": "25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b",
+  "source_sha256": {
+    "characteristics.py": "39929f25b23af9416cd79c21f0a7532522eb8295f64e7339f6bb751fbf165ec0",
+    "utils.py": "2a0b8c35b5d62ca9dea0a74da7d5e1d2abba7f16302a6c98b288678e103ecc75"
+  },
+  "fixture_sha256": "3fc957acd3687d80040cccbd010f72bbcf6367d8cb8c012cb6059029b32df064",
+  "torch_version": "2.6.0",
+  "seed": 4242,
+  "pool": 48,
+  "features": 4,
+  "rows": 12,
+  "calls": 8,
+  "num_samples": 1,
+  "collector": "unchanged ValuePolicyCharacteristicSample.get_val/null and Buffer.sample ASTs, CPU"
+}

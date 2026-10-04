@@ -28,7 +28,7 @@ from jaxtyping import Bool, Float, Int
 from jax_shapley.characteristics import LossMetrics, Policy, Values, policy_probabilities
 from jax_shapley.coalitions import Coalitions, CoalitionTable, Observations, mask
 from jax_shapley.networks import MLP, LayerConfig, MLPConfig, QNetwork
-from jax_shapley.shapley import CharacteristicFunction, MaskedCharacteristic
+from jax_shapley.shapley import CharacteristicFunction
 from jax_shapley.tabular import ActionTable, TabularModel, policy_q_values, state_indices
 
 type Variant = Literal["off_policy", "on_policy"]
@@ -142,9 +142,13 @@ class AgentPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ConditionedPolicy:
-    """pi_hat(a | s; e, C): the behaviour characteristic at e given C when s == e, else the agent."""
+    """pi_hat(a | s; e, C): the behaviour characteristic at e given C when s == e, else the agent.
 
-    behaviour: MaskedCharacteristic
+    The behaviour characteristic is a learnt model or, for the source's sampling groups, a
+    sampled characteristic (`jax_shapley.sampling`).
+    """
+
+    behaviour: CharacteristicFunction
     agent: AgentPolicy
 
     def __call__(self, observations: Observations, explained: Observations, coalitions: Coalitions) -> Values:
@@ -392,7 +396,7 @@ def exact_behaviour_table(
 
 
 def learnt_behaviour_table(
-    behaviour: MaskedCharacteristic, states: UniqueStates, coalitions: CoalitionTable
+    behaviour: CharacteristicFunction, states: UniqueStates, coalitions: CoalitionTable
 ) -> ConditionedTable:
     """The learnt behaviour characteristic at each (coalition, unique state) (source char.get_val)."""
 

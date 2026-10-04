@@ -172,7 +172,12 @@ def exact_shapley_loss(
     exact: StateContributions,
 ) -> Array:
     """MSE between learnt normalised and exact values over the valid unique states."""
-    errors = jnp.square(explain(model, characteristic, states) - exact)
+    return contribution_loss(explain(model, characteristic, states), state_valid, exact)
+
+
+def contribution_loss(contributions: StateContributions, state_valid: StateFlags, exact: StateContributions) -> Array:
+    """MSE between normalised contributions and exact values over the valid unique states."""
+    errors = jnp.square(contributions - exact)
     valid = state_valid.astype(jnp.float32)
     return jnp.sum(errors * valid[:, None, None]) / (jnp.sum(valid) * exact.shape[-2] * exact.shape[-1])
 

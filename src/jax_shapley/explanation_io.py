@@ -28,6 +28,7 @@ from jax import Array
 from jax_shapley.characteristics import (
     CharacteristicConfig,
     CharacteristicModel,
+    Estimator,
     Kind,
     Policy,
     characteristic_network,
@@ -79,7 +80,14 @@ from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState
 type Stage = Literal["characteristic", "shapley", "outcome"]
 
 # Characteristic settings added with replay data, filled in for settings saved before them.
-REPLAY_DEFAULTS: dict[str, object] = {"data": "rollouts", "off_policy": False, "weighting": True, "clip_coef": inf}
+# Characteristic settings added after runs were saved: replay data, then sampled estimators.
+REPLAY_DEFAULTS: dict[str, object] = {
+    "data": "rollouts",
+    "off_policy": False,
+    "weighting": True,
+    "clip_coef": inf,
+    "estimator": "model",
+}
 
 METRIC_COLUMNS = ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "best_epoch", "seconds")
 
@@ -177,7 +185,7 @@ class ExplanationMetadata:
         if self.key_implementation not in ("threefry2x32", "rbg", "unsafe_rbg"):
             raise ValueError("unsupported checkpoint PRNG implementation")
         config = parse_run_settings(self.settings).config
-        if not 1 <= self.epoch <= config.progress_limit:
+        if not min(1, config.progress_limit) <= self.epoch <= config.progress_limit:
             raise ValueError("checkpoint epoch outside the configured training duration")
 
 
@@ -642,6 +650,9 @@ def _outcome_sources(config: OutcomeRunConfig, replay: ReplayState | None, agent
         raise ValueError("the behaviour characteristic explains a different agent")
     if source.config.kind != "behaviour":
         raise ValueError("outcome characteristics condition on a behaviour characteristic")
+    if source.config.estimator == "sampled" and (config.variant != "on_policy" or not config.with_exact_char):
+        # The source's sampling groups: on-policy outcome runs, with exact behaviour values in the ground truth.
+        raise ValueError("sampled behaviour characteristics condition on-policy outcome runs with exact values")
     if config.variant == "on_policy":
         # On-policy runs draw e_obs from the behaviour characteristic's train buffer and interact.
         return _Sources(
@@ -667,6 +678,8 @@ def _outcome_shapley_sources(config: ShapleyRunConfig, agent_sha256: str) -> _So
         raise ValueError("the outcome characteristic explains a different agent")
     if behaviour.sha256 != explained.characteristic_sha256:
         raise ValueError("the outcome characteristic's behaviour characteristic changed")
+    if behaviour.config.estimator == "sampled":
+        raise ValueError("outcome Shapley runs explain outcomes conditioned on a learnt behaviour characteristic")
     if config.buffers != "fresh":
         raise ValueError("outcome Shapley runs collect fresh buffers")
     return _Sources(
@@ -688,6 +701,9 @@ def _shapley_sources(config: ShapleyRunConfig, agent_sha256: str) -> _Sources:
         or config.train.validation_size != source.config.train.validation_size
     ):
         raise ValueError("reused characteristic buffers require identical train/validation sizes")
+    if source.config.estimator == "sampled" and (config.buffers != "characteristic" or not config.with_exact_char):
+        # The source's sampling groups: pool = train = exact buffer, and only exact characteristic values.
+        raise ValueError("sampled characteristics are explained on their own buffers, against exact values")
     return _Sources(
         source.config.characteristic, source.model, source.sha256, source.buffers, source.config.train.exact_size
     )
@@ -827,7 +843,7 @@ def array_sha256(arrays: tuple[Array, ...] | list[Array]) -> str:
 
 def _characteristic_config(value: dict[str, object]) -> CharacteristicRunConfig:
     for name, default in REPLAY_DEFAULTS.items():
-        value.setdefault(name, default)  # Settings saved before replay data existed.
+        value.setdefault(name, default)  # Settings saved before these options existed.
     _schema(value, fields(CharacteristicRunConfig))
     data = _string(value, "data")
     if data not in ("rollouts", "replay"):
@@ -841,6 +857,7 @@ def _characteristic_config(value: dict[str, object]) -> CharacteristicRunConfig:
         off_policy=_boolean(value, "off_policy"),
         weighting=_boolean(value, "weighting"),
         clip_coef=_number(value, "clip_coef"),
+        estimator=_estimator(_string(value, "estimator")),
         train=_train_config(_mapping(value["train"])),
         seed=_integer(value, "seed"),
         seeds=_seeds(value),
@@ -951,6 +968,14 @@ def _kind(value: str) -> Kind:
     if value == "prediction":
         return "prediction"
     raise ValueError("invalid saved characteristic kind")
+
+
+def _estimator(value: str) -> Estimator:
+    if value == "model":
+        return "model"
+    if value == "sampled":
+        return "sampled"
+    raise ValueError("invalid saved characteristic estimator")
 
 
 def _policy(value: str) -> Policy:

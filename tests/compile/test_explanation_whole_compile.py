@@ -9,8 +9,14 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from jax_shapley.characteristics import CharacteristicConfig, CharacteristicModel, Kind, characteristic_network
-from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
+from jax_shapley.characteristics import (
+    CharacteristicConfig,
+    CharacteristicModel,
+    Estimator,
+    Kind,
+    characteristic_network,
+)
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind, Mastermind222
 from jax_shapley.networks import QNetwork, dqn_config
 from jax_shapley.outcome import OutcomeNetworks, Transitions, outcome_network
 from jax_shapley.tabular import transition_model
@@ -80,16 +86,79 @@ def test_whole_outcome_runs_compile(case: str, with_exact_char: bool) -> None:
 
 @pytest.mark.compile
 @pytest.mark.parametrize("case", ["gridworld", "mastermind222"])
-def test_whole_on_policy_outcome_runs_compile(case: str) -> None:
-    """Audited train_V_on_policy settings: Gridworld 100k steps over 8 environments, Mastermind 200k over 16."""
+@pytest.mark.parametrize("estimator", ["model", "sampled"])
+def test_whole_on_policy_outcome_runs_compile(case: str, estimator: Estimator) -> None:
+    """Audited train_V_on_policy settings: Gridworld 100k steps over 8 environments, Mastermind 200k over 16.
+
+    The sampling groups condition on a sampled behaviour (greedy, 16 environments; Mastermind 1M steps).
+    """
     if case == "gridworld":
-        training = OutcomeTrainConfig(total_timesteps=100_000, num_envs=8)
+        training = OutcomeTrainConfig(total_timesteps=100_000, num_envs=8 if estimator == "model" else 16)
         config = OutcomeRunConfig(_unused(), _unused(), "on_policy", tau=0.001, train=training, chunk_epochs=125)
-        _compile_on_policy(Gridworld, GridworldConfig(), 2, config)
+        _compile_on_policy(Gridworld, GridworldConfig(), 2, config, estimator)
     else:
-        training = OutcomeTrainConfig(total_timesteps=200_000, num_envs=16)
+        steps = 200_000 if estimator == "model" else 1_000_000
+        training = OutcomeTrainConfig(total_timesteps=steps, num_envs=16)
         config = OutcomeRunConfig(_unused(), _unused(), "on_policy", tau=0.01, train=training, chunk_epochs=125)
-        _compile_on_policy(Mastermind222, Mastermind222Config(), 8, config)
+        _compile_on_policy(Mastermind222, Mastermind222Config(), 8, config, estimator)
+
+
+@pytest.mark.compile
+@pytest.mark.parametrize("case", ["gridworld", "mastermind222", "mastermind333"])
+@pytest.mark.parametrize("kind", ["behaviour", "prediction"])
+def test_whole_sampled_runs_compile(case: str, kind: Kind) -> None:
+    """sampling/shapleys settings: the pool is the 8,000-row train buffer, which is also the exact buffer."""
+    if case == "gridworld":
+        _compile_sampled(Gridworld, 2, 4, 64, 8, kind)
+    elif case == "mastermind222":
+        _compile_sampled(Mastermind222, 8, 4, 64, 8000, kind)
+    else:
+        _compile_sampled(lambda: Mastermind(3, 3, 3), 15, 27, 128, 4096, kind)
+
+
+def _compile_sampled[State, Params](
+    factory: Callable[[], EnvironmentProtocol[State, Params]],
+    features: int,
+    actions: int,
+    width: int,
+    max_unique: int,
+    kind: Kind,
+) -> None:
+    explained = CharacteristicConfig(kind, hidden_widths=(width, width), estimator="sampled")
+    agent = FrozenAgent(
+        QNetwork(dqn_config(features, actions, hidden_widths=(width, width)), rngs=nnx.Rngs(0)),
+        jnp.asarray(0.05, jnp.float32),
+    )
+    agents = stack_seeds([agent] * SEEDS)
+    collect = ExplanationTrainConfig(exact_loss=False)
+    char_config = CharacteristicRunConfig(
+        agent=_unused(), kind=kind, hidden_widths=(width, width), estimator="sampled", train=collect
+    )
+    run = partial(
+        run_characteristic, environment_factory=factory, config=char_config, max_unique=max_unique, sink=RecordingSink()
+    )
+    nnx.jit(run).trace(KEYS, agents, None, None, None).lower().compile()
+    training = ExplanationTrainConfig(epochs=300)
+    pool = jnp.zeros((training.train_size, features), jnp.int32)
+    inherited = Buffers(pool, jnp.zeros((training.validation_size, features), jnp.int32), pool)
+    shapley_config = ShapleyRunConfig(
+        agent=_unused(),
+        characteristic=_unused(),
+        buffers="characteristic",
+        hidden_widths=(width, width),
+        train=training,
+    )
+    shapley = partial(
+        run_shapley,
+        environment_factory=factory,
+        config=shapley_config,
+        explained=explained,
+        max_unique=max_unique,
+        sink=RecordingSink(),
+    )
+    characteristic = CharacteristicModel(characteristic_network(features, actions, explained), rngs=nnx.Rngs(1))
+    characteristics, buffers = stack_seeds([characteristic] * SEEDS), stack_seeds([inherited] * SEEDS)
+    nnx.jit(shapley).trace(KEYS, agents, characteristics, buffers, None).lower().compile()
 
 
 def _compile_on_policy[State, Params](
@@ -97,9 +166,11 @@ def _compile_on_policy[State, Params](
     environment: EnvironmentConfig,
     features: int,
     config: OutcomeRunConfig,
+    estimator: Estimator = "model",
 ) -> None:
     actions, width = 4, 64
-    explained = CharacteristicConfig("behaviour", "explore", (width, width))
+    policy = "explore" if estimator == "model" else "greedy"
+    explained = CharacteristicConfig("behaviour", policy, (width, width), estimator)
     agent = FrozenAgent(
         QNetwork(dqn_config(features, actions, hidden_widths=(width, width)), rngs=nnx.Rngs(0)),
         jnp.asarray(0.05, jnp.float32),
