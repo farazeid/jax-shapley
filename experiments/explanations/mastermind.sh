@@ -10,6 +10,11 @@
 #        epochs; Shapley models 300 or 500 epochs, with and without the exact characteristic.
 #   443|453|463: 10 seeds, no exact values (infeasible); 50,000 epochs with patience 5,000.
 #   Pass --kind to the shapley stage too: its epochs depend on the explained kind.
+#        mastermind.sh 443|453|463 outcome --agent RUN --characteristic BEHAVIOUR_RUN [overrides]
+#        mastermind.sh 443|453|463 outcome-shapley --agent RUN --characteristic OUTCOME_RUN [overrides]
+#   Table 4: one off-policy outcome characteristic over the agent's whole 10M-transition replay
+#   (64 epochs = total timesteps x batch / replay, validation 160 rows, tau 0.01, no exact values),
+#   then 10 outcome Shapley seeds explaining it (50,000 epochs, patience 5,000).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 size=${1:-}
@@ -17,6 +22,28 @@ stage=${2:-}
 shift 2 || true
 dqn_gates "$@"
 kind=$(dqn_option --kind "$@")
+if [[ "$stage" == outcome ]]; then
+    case "$size" in 443|453|463) ;; *) echo "outcome runs are for 443|453|463" >&2; exit 2 ;; esac
+    uv run python -m jax_shapley.train_explanations outcome \
+        --variant off_policy \
+        --no-with-exact-char \
+        --tau 0.01 \
+        --gamma 1.0 \
+        --hidden-widths 128 128 \
+        --train.learning-rate 0.00025 \
+        --train.batch-size 64 \
+        --train.no-exact-loss \
+        --train.train-size 10000000 \
+        --train.validation-size 160 \
+        --train.epochs 64 \
+        --train.patience 64 \
+        --train.track-batch \
+        "$@"
+    exit 0
+fi
+if [[ "$stage" == outcome-shapley ]]; then
+    stage=shapley
+fi
 case "$size" in
     333)
         seeds=(--seeds {1..20})
