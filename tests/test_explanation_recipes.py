@@ -94,6 +94,39 @@ def test_outcome_recipes_encode_source_settings(
         assert (config.train.train_size, config.train.validation_size, config.train.num_envs) == (8000, 2000, 16)
 
 
+@pytest.mark.parametrize(
+    "kind,characteristic_epochs,shapley_epochs", [("behaviour", 1000, 300), ("prediction", 2000, 500)]
+)
+def test_mastermind333_recipe_encodes_source_settings(
+    tmp_path: Path, kind: str, characteristic_epochs: int, shapley_epochs: int
+) -> None:
+    (command,) = _capture(tmp_path, "mastermind.sh", ("characteristic", "--kind", kind, *AGENT), leading=("333",))
+    config = parse_args(command[4:])
+    assert isinstance(config, CharacteristicRunConfig) and config.kind == kind
+    assert (config.sweep, config.hidden_widths, config.policy) == (tuple(range(1, 21)), (128, 128), "greedy")
+    assert (config.train.epochs, config.train.patience, config.train.batch_size) == (characteristic_epochs, 10_000, 128)
+    assert (config.train.train_size, config.train.validation_size, config.train.exact_loss) == (8000, 2000, True)
+    selected = ("shapley", "--kind", kind, *AGENT, "--characteristic", "runs/c")
+    shapleys = [parse_args(command[4:]) for command in _capture(tmp_path, "mastermind.sh", selected, leading=("333",))]
+    assert [config.with_exact_char for config in shapleys if isinstance(config, ShapleyRunConfig)] == [True, False]
+    for shapley in shapleys:
+        assert isinstance(shapley, ShapleyRunConfig)
+        assert (shapley.train.epochs, shapley.hidden_widths, shapley.buffers) == (shapley_epochs, (128, 128), "fresh")
+
+
+@pytest.mark.parametrize("size", ["443", "453", "463"])
+def test_large_mastermind_recipe_encodes_source_settings(tmp_path: Path, size: str) -> None:
+    (command,) = _capture(tmp_path, "mastermind.sh", ("characteristic", "--kind", "behaviour", *AGENT), leading=(size,))
+    config = parse_args(command[4:])
+    assert isinstance(config, CharacteristicRunConfig)
+    assert (config.sweep, config.train.epochs, config.train.patience) == (tuple(range(1, 11)), 50_000, 5_000)
+    assert not config.train.exact_loss and config.hidden_widths == (128, 128)
+    (shapley,) = _capture(tmp_path, "mastermind.sh", ("shapley", *AGENT, "--characteristic", "runs/c"), leading=(size,))
+    explained = parse_args(shapley[4:])
+    assert isinstance(explained, ShapleyRunConfig) and not explained.train.exact_loss
+    assert (explained.train.epochs, explained.train.patience, explained.sweep) == (50_000, 5_000, tuple(range(1, 11)))
+
+
 def test_characteristic_recipes_require_a_kind(tmp_path: Path) -> None:
     with pytest.raises(subprocess.CalledProcessError):
         _capture(tmp_path, "gridworld.sh", ("characteristic", *AGENT))
@@ -132,7 +165,7 @@ def test_smoke_recipe_chains_three_short_stages(tmp_path: Path) -> None:
     assert char.train.epochs == explained.train.epochs == 4
 
 
-def _capture(tmp_path: Path, script: str, extra: tuple[str, ...]) -> list[list[str]]:
+def _capture(tmp_path: Path, script: str, extra: tuple[str, ...], leading: tuple[str, ...] = ()) -> list[list[str]]:
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     ledger = tmp_path / "commands.jsonl"
@@ -151,9 +184,15 @@ def _capture(tmp_path: Path, script: str, extra: tuple[str, ...]) -> list[list[s
         raise RuntimeError("bash is required for recipe validation")
     # Stage names lead; the inspection flag follows so recipes never start gates or jobs.
     stages = (("characteristic",), ("shapley",), ("outcome",), ("outcome-shapley",))
-    stage = extra[:1] if extra[:1] in stages else ()
+    stage = (*leading, *(extra[:1] if extra[:1] in stages else ()))
     subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- trusted local script argv.
-        [bash, str(ROOT / "experiments/explanations" / script), *stage, "--validate-only", *extra[len(stage) :]],
+        [
+            bash,
+            str(ROOT / "experiments/explanations" / script),
+            *stage,
+            "--validate-only",
+            *extra[len(stage) - len(leading) :],
+        ],
         env=environment,
         check=True,
         cwd=tmp_path,
