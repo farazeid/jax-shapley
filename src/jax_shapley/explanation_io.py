@@ -13,7 +13,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import Field, asdict, dataclass, fields
-from math import isfinite
+from math import inf, isfinite
 from pathlib import Path
 from time import perf_counter, time_ns
 from types import TracebackType
@@ -67,13 +67,18 @@ from jax_shapley.train_explanations import (
     OutcomeInputs,
     OutcomeRunConfig,
     OutcomeTrainConfig,
+    ReplayRows,
     RunConfig,
     ShapleyRunConfig,
+    buffer_template,
     replay_prefix,
 )
 from jax_shapley.wrappers import EnvironmentProtocol, EpisodeStatisticsState
 
 type Stage = Literal["characteristic", "shapley", "outcome"]
+
+# Characteristic settings added with replay data, filled in for settings saved before them.
+REPLAY_DEFAULTS: dict[str, object] = {"data": "rollouts", "off_policy": False, "weighting": True, "clip_coef": inf}
 
 METRIC_COLUMNS = ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "best_epoch", "seconds")
 
@@ -95,7 +100,7 @@ class RunContext:
     agent_sha256: str
     characteristic: CharacteristicModel | ExplainedOutcome | None
     characteristic_sha256: str | None
-    inherited: Buffers | OutcomeInputs | None
+    inherited: Buffers | OutcomeInputs | ReplayRows | None
     explained: CharacteristicConfig
     features: int
     actions: int
@@ -133,7 +138,7 @@ class _Sources:
     explained: CharacteristicConfig
     characteristic: CharacteristicModel | ExplainedOutcome | None
     characteristic_sha256: str | None
-    inherited: Buffers | OutcomeInputs | None
+    inherited: Buffers | OutcomeInputs | ReplayRows | None
     exact_rows: int
     outcome: OutcomeRunConfig | None = None
 
@@ -360,7 +365,9 @@ class ExplanationWriter:
 def prepare_context(config: RunConfig) -> RunContext:
     """Load and identify the explained models; derive static shapes and the saved settings."""
     agent_settings = load_settings(config.agent / "config.json")
-    replay = isinstance(config, OutcomeRunConfig) and config.variant == "off_policy"
+    replay = (isinstance(config, OutcomeRunConfig) and config.variant == "off_policy") or (
+        isinstance(config, CharacteristicRunConfig) and config.data == "replay"
+    )
     loaded = load_agent(config.agent, agent_settings.network, load_replay=replay)
     if loaded.vector_step != agent_settings.train.vector_steps:
         raise ValueError("explanations require a completed DQN training run")
@@ -369,7 +376,9 @@ def prepare_context(config: RunConfig) -> RunContext:
     environment, actions, low, high = _environment(agent_settings.env)
     features = agent_settings.network.input_features
     if isinstance(config, CharacteristicRunConfig):
-        sources = _Sources(config.characteristic, None, None, None, config.train.exact_size)
+        sources = _Sources(
+            config.characteristic, None, None, _replay_rows(config, loaded.replay), config.train.exact_size
+        )
     elif isinstance(config, OutcomeRunConfig):
         sources = _outcome_sources(config, loaded.replay, agent_sha256)
     elif isinstance(load_run_settings(config.characteristic / "config.json").config, OutcomeRunConfig):
@@ -405,12 +414,7 @@ def load_characteristic(folder: Path) -> LoadedCharacteristic:
     agent = load_settings(config.agent / "config.json")
     features, actions = agent.network.input_features, agent.env.make().num_actions
     model = CharacteristicModel(characteristic_network(features, actions, config.characteristic), rngs=nnx.Rngs(0))
-    training = config.train
-    template = (
-        jnp.zeros((training.train_size, features), jnp.int32),
-        jnp.zeros((training.validation_size, features), jnp.int32),
-        jnp.zeros((training.exact_size, features), jnp.int32),
-    )
+    template = buffer_template(config, features, config.train.exact_size)
     store = ExplanationStore(folder, read_only=True)
     try:
         if store.metadata().phase != ExplanationPhase.COMPLETE:
@@ -418,7 +422,7 @@ def load_characteristic(folder: Path) -> LoadedCharacteristic:
         state = nnx.state(model)
         values = store.arrays("model", _leaves(state))
         nnx.update(model, jax.tree.unflatten(jax.tree.structure(state), values))
-        buffers = Buffers(*store.arrays("buffers", template))
+        buffers = _buffers(store, template)
     finally:
         store.close()
     return LoadedCharacteristic(config, settings.agent_sha256, model, buffers, array_sha256(values))
@@ -449,14 +453,12 @@ def restore_state[Model: nnx.Module](
     store: ExplanationStore, template: ExplanationState[Model], config: RunConfig, context: RunContext
 ) -> tuple[ExplanationState[Model], ExplanationMetadata]:
     metadata = store.metadata()
-    if metadata.settings != context.settings:
+    if parse_run_settings(metadata.settings) != parse_run_settings(context.settings):
         raise ValueError("resume requires identical saved settings")
     for item, module in (("model", template.model), ("best", template.best), ("optimizer", template.optimizer)):
         state = nnx.state(module)
         nnx.update(module, jax.tree.unflatten(jax.tree.structure(state), store.arrays(item, _leaves(state))))
-    buffers = Buffers(
-        *store.arrays("buffers", (template.buffers.train, template.buffers.validation, template.buffers.exact))
-    )
+    buffers = _buffers(store, template.buffers)
     key_data = jax.random.key_data(jax.random.key(0, impl=metadata.key_implementation))
     runtime = store.arrays(
         "runtime",
@@ -584,6 +586,18 @@ def _initialize_folder(folder: Path, settings: str) -> None:
     (folder / "config.json").write_text(settings)
     with (folder / "metrics.csv").open("w", newline="") as output:
         csv.writer(output).writerow(METRIC_COLUMNS)
+
+
+def _replay_rows(config: CharacteristicRunConfig, replay: ReplayState | None) -> ReplayRows | None:
+    """The agent's filled replay rows, for characteristic runs that learn from it."""
+    if config.data != "replay":
+        return None
+    rows = config.train.train_size + config.train.validation_size
+    if replay is None or int(replay.size) < rows:
+        raise ValueError(f"replay characteristics need at least {rows} transitions in the agent's replay")
+    size = int(replay.size)
+    data = replay.data
+    return ReplayRows(data.observations[:size], data.actions[:size], data.log_probabilities[:size])
 
 
 def _outcome_sources(config: OutcomeRunConfig, replay: ReplayState | None, agent_sha256: str) -> _Sources:
@@ -776,20 +790,34 @@ def array_sha256(arrays: tuple[Array, ...] | list[Array]) -> str:
 
 
 def _characteristic_config(value: dict[str, object]) -> CharacteristicRunConfig:
+    for name, default in REPLAY_DEFAULTS.items():
+        value.setdefault(name, default)  # Settings saved before replay data existed.
     _schema(value, fields(CharacteristicRunConfig))
+    data = _string(value, "data")
+    if data not in ("rollouts", "replay"):
+        raise ValueError("invalid saved characteristic data")
     return CharacteristicRunConfig(
-        Path(_string(value, "agent")),
-        _kind(_string(value, "kind")),
-        _policy(_string(value, "policy")),
-        _widths(value),
-        _train_config(_mapping(value["train"])),
-        _integer(value, "seed"),
-        _seeds(value),
-        _integer(value, "chunk_epochs"),
-        Path(_string(value, "output")),
-        _boolean(value, "validate_only"),
-        _boolean(value, "compile_only"),
+        agent=Path(_string(value, "agent")),
+        kind=_kind(_string(value, "kind")),
+        policy=_policy(_string(value, "policy")),
+        hidden_widths=_widths(value),
+        data="replay" if data == "replay" else "rollouts",
+        off_policy=_boolean(value, "off_policy"),
+        weighting=_boolean(value, "weighting"),
+        clip_coef=_number(value, "clip_coef"),
+        train=_train_config(_mapping(value["train"])),
+        seed=_integer(value, "seed"),
+        seeds=_seeds(value),
+        chunk_epochs=_integer(value, "chunk_epochs"),
+        output=Path(_string(value, "output")),
+        validate_only=_boolean(value, "validate_only"),
+        compile_only=_boolean(value, "compile_only"),
     )
+
+
+def _buffers(store: ExplanationStore, template: Buffers) -> Buffers:
+    restored = store.arrays("buffers", _leaves(template))
+    return cast(Buffers, jax.tree.unflatten(jax.tree.structure(template), restored))  # The template's own layout.
 
 
 def _shapley_config(value: dict[str, object]) -> ShapleyRunConfig:

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from functools import partial
-from math import isfinite, nan
+from math import inf, isfinite, nan
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, Protocol, cast
 
@@ -32,12 +32,16 @@ from jax_shapley.characteristics import (
     CharacteristicModel,
     ExactCharacteristic,
     Kind,
+    OffPolicyConfig,
     Policy,
     characteristic_loss,
     characteristic_network,
     exact_characteristic,
     exact_characteristic_loss,
     explained_values,
+    importance_weighted_loss,
+    off_policy_weights,
+    policy_probabilities,
     update_characteristic,
 )
 from jax_shapley.coalitions import all_coalitions, kernel_coalitions, uniform_coalitions
@@ -88,6 +92,7 @@ from jax_shapley.train_dqn import (
     Mastermind222Config,
     MastermindConfig,
     ResumeConfig,
+    action_log_probabilities,
     choose_action,
     environment_step,
     make_adam,
@@ -104,6 +109,7 @@ if TYPE_CHECKING:
     )
 
 type BufferSource = Literal["fresh", "characteristic"]
+type CharacteristicData = Literal["rollouts", "replay"]
 
 # The source logs on-policy losses (and exact losses) every 100 global steps.
 LOG_STEPS = 100
@@ -191,10 +197,24 @@ class ExplanationTrainConfig:
 
 @dataclass(frozen=True, slots=True)
 class CharacteristicRunConfig:
+    """A characteristic run; `data="replay"` learns from the agent's shuffled replay (paper Section 4).
+
+    Replay rows are the agent's training transitions: the first `train_size` rows of a
+    shuffled replay train and the next `validation_size` validate (upstream
+    `offpolicy/run_policy_prediction.py`); the exact buffer is fresh rollouts of the
+    explained policy, so `train.exact_buffer_size` is required. `off_policy` weights
+    each row by the explained-to-behaviour policy ratio, normalised over the batch
+    when `weighting` and clipped to `[1 - clip_coef, 1 + clip_coef]`.
+    """
+
     agent: Path
     kind: Kind = "behaviour"
     policy: Policy = "greedy"
     hidden_widths: tuple[int, ...] = (64, 64)
+    data: CharacteristicData = "rollouts"
+    off_policy: bool = False
+    weighting: bool = True
+    clip_coef: float = inf
     train: ExplanationTrainConfig = field(default_factory=ExplanationTrainConfig)
     seed: int = 1
     seeds: tuple[int, ...] = ()
@@ -206,10 +226,22 @@ class CharacteristicRunConfig:
     def __post_init__(self) -> None:
         _run_options(self.seed, self.seeds, self.chunk_epochs, self.validate_only, self.compile_only)
         CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
+        OffPolicyConfig(self.weighting, self.clip_coef)
+        if self.data not in ("rollouts", "replay"):
+            raise ValueError("data must be rollouts or replay")
+        if self.off_policy and self.data != "replay":
+            raise ValueError("off-policy weighting needs replay data")
+        if self.data == "replay" and self.train.exact_loss and self.train.exact_buffer_size is None:
+            raise ValueError("replay characteristics need a separate exact buffer (train.exact_buffer_size)")
 
     @property
     def characteristic(self) -> CharacteristicConfig:
         return CharacteristicConfig(self.kind, self.policy, self.hidden_widths)
+
+    @property
+    def importance(self) -> OffPolicyConfig | None:
+        """Importance weighting, for off-policy replay runs."""
+        return OffPolicyConfig(self.weighting, self.clip_coef) if self.off_policy else None
 
     @property
     def progress_limit(self) -> int:
@@ -393,12 +425,32 @@ type AnyOnPolicyState = (
 
 
 @struct.dataclass
+class ReplayRows:
+    """A DQN agent's replay, which off-policy characteristic runs learn from."""
+
+    observations: Array
+    actions: Array
+    log_probabilities: Array
+
+
+@struct.dataclass
+class Behaviour:
+    """Actions and behaviour-policy log-probabilities of replay-drawn train and validation rows."""
+
+    train_actions: Array
+    train_log_probabilities: Array
+    validation_actions: Array
+    validation_log_probabilities: Array
+
+
+@struct.dataclass
 class Buffers:
-    """int32 observations recorded before each environment step."""
+    """int32 observations recorded before each environment step (or drawn from a replay, with `behaviour`)."""
 
     train: Array
     validation: Array
     exact: Array
+    behaviour: Behaviour | None = None
 
 
 @struct.dataclass
@@ -436,12 +488,15 @@ class FrozenAgent:
 
 @struct.dataclass
 class CharacteristicContext:
-    """Per-seed constants a characteristic learner reads: buffers, targets and exact values."""
+    """Per-seed constants a characteristic learner reads: buffers, targets, exact values and, for
+    off-policy runs, each row's explained-policy log-probability."""
 
     buffers: Buffers
     train_targets: Array
     validation_targets: Array
     exact: ExactCharacteristic | None
+    train_log_probabilities: Array | None = None
+    validation_log_probabilities: Array | None = None
 
 
 @struct.dataclass
@@ -777,7 +832,7 @@ def run_characteristic[State, Params](
     keys: Array,
     agents: FrozenAgent,
     characteristics: CharacteristicModel | None,
-    inherited: Buffers | None,
+    inherited: Buffers | ReplayRows | None,
     state: ExplanationState[CharacteristicModel] | None = None,
     *,
     environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
@@ -804,9 +859,9 @@ def run_characteristic[State, Params](
             model_key, key = jax.random.split(key)
             return initialize_state(CharacteristicModel(network, rngs=nnx.Rngs(model_key)), buffers, training, key)
 
-        if inherited is None:
+        if not isinstance(inherited, Buffers):
             keys, inherited = collect_characteristic_buffers(
-                keys, agents, environment_factory=environment_factory, config=config
+                keys, agents, inherited, environment_factory=environment_factory, config=config
             )
         state = nnx.vmap(initialize, in_axes=(0, 0), out_axes=0)(keys, inherited)
 
@@ -817,7 +872,7 @@ def run_characteristic[State, Params](
 
     def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel, Draw]:
         del frozen
-        return characteristic_learner(context, training, features)
+        return characteristic_learner(context, training, features, config.importance)
 
     return train(state, contexts, None, learner, training, config.chunk_epochs, sink)
 
@@ -825,6 +880,7 @@ def run_characteristic[State, Params](
 def collect_characteristic_buffers[State, Params](
     keys: Array,
     agents: FrozenAgent,
+    replay: ReplayRows | None,
     *,
     environment_factory: Callable[[], EnvironmentProtocol[State, Params]],
     config: CharacteristicRunConfig,
@@ -832,11 +888,46 @@ def collect_characteristic_buffers[State, Params](
     """Every seed's characteristic buffers, and its key advanced past their collection."""
     env = EpisodeStatisticsWrapper(environment_factory())
     policy, training = config.characteristic.policy, config.train
+    if config.data == "replay":
+        if replay is None:
+            raise ValueError("replay characteristics need the agent's replay")
+
+        def from_replay(key: Array, agent: FrozenAgent, rows: ReplayRows) -> tuple[Array, Buffers]:
+            return replay_buffers(env, agent, policy, training, key, rows)
+
+        return nnx.vmap(from_replay, in_axes=(0, 0, 0), out_axes=(0, 0))(keys, agents, replay)
 
     def collect(key: Array, agent: FrozenAgent) -> tuple[Array, Buffers]:
         return collect_buffers(env, agent, policy, training, key, None)
 
     return nnx.vmap(collect, in_axes=(0, 0), out_axes=(0, 0))(keys, agents)
+
+
+def replay_buffers[State, Params](
+    env: EpisodeStatisticsWrapper[State, Params],
+    agent: FrozenAgent,
+    policy: Policy,
+    config: ExplanationTrainConfig,
+    key: Array,
+    replay: ReplayRows,
+) -> tuple[Array, Buffers]:
+    """Upstream offpolicy/run_policy_prediction.py: shuffle the replay, train on the first rows and
+    validate on the next; the exact buffer is fresh rollouts of the explained policy."""
+    keys: Array = jax.random.split(key, 3)
+    key, shuffle_key, exact_key = keys[0], keys[1], keys[2]
+    order = jax.random.permutation(shuffle_key, replay.observations.shape[0])
+    train_rows = order[: config.train_size]
+    validation_rows = order[config.train_size : config.train_size + config.validation_size]
+    epsilon = agent.epsilon if policy == "explore" else jnp.asarray(0.0, jnp.float32)
+    exact = collect_observations(env, agent.model, epsilon, exact_key, config.exact_size, config.num_envs)
+    behaviour = Behaviour(
+        replay.actions[train_rows],
+        replay.log_probabilities[train_rows],
+        replay.actions[validation_rows],
+        replay.log_probabilities[validation_rows],
+    )
+    observations = replay.observations
+    return key, Buffers(observations[train_rows], observations[validation_rows], exact, behaviour)
 
 
 def exact_bound(exact: Array) -> int:
@@ -1408,18 +1499,47 @@ def characteristic_context(
     def targets(observations: Array) -> Array:
         return explained_values(agent.model(observations).q_values, explained, agent.epsilon)
 
+    def log_probabilities(observations: Array, actions: Array) -> Array:
+        """The explained policy's log-probability of each replay action (upstream choose_action)."""
+        q_values = agent.model(observations).q_values
+        return action_log_probabilities(policy_probabilities(q_values, explained.policy, agent.epsilon), actions)
+
     exact = (
         exact_characteristic(buffers.exact, targets(buffers.exact), all_coalitions(features), max_unique=max_unique)
         if training.exact_loss
         else None
     )
-    return CharacteristicContext(buffers, targets(buffers.train), targets(buffers.validation), exact)
+    behaviour = buffers.behaviour
+    if behaviour is None:
+        return CharacteristicContext(buffers, targets(buffers.train), targets(buffers.validation), exact)
+    return CharacteristicContext(
+        buffers,
+        targets(buffers.train),
+        targets(buffers.validation),
+        exact,
+        log_probabilities(buffers.train, behaviour.train_actions),
+        log_probabilities(buffers.validation, behaviour.validation_actions),
+    )
 
 
 def characteristic_learner(
-    context: CharacteristicContext, training: ExplanationTrainConfig, features: int
+    context: CharacteristicContext,
+    training: ExplanationTrainConfig,
+    features: int,
+    importance: OffPolicyConfig | None = None,
 ) -> Learner[CharacteristicModel, Draw]:
-    """Uniform coalitions per row; targets and exact values come from the precomputed context."""
+    """Uniform coalitions per row; targets and exact values come from the precomputed context.
+
+    With `importance`, rows are weighted by the explained-to-behaviour policy ratio,
+    normalised over each batch (and over the whole validation draw), as upstream does.
+    """
+
+    def weights(rows: Array, new: Array | None, behaviour: Array | None) -> Array | None:
+        if importance is None:
+            return None
+        if new is None or behaviour is None:
+            raise ValueError("off-policy weighting needs replay log-probabilities")
+        return off_policy_weights(new[rows], behaviour[rows], importance)
 
     def train_draw(key: Array, epoch: Array, batch: Array) -> Draw:
         del epoch, batch
@@ -1439,12 +1559,24 @@ def characteristic_learner(
     ) -> Array:
         rows = draw.rows
         targets = context.train_targets[rows]
-        return update_characteristic(model, optimizer, buffers.train[rows], targets, draw.coalitions).loss
+        behaviour = buffers.behaviour
+        row_weights = weights(
+            rows, context.train_log_probabilities, None if behaviour is None else behaviour.train_log_probabilities
+        )
+        return update_characteristic(model, optimizer, buffers.train[rows], targets, draw.coalitions, row_weights).loss
 
     def validation_loss(model: CharacteristicModel, buffers: Buffers, draw: Draw) -> Array:
         rows = draw.rows
         targets = context.validation_targets[rows]
-        return characteristic_loss(model, buffers.validation[rows], targets, draw.coalitions)[0]
+        behaviour = buffers.behaviour
+        row_weights = weights(
+            rows,
+            context.validation_log_probabilities,
+            None if behaviour is None else behaviour.validation_log_probabilities,
+        )
+        if row_weights is None:
+            return characteristic_loss(model, buffers.validation[rows], targets, draw.coalitions)[0]
+        return importance_weighted_loss(model, buffers.validation[rows], targets, draw.coalitions, row_weights)[0]
 
     def exact_loss(model: CharacteristicModel) -> Array:
         assert context.exact is not None
@@ -1722,11 +1854,7 @@ def template_state(context: RunContext, config: RunConfig) -> AnyState:
     """Host template with the run's static shapes, used only to validate and place restored arrays."""
     training = config.train
     features = context.features
-    buffers = Buffers(
-        jnp.zeros((training.train_size, features), jnp.int32),
-        jnp.zeros((training.validation_size, features), jnp.int32),
-        jnp.zeros((context.exact_rows, features), jnp.int32),
-    )
+    buffers = buffer_template(config, features, context.exact_rows)
     key = jax.random.key(0)
     if isinstance(config, CharacteristicRunConfig):
         network = characteristic_network(features, context.actions, config.characteristic)
@@ -1742,6 +1870,26 @@ def template_state(context: RunContext, config: RunConfig) -> AnyState:
     return initialize_state(model, buffers, training, key)
 
 
+def buffer_template(config: RunConfig, features: int, exact_rows: int) -> Buffers:
+    """Static buffer shapes of a run, with replay behaviour arrays for replay characteristics."""
+    training = config.train
+    train, validation = training.train_size, training.validation_size
+    behaviour = None
+    if isinstance(config, CharacteristicRunConfig) and config.data == "replay":
+        behaviour = Behaviour(
+            jnp.zeros((train,), jnp.int32),
+            jnp.zeros((train,), jnp.float32),
+            jnp.zeros((validation,), jnp.int32),
+            jnp.zeros((validation,), jnp.float32),
+        )
+    return Buffers(
+        jnp.zeros((train, features), jnp.int32),
+        jnp.zeros((validation, features), jnp.int32),
+        jnp.zeros((exact_rows, features), jnp.int32),
+        behaviour,
+    )
+
+
 def make_snapshot[Model: nnx.Module](state: ExplanationState[Model]) -> ExplanationSnapshot:
     """Extract numerical state only; NNX graph definitions stay outside callbacks."""
     from jax_shapley.explanation_io import ExplanationSnapshot
@@ -1750,7 +1898,7 @@ def make_snapshot[Model: nnx.Module](state: ExplanationState[Model]) -> Explanat
         _array_leaves(nnx.state(state.model)),
         _array_leaves(nnx.state(state.best)),
         _array_leaves(nnx.state(state.optimizer)),
-        (state.buffers.train, state.buffers.validation, state.buffers.exact),
+        _array_leaves(state.buffers),
         (state.best_loss, state.best_epoch, state.stopped, jax.random.key_data(state.key)),
         state.epoch,
         state.phase,
@@ -1815,8 +1963,8 @@ def _exact_inputs(
     compile_only: bool,
     keys: Array,
     agents: FrozenAgent,
-    inherited: Buffers | OutcomeInputs | None,
-) -> tuple[Array, Buffers | OutcomeInputs | None, int]:
+    inherited: Buffers | OutcomeInputs | ReplayRows | None,
+) -> tuple[Array, Buffers | OutcomeInputs | ReplayRows | None, int]:
     """Size exact tables by the real buffers' unique observations.
 
     Fresh characteristic runs collect their buffers first (the training program then
@@ -1828,8 +1976,9 @@ def _exact_inputs(
         if isinstance(restored, ExplanationState):
             return keys, inherited, exact_bound(restored.buffers.exact)
         if not compile_only:
+            replay = inherited if isinstance(inherited, ReplayRows) else None
             collector = _with_environment(collect_characteristic_buffers, context.env_config, {"config": config})
-            keys, buffers = cast(tuple[Array, Buffers], nnx.jit(collector)(keys, agents))
+            keys, buffers = cast(tuple[Array, Buffers], nnx.jit(collector)(keys, agents, replay))
             return keys, buffers, exact_bound(buffers.exact)
     elif isinstance(inherited, Buffers):
         return keys, inherited, exact_bound(inherited.exact)

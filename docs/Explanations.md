@@ -92,6 +92,16 @@ A run folder holds `config.json`, `metrics.csv` (`epoch, step, train_loss, valid
 
 **Exact-value cost.** Exact characteristic values deduplicate the exact buffer into its unique observations (weighted by frequency) before looping over all `2^F` coalitions, so each coalition processes a few unique states rather than every row. Their tables are sized by the real buffers: a fresh characteristic run collects its buffers in a first compiled program and sizes the tables by the most unique observations in any seed, a resumed run uses its checkpointed buffers, and a Shapley run uses the characteristic's exact buffer. (`--compile-only` keeps the analytic bound, the observation space or the buffer rows.) This makes Mastermind-333 (15 features, 32,768 coalitions) take seconds for a 20-seed sweep instead of about 28 GB per seed. The per-epoch exact loss evaluates only the 512-row chunks holding each coalition's distinct masked observations.
 
+## Off-policy characteristics
+
+The paper's Section 4 (Figures 3a and 7–9) trains characteristic models from the agent's own training replay instead of fresh rollouts of its final policy. `characteristic --data replay` does this, following upstream `experiments/offpolicy/run_policy_prediction.py`:
+
+- **Buffers.** Each seed shuffles its agent's replay. The first `train_size` rows train, the next `validation_size` rows validate (with their actions and behaviour-policy log-probabilities, which DQN training stored), and the exact buffer is fresh rollouts of the explained policy (`--train.exact-buffer-size` is required).
+- **Importance sampling.** `--off-policy` weights each row by the ratio of the explained policy's probability of the replayed action to the behaviour policy's. With `--weighting` (the default) the weights are normalised to sum to one over each batch (and over the whole validation draw); `--clip-coef c` then clips them to `[1 − c, 1 + c]`. The loss is upstream's `ImportanceWeightedMSELoss`.
+- **Groups.** `experiments/explanations/offpolicy.sh` trains every seed's agent and the paper's groups: on-policy rollouts, replay without importance sampling, unnormalised and normalised weights, and clipping at 0.99, 0.995 and 0.998.
+
+`tests/fixtures/fastsverl_pipeline.npz` includes an upstream `train_models` run of an off-policy behaviour characteristic with normalised weights and recorded draws; the JAX loop reproduces its losses, stopping epoch and restored weights (`tests/test_pipeline_parity.py`).
+
 ## Outcome explanations
 
 **The characteristic.** `v(e, C)` is the agent's expected return from `e` when, *at `e` only*, it follows the behaviour characteristic's prediction given `C`, and elsewhere its own explained policy. This conditioned policy is `π̂(a | s; e, C)`. A goal-conditioned network on `concat(s, e, C)` learns it with DQN-style updates and a soft-updated target (`OutcomeNetworks`):

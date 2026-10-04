@@ -17,13 +17,19 @@ import pytest
 from flax import nnx
 
 from jax_shapley import train_dqn
-from jax_shapley.characteristics import CharacteristicConfig, CharacteristicModel, characteristic_network
+from jax_shapley.characteristics import (
+    CharacteristicConfig,
+    CharacteristicModel,
+    OffPolicyConfig,
+    characteristic_network,
+)
 from jax_shapley.envs import Hypercube
 from jax_shapley.networks import QNetwork, dqn_config
 from jax_shapley.run_io import load_agent, load_settings
 from jax_shapley.shapley import MaskedCharacteristic, ShapleyLayout, ShapleyModel, shapley_network
 from jax_shapley.train_dqn import epsilon_at
 from jax_shapley.train_explanations import (
+    Behaviour,
     Buffers,
     CharacteristicContext,
     Draw,
@@ -83,6 +89,32 @@ def test_characteristic_loop_matches_upstream_train_models(case: str) -> None:
     def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel, Draw]:
         del frozen
         return _recorded(characteristic_learner(context, training, 8), fixture, prefix)
+
+    sink, result = _replay(model, buffers, training, context, None, learner)
+    _assert_rows(sink, fixture, prefix)
+    assert_parameters(result.model.mlp, fixture, f"{prefix}_final", rtol=2e-4, atol=1e-5)
+
+
+def test_offpolicy_characteristic_loop_matches_upstream_train_models() -> None:
+    """Paper Figure 3a's loop: normalised importance weights per batch and over the validation draw."""
+    fixture = _fixture()
+    prefix = "loop_offpolicy"
+    training = _training(epochs=8, patience=2, exact_condition=None, track_batch=False)
+    explained = CharacteristicConfig("behaviour", hidden_widths=(64, 64))
+    model = CharacteristicModel(characteristic_network(8, 4, explained), rngs=nnx.Rngs(0))
+    assign(model.mlp, fixture, f"{prefix}_initial")
+    actions = jnp.asarray(fixture[f"{prefix}_actions"])
+    log_probabilities = jnp.asarray(fixture[f"{prefix}_log_probabilities"])
+    rows = training.train_size
+    base = _buffers(fixture)
+    behaviour = Behaviour(actions[:rows], log_probabilities[:rows], actions[rows:], log_probabilities[rows:])
+    buffers = Buffers(base.train, base.validation, base.exact, behaviour)
+    context = characteristic_context(buffers, _agent(fixture), explained, training, 8, 32)
+    importance = OffPolicyConfig(weighting=True)
+
+    def learner(context: CharacteristicContext, frozen: None) -> Learner[CharacteristicModel, Draw]:
+        del frozen
+        return _recorded(characteristic_learner(context, training, 8, importance), fixture, prefix)
 
     sink, result = _replay(model, buffers, training, context, None, learner)
     _assert_rows(sink, fixture, prefix)
