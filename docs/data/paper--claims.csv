@@ -24,3 +24,4 @@ fig2_scaling_behaviour,hypercube_policy,"Updates to the target loss grow with th
 fig5_scaling_prediction,hypercube_value,"Updates to the target loss grow with the number of states (prediction)",spearman(states; updates) >= 0.8 per dimension (characteristic)
 tables_converge,tables 1/3/4,"Models converge to a stable loss in the large domains",final losses finite and positive for every domain and model
 tables_cost_manageable,tables 1/3/4,"Updates to converge stay consistent across domain sizes",max/min updates across 443/453/463 <= 3 per model
+table2_nullity,table 2,"Unused guess slots are assigned a neutral influence (nullity)",mean |scaled value| over empty board rows <= 0.25 x mean over filled rows; greedy Mastermind-463 states with 1-5 guesses made

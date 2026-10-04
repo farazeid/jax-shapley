@@ -52,6 +52,7 @@ from jax_shapley.run_io import (
     prefix_digest,
     verify_prefix,
 )
+from jax_shapley.shapley import ShapleyLayout, ShapleyModel, shapley_network
 from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config, MastermindConfig
 from jax_shapley.train_explanations import (
     AnyState,
@@ -128,6 +129,17 @@ class LoadedOutcome:
     agent_sha256: str
     characteristic_sha256: str
     networks: OutcomeNetworks
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedShapley:
+    """A completed Shapley run's best model; `characteristic_sha256` identifies the explained characteristic."""
+
+    config: ShapleyRunConfig
+    agent_sha256: str
+    characteristic_sha256: str
+    model: ShapleyModel
     sha256: str
 
 
@@ -447,6 +459,30 @@ def load_outcome(folder: Path) -> LoadedOutcome:
     finally:
         store.close()
     return LoadedOutcome(config, settings.agent_sha256, settings.characteristic_sha256, networks, array_sha256(values))
+
+
+def load_shapley(folder: Path) -> LoadedShapley:
+    """A completed Shapley run's best model; behaviour explanations keep one output per action."""
+    settings = load_run_settings(folder / "config.json")
+    config = settings.config
+    if not isinstance(config, ShapleyRunConfig) or settings.characteristic_sha256 is None:
+        raise ValueError("expected a Shapley run")
+    agent = load_settings(config.agent / "config.json")
+    explained = load_run_settings(config.characteristic / "config.json").config
+    behaviour = isinstance(explained, CharacteristicRunConfig) and explained.kind == "behaviour"
+    features = agent.network.input_features
+    layout = ShapleyLayout(features, agent.env.make().num_actions if behaviour else 1)
+    model = ShapleyModel(shapley_network(layout, config.hidden_widths), layout, rngs=nnx.Rngs(0))
+    store = ExplanationStore(folder, read_only=True)
+    try:
+        if store.metadata().phase != ExplanationPhase.COMPLETE:
+            raise ValueError("the Shapley run has not completed")
+        state = nnx.state(model)
+        values = store.arrays("model", _leaves(state))
+        nnx.update(model, jax.tree.unflatten(jax.tree.structure(state), values))
+    finally:
+        store.close()
+    return LoadedShapley(config, settings.agent_sha256, settings.characteristic_sha256, model, array_sha256(values))
 
 
 def restore_state[Model: nnx.Module](
