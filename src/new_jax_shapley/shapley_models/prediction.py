@@ -16,18 +16,18 @@ from new_jax_shapley.shapley_models.behaviour import ShapleyConfig, ShapleyModel
 def main(
     config: ShapleyConfig,
     explained: CharacteristicConfig,
-    agent: Agent,
-    characteristic: CharacteristicModel,
+    agents: Agent,
+    characteristics: CharacteristicModel,
     characteristic_buffers: StateBuffers,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
-    """Prediction Shapley models explaining one frozen prediction characteristic."""
+    """Prediction Shapley models explaining frozen prediction characteristics."""
     if explained.kind != "prediction":
         raise ValueError("the prediction stage explains a prediction characteristic")
     return stage(
         config,
         explained,
-        agent,
-        characteristic,
+        agents,
+        characteristics,
         characteristic_buffers,
         prediction.targets,
         prediction.head,
