@@ -158,3 +158,20 @@ bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --char
 ```
 
 `--seeds 1 2 …` trains many seeds as one compiled sweep, with one ordinary run folder per seed. Runs compile before creating artifacts, checkpoint complete state, and resume exactly with `uv run python -m jax_shapley.train_explanations resume --run runs/<run>`. See the [explanations guide](docs/Explanations.md). Against the unchanged PyTorch code, outcomes match statistically and steady-state CPU training epochs are 2.7–4.7× faster; see the [explanation port report](docs/Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md).
+
+## Tracked experiments (`new_jax_shapley`)
+
+`new_jax_shapley` runs a whole experiment (DQN agent, then characteristic models, then Shapley models) from one config in `src/new_jax_shapley/configs/NAME.py`. Every run is tracked with trackio (the default) or wandb:
+
+```bash
+uv run python -m new_jax_shapley.main mastermind222_behaviour
+uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb --shapley.1.train.epochs 9
+```
+
+- Each stage takes only its config and tracks itself. Its runs are named `NAME--STAGE--VARIANT`, with `--seed-N` per explanation seed: `NAME--algorithm--dqn`, `NAME--characteristic--behaviour--seed-1`, `NAME--shapley--behaviour--with-exact--seed-1`. One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
+- The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
+- Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.
+- A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.
+- **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.
+- **trackio:** the source of truth is its local store, `TRACKIO_DIR`.
+- `scripts/paper_port/figures.py` and `tables.py` read results from the same backend.

@@ -1,4 +1,4 @@
-"""Regenerate the paper's figures from JAX runs with the source's plot statistics.
+"""Regenerate the paper's figures from tracked JAX runs with the source's plot statistics.
 
 Each figure spec follows its upstream plotting script (`experiments/**/plots/plot_*.py`
 at FastSVERL 25b2cbe): the logged tag, the groups and labels, `start_epoch` offsets,
@@ -7,18 +7,17 @@ runs are merged on the logging step with `merge_asof(direction="nearest")`, line
 interpolated, then summarised by the mean and standard error over runs. Hypercube bars
 port `barcharts`: each run's last logged exact-loss step, mean and standard error.
 
-Sources: the milestone-2 sweeps (`docs/data/explanations-port--jax-runs.csv`) for the
-Mastermind-222 and Gridworld accuracy figures, and run folders under `runs/paper` for
-the rest (written by `runs/paper/run_*.sh`). Figures whose runs do not exist yet are
-listed as missing.
+Runs come only from the tracking backend: each series names a registered experiment
+(`new_jax_shapley/configs/NAME.py`), a stage's runs within it and an upstream tag, read
+from that experiment's latest run group. Figures whose experiments are not ported yet, or
+have no tracked runs, are listed as missing.
 
-Usage: uv run --group benchmark python scripts/paper_port/figures.py [--paper runs/paper] [--output docs/data]
+Usage: uv run --group benchmark python scripts/paper_port/figures.py --track wandb|trackio [--output docs/data]
 """
 
 from __future__ import annotations
 
 import csv
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +26,9 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import tyro
+
+from new_jax_shapley import backends
+from new_jax_shapley.experiment import load_configs
 
 type FloatArray = npt.NDArray[np.float64]
 type Run = tuple[FloatArray, FloatArray]
@@ -39,12 +41,16 @@ OFFPOLICY_GRIDWORLD_BATCHES = (0.8 * 15_000) // 128
 # parallel/plots: "Scaling because models updated every 10 env steps."
 PARALLEL_SCALE = 0.1
 CUBES = tuple((side, dimension) for dimension in (2, 3, 4, 5) for side in (2, 3, 4, 5, 6))
+# Shapley stages by the source's series labels: its "Exact characteristic" runs set with_exact_char=False.
+EXACT_CHARACTERISTIC = "without-exact"
+APPROX_CHARACTERISTIC = "with-exact"
 
 
 @dataclass(frozen=True, slots=True)
 class Args:
-    paper: Path = Path("runs/paper")
-    milestone: Path = Path("docs/data/explanations-port--jax-runs.csv")
+    track: backends.Track
+    project: str = "jax-shapley"
+    entity: str | None = None
     output: Path = Path("docs/data")
 
 
@@ -74,55 +80,37 @@ class Curve:
 
 @dataclass
 class Sources:
-    """Run loaders; every run is (logging steps, values) with missing values dropped."""
+    """Tracked runs; every run is (logging steps, values) of one tag."""
 
-    paper: Path
-    milestone: Path
-    _milestone: pd.DataFrame | None = field(default=None, repr=False)
+    track: backends.Track
+    project: str
+    entity: str | None
+    ported: frozenset[str]
+    _histories: dict[str, dict[str, list[backends.Scalars]]] = field(default_factory=dict, repr=False)
 
-    def milestone_runs(self, environment: str, kind: str, stage: str, exact_char: str) -> list[Run]:
-        if self._milestone is None:
-            self._milestone = pd.read_csv(self.milestone, keep_default_na=False)
-        frame = self._milestone
-        selected = frame[
-            (frame["framework"] == "jax")
-            & (frame["environment"] == environment)
-            & (frame["kind"] == kind)
-            & (frame["stage"] == stage)
-            & (frame["exact_char"] == exact_char)
-        ]
+    def runs(self, experiment: str, stage: str, tag: str) -> list[Run]:
+        """Every seed's run of `stage` (`algorithm--dqn`, `characteristic--behaviour`,
+        `shapley--behaviour--with-exact`, ...), in seed order."""
+        history = self._history(experiment)
+        prefix = f"{experiment}--{stage}"
+        names = sorted((name for name in history if name == prefix or name.startswith(f"{prefix}--")), key=_seed)
         runs = []
-        for _, rows in selected.groupby("seed"):
-            values = pd.to_numeric(rows["exact_loss"], errors="coerce")
-            keep = values.notna()
-            runs.append((_floats(rows["step"][keep]), _floats(values[keep])))
-        return _required(runs, f"{environment} {kind} {stage} {exact_char}")
+        for name in names:
+            logged = [(row["_step"], row[tag]) for row in history[name] if tag in row and "_step" in row]
+            runs.append((_floats([step for step, _ in logged]), _floats([value for _, value in logged])))
+        return _required(runs, f"{experiment} {stage} {tag}")
 
-    def sweep(self, folder: Path, column: str, **settings: object) -> list[Run]:
-        """Seed folders of the one sweep under `folder` whose saved settings match `settings`."""
-        sweeps = [sweep for sweep in sorted(folder.glob("*")) if sweep.is_dir() and _matches(sweep, settings)]
-        if len(sweeps) != 1:
-            raise MissingRunsError(f"expected one sweep in {folder} matching {settings}, found {len(sweeps)}")
-        seeds = sorted(sweeps[0].glob("seed-*")) or [sweeps[0]]
-        if any(not (seed / "summary.json").exists() for seed in seeds):
-            raise MissingRunsError(f"{sweeps[0]} has unfinished seeds")
-        return _required([_metrics(seed / "metrics.csv", column) for seed in seeds], str(folder))
-
-    def continual(self, domain: str, kind: str, ratio: int, column: str) -> list[Run]:
-        seeds = self._continual_seeds(domain, kind, ratio)
-        if column == "episode_return":
-            return [_metrics(seed / "episodes.csv", column) for seed in seeds]
-        return [_metrics(seed / "metrics.csv", column) for seed in seeds]
-
-    def _continual_seeds(self, domain: str, kind: str, ratio: int) -> list[Path]:
-        root = self.paper / "continual" / domain / kind
-        for run in sorted(root.glob("*")):
-            seeds = sorted(run.glob("seed-*"))
-            if seeds:
-                config = json.loads((seeds[0] / "config.json").read_text())["config"]
-                if config["explain"]["update_ratio"] == ratio:
-                    return seeds
-        raise MissingRunsError(f"no {domain} {kind} continual run at ratio {ratio}")
+    def _history(self, experiment: str) -> dict[str, list[backends.Scalars]]:
+        if experiment not in self.ported:
+            raise MissingRunsError(f"experiment {experiment} is not ported")
+        if experiment not in self._histories:
+            found = backends.groups(self.track, project=self.project, entity=self.entity, prefix=f"{experiment}-")
+            if not found:
+                raise MissingRunsError(f"no tracked runs of {experiment} in {self.track} project {self.project}")
+            self._histories[experiment] = backends.history(
+                self.track, project=self.project, entity=self.entity, group=found[-1]
+            )
+        return self._histories[experiment]
 
 
 class MissingRunsError(Exception):
@@ -130,7 +118,7 @@ class MissingRunsError(Exception):
 
 
 def main(args: Args) -> None:
-    sources = Sources(args.paper, args.milestone)
+    sources = Sources(args.track, args.project, args.entity, frozenset(load_configs()))
     rows: list[tuple[str, str, float, float, float, int]] = []
     missing: list[str] = []
     for spec in figures():
@@ -144,11 +132,12 @@ def main(args: Args) -> None:
                 (spec.name, label, float(x), float(mean), float(se), curve.runs)
                 for x, mean, se in zip(curve.x, curve.mean, curve.standard_error, strict=True)
             )
+    args.output.mkdir(parents=True, exist_ok=True)
     with (args.output / "paper--jax-curves.csv").open("w", newline="") as output:
         writer = csv.writer(output)
         writer.writerow(("figure", "series", "x", "mean", "standard_error", "runs"))
         writer.writerows(_rounded(row) for row in rows)
-    bars, missing_bars = hypercube_bars(args.paper)
+    bars, missing_bars = hypercube_bars(sources)
     with (args.output / "paper--jax-bars.csv").open("w", newline="") as output:
         writer = csv.writer(output)
         writer.writerow(("figure", "model", "side", "dimension", "states", "mean", "standard_error", "runs"))
@@ -163,10 +152,11 @@ def figures() -> list[FigureSpec]:
     specs: list[FigureSpec] = []
     for domain, environment in (("mastermind_222", "mastermind222"), ("gwb", "gridworld")):
         for kind, name in (("behaviour", "policy"), ("prediction", "value")):
+            experiment = f"{environment}_{kind}"
             specs.append(
                 FigureSpec(
                     f"app_{domain}_{name}_char",
-                    (Series("#1f77b4", _milestone(environment, kind, "characteristic", "")),),
+                    (Series("#1f77b4", _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))),),
                     BATCHES,
                 )
             )
@@ -174,32 +164,49 @@ def figures() -> list[FigureSpec]:
                 FigureSpec(
                     f"app_{domain}_{name}_shapley",
                     (
-                        Series("Exact characteristic", _milestone(environment, kind, "shapley", "without")),
-                        Series("Approx characteristic", _milestone(environment, kind, "shapley", "with")),
+                        Series(
+                            "Exact characteristic",
+                            _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind)),
+                        ),
+                        Series(
+                            "Approx characteristic",
+                            _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind)),
+                        ),
                     ),
                     BATCHES,
                 )
             )
-        outcome = f"{environment}-outcome"
+        outcome = f"{environment}_outcome"
+        tag = _tag("outcome", "characteristic")
         specs.append(
             FigureSpec(
                 f"app_{domain}_perf_char",
                 (
-                    Series("On-policy, approx behaviour", _milestone(outcome, "on_policy", "outcome", "with")),
-                    Series("On-policy, exact behaviour", _milestone(outcome, "on_policy", "outcome", "without")),
-                    Series("Off-policy, approx behaviour", _milestone(outcome, "off_policy", "outcome", "with")),
-                    Series("Off-policy, exact behaviour", _milestone(outcome, "off_policy", "outcome", "without")),
+                    Series("On-policy, approx behaviour", _tracked(f"{outcome}_on_policy", "outcome-with-policy", tag)),
+                    Series("On-policy, exact behaviour", _tracked(f"{outcome}_on_policy", "outcome-exact-policy", tag)),
+                    Series(
+                        "Off-policy, approx behaviour", _tracked(f"{outcome}_off_policy", "outcome-with-policy", tag)
+                    ),
+                    Series(
+                        "Off-policy, exact behaviour", _tracked(f"{outcome}_off_policy", "outcome-exact-policy", tag)
+                    ),
                 ),
             )
         )
-        variant = "off_policy" if environment == "mastermind222" else "on_policy"
+        variant = f"{outcome}_off_policy" if environment == "mastermind222" else f"{outcome}_on_policy"
         specs.append(
             FigureSpec(
                 f"app_{domain}_perf_shapley",
                 (
-                    Series("Approx outcome, approx behaviour", _milestone(outcome, variant, "shapley", "w_policy")),
-                    Series("Approx outcome, exact behaviour", _milestone(outcome, variant, "shapley", "wo_policy")),
-                    Series("Exact outcome, exact behaviour", _milestone(outcome, variant, "shapley", "wo_perf")),
+                    Series(
+                        "Approx outcome, approx behaviour", _tracked(variant, "shapley-with-policy", _tag("outcome"))
+                    ),
+                    Series(
+                        "Approx outcome, exact behaviour", _tracked(variant, "shapley-exact-policy", _tag("outcome"))
+                    ),
+                    Series(
+                        "Exact outcome, exact behaviour", _tracked(variant, "shapley-exact-outcome", _tag("outcome"))
+                    ),
                 ),
                 BATCHES,
             )
@@ -210,11 +217,11 @@ def figures() -> list[FigureSpec]:
         _renamed(specs, "app_mastermind_222_perf_shapley", "main_mastermind_222_perf_shapley"),
     ]
     for kind, name in (("behaviour", "policy"), ("prediction", "value")):
-        root = Path("mastermind-333") / kind
+        experiment = f"mastermind333_{kind}"
         specs.append(
             FigureSpec(
                 f"app_mastermind_333_{name}_char",
-                (Series("#1f77b4", _sweep(root / "characteristic", "exact_loss")),),
+                (Series("#1f77b4", _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))),),
                 BATCHES,
             )
         )
@@ -222,8 +229,14 @@ def figures() -> list[FigureSpec]:
             FigureSpec(
                 f"app_mastermind_333_{name}_shapley",
                 (
-                    Series("Exact characteristic", _sweep(root / "shapley", "exact_loss", with_exact_char=False)),
-                    Series("Approx characteristic", _sweep(root / "shapley", "exact_loss", with_exact_char=True)),
+                    Series(
+                        "Exact characteristic",
+                        _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind)),
+                    ),
+                    Series(
+                        "Approx characteristic",
+                        _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind)),
+                    ),
                 ),
                 BATCHES,
             )
@@ -233,7 +246,10 @@ def figures() -> list[FigureSpec]:
                 f"app_large_{name}_char",
                 tuple(
                     Series(
-                        f"Mastermind-{size}", _sweep(Path(f"mastermind-{size}") / kind / "characteristic", "train_loss")
+                        f"Mastermind-{size}",
+                        _tracked(
+                            f"mastermind{size}_{kind}", f"characteristic--{kind}", _tag(kind, "characteristic", "epoch")
+                        ),
                     )
                     for size in ("443", "453", "463")
                 ),
@@ -243,7 +259,14 @@ def figures() -> list[FigureSpec]:
             FigureSpec(
                 f"app_large_{name}_shapley",
                 tuple(
-                    Series(f"Mastermind-{size}", _sweep(Path(f"mastermind-{size}") / kind / "shapley", "train_loss"))
+                    Series(
+                        f"Mastermind-{size}",
+                        _tracked(
+                            f"mastermind{size}_{kind}",
+                            f"shapley--{kind}--{APPROX_CHARACTERISTIC}",
+                            _tag(kind, loss="epoch"),
+                        ),
+                    )
                     for size in ("443", "453", "463")
                 ),
                 BATCHES,
@@ -253,7 +276,10 @@ def figures() -> list[FigureSpec]:
         FigureSpec(
             "app_large_perf_offpolicy_shapley",
             tuple(
-                Series(f"Mastermind-{size}", _sweep(Path(f"mastermind-{size}") / "outcome" / "shapley", "train_loss"))
+                Series(
+                    f"Mastermind-{size}",
+                    _tracked(f"mastermind{size}_outcome", "shapley-with-policy", _tag("outcome", loss="epoch")),
+                )
                 for size in ("443", "453", "463")
             ),
             BATCHES,
@@ -267,15 +293,15 @@ def offpolicy_figures() -> list[FigureSpec]:
     """offpolicy/plots: every figure uses sem_correction."""
     specs = []
     for kind, name in (("behaviour", "policy"), ("prediction", "value")):
-        root = Path("offpolicy/mastermind222") / kind
+        experiment = f"offpolicy_mastermind222_{kind}"
         groups = (
             ("Off-policy (without IS)", "wo_weight"),
             ("Off-policy (with IS)", "w_weight"),
             ("On-policy", "exact"),
         )
-        series = tuple(Series(label, _sweep(root / group, "exact_loss")) for label, group in groups)
+        series = tuple(Series(label, _tracked(experiment, group, _tag(kind))) for label, group in groups)
         specs.append(FigureSpec(f"app_mastermind_222_offpolicy_{name}", series, OFFPOLICY_MASTERMIND_BATCHES, True))
-        root = Path("offpolicy/gridworld") / kind
+        experiment = f"offpolicy_gridworld_{kind}"
         clipping = (
             ("Without IS", "wo_weight"),
             ("With IS (clip = 0.99)", "clip_0.99"),
@@ -291,7 +317,7 @@ def offpolicy_figures() -> list[FigureSpec]:
             ("On-policy", "exact"),
         )
         for figure, groups in (("clipping", clipping), ("weighting", weighting)):
-            series = tuple(Series(label, _sweep(root / group, "exact_loss")) for label, group in groups)
+            series = tuple(Series(label, _tracked(experiment, group, _tag(kind))) for label, group in groups)
             specs.append(FigureSpec(f"app_gwb_offpolicy_{figure}_{name}", series, OFFPOLICY_GRIDWORLD_BATCHES, True))
     specs.append(_renamed(specs, "app_mastermind_222_offpolicy_policy", "main_mastermind_222_offpolicy_policy"))
     return specs
@@ -304,12 +330,12 @@ def continual_figures() -> list[FigureSpec]:
         for kind, name in (("behaviour", "policy"), ("prediction", "value"), ("outcome", "perf")):
             figure = f"app_{domain}_parallel_{name}_approx" + ("_behaviour" if kind == "outcome" else "")
             series = tuple(
-                Series(f"{ratio}:1", _continual(environment, kind, ratio, "shapley_exact_loss"))
+                Series(f"{ratio}:1", _tracked(f"continual_{environment}_{kind}_ratio{ratio}", "continual", _tag(kind)))
                 for ratio in (1, 2, 10, 50)
             )
             specs.append(FigureSpec(figure, series, PARALLEL_SCALE))
-        for column, figure in (("episode_return", "return"), ("dqn_loss", "dqn_loss")):
-            series = (Series("#1f77b4", _continual(environment, "behaviour", 1, column)),)
+        for tag, figure in (("agent/episodic_return", "return"), ("agent/DQN_loss", "dqn_loss")):
+            series = (Series("#1f77b4", _tracked(f"continual_{environment}_behaviour_ratio1", "continual", tag)),)
             specs.append(FigureSpec(f"app_{domain}_parallel_{figure}", series, PARALLEL_SCALE))
     specs.append(
         _renamed(specs, "app_mastermind_222_parallel_value_approx", "main_mastermind_222_parallel_value_approx")
@@ -330,20 +356,20 @@ def sampling_figures() -> list[FigureSpec]:
     }
     names = {"mastermind222": "mastermind_222", "mastermind333": "mastermind_333", "gridworld": "gwb"}
     for (domain, kind), offset in offsets.items():
-        root = Path("sampling") / domain / kind / "shapley"
+        experiment = f"sampling_{domain}_{kind}"
         series = (
-            Series("Exact", _sweep(root / "wo_exact_model", "exact_loss")),
-            Series("Sample", _sweep(root / "w_exact_sampling", "exact_loss")),
-            Series("Model", _sweep(root / "w_exact_model", "exact_loss"), float(offset)),
+            Series("Exact", _tracked(experiment, "wo_exact_model", _tag(kind))),
+            Series("Sample", _tracked(experiment, "w_exact_sampling", _tag(kind))),
+            Series("Model", _tracked(experiment, "w_exact_model", _tag(kind)), float(offset)),
         )
         name = "policy" if kind == "behaviour" else "value"
         specs.append(FigureSpec(f"app_{names[domain]}_{name}_sampling", series, BATCHES))
     for domain in ("mastermind222", "gridworld"):
-        root = Path("sampling") / domain / "outcome"
+        experiment = f"sampling_{domain}_outcome"
         series = (
-            Series("Exact", _sweep(root / "wo_exact_model", "exact_loss")),
-            Series("Sample", _sweep(root / "w_exact_sampling", "exact_loss")),
-            Series("Model", _sweep(root / "w_exact_model", "exact_loss"), 50 * (0.8 * 10_000) // 128),
+            Series("Exact", _tracked(experiment, "wo_exact_model", _tag("outcome"))),
+            Series("Sample", _tracked(experiment, "w_exact_sampling", _tag("outcome"))),
+            Series("Model", _tracked(experiment, "w_exact_model", _tag("outcome")), 50 * (0.8 * 10_000) // 128),
         )
         specs.append(FigureSpec(f"app_{names[domain]}_perf_sampling", series))
     specs.append(_renamed(specs, "app_mastermind_222_policy_sampling", "main_mastermind_222_policy_sampling"))
@@ -378,18 +404,21 @@ def merge_runs(runs: list[Run], start: float) -> tuple[FloatArray, FloatArray]:
     return _floats(merged["step"]), np.asarray(merged.drop(columns="step").to_numpy(), np.float64)
 
 
-def hypercube_bars(paper: Path) -> tuple[list[tuple[object, ...]], list[str]]:
+def hypercube_bars(sources: Sources) -> tuple[list[tuple[object, ...]], list[str]]:
     """Source barcharts: each run's last logged exact-loss step; mean and standard error over runs."""
     bars: list[tuple[object, ...]] = []
     missing: list[str] = []
     for kind, figure in (("behaviour", "hypercube_policy"), ("prediction", "hypercube_value")):
         for side, dimension in CUBES:
-            root = paper / "hypercube" / kind / f"{side}x{dimension}"
-            for stage, model in (("characteristic", "Characteristic"), ("shapley", "Shapley")):
+            experiment = f"hypercube{side}x{dimension}_{kind}"
+            for stage, model, tag in (
+                (f"characteristic--{kind}", "Characteristic", _tag(kind, "characteristic")),
+                (f"shapley--{kind}--{APPROX_CHARACTERISTIC}", "Shapley", _tag(kind)),
+            ):
                 try:
-                    runs = Sources(paper, Path()).sweep(root / stage, "exact_loss")
+                    runs = sources.runs(experiment, stage, tag)
                 except MissingRunsError as error:
-                    missing.append(f"{figure} {side}x{dimension} {stage}: {error}")
+                    missing.append(f"{figure} {side}x{dimension} {model}: {error}")
                     continue
                 steps = np.asarray([steps[-1] for steps, _ in runs], np.float64)
                 standard_error = float(steps.std(ddof=1) / np.sqrt(steps.size)) if steps.size > 1 else 0.0
@@ -398,25 +427,17 @@ def hypercube_bars(paper: Path) -> tuple[list[tuple[object, ...]], list[str]]:
     return bars, missing
 
 
-def _milestone(environment: str, kind: str, stage: str, exact_char: str) -> Loader:
+def _tracked(experiment: str, stage: str, tag: str) -> Loader:
     def load(sources: Sources) -> list[Run]:
-        return sources.milestone_runs(environment, kind, stage, exact_char)
+        return sources.runs(experiment, stage, tag)
 
     return load
 
 
-def _sweep(folder: Path, column: str, **settings: object) -> Loader:
-    def load(sources: Sources) -> list[Run]:
-        return sources.sweep(sources.paper / folder, column, **settings)
-
-    return load
-
-
-def _continual(domain: str, kind: str, ratio: int, column: str) -> Loader:
-    def load(sources: Sources) -> list[Run]:
-        return sources.continual(domain, kind, ratio, column)
-
-    return load
+def _tag(kind: str, model: str = "shapley", loss: str = "exact") -> str:
+    """The source's `model/{ModelClass}_{exact,epoch}_loss` tag."""
+    explained = "Policy" if kind == "behaviour" else "Value"
+    return f"model/{explained}{'CharacteristicModel' if model == 'characteristic' else 'Shapley'}_{loss}_loss"
 
 
 def _renamed(specs: list[FigureSpec], source: str, name: str) -> FigureSpec:
@@ -424,21 +445,10 @@ def _renamed(specs: list[FigureSpec], source: str, name: str) -> FigureSpec:
     return FigureSpec(name, spec.series, spec.n_batches, spec.sem_correction)
 
 
-def _matches(sweep: Path, settings: dict[str, object]) -> bool:
-    if not settings:
-        return True
-    configs = sorted(sweep.glob("seed-*/config.json")) or [sweep / "config.json"]
-    if not configs[0].exists():
-        return False
-    config = json.loads(configs[0].read_text())["config"]
-    return all(config.get(name) == value for name, value in settings.items())
-
-
-def _metrics(path: Path, column: str) -> Run:
-    frame = pd.read_csv(path)
-    values = pd.to_numeric(frame[column], errors="coerce")
-    keep = values.notna()
-    return _floats(frame["step"][keep]), _floats(values[keep])
+def _seed(name: str) -> tuple[str, int]:
+    """Run names `...--seed-N` ordered by seed number."""
+    stage, _, seed = name.rpartition("--seed-")
+    return stage, int(seed) if seed.isdigit() else -1
 
 
 def _required(runs: list[Run], name: str) -> list[Run]:
