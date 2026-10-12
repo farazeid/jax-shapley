@@ -17,7 +17,10 @@ from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import trackio
 import tyro
+import wandb
 from flax import nnx, struct
 from jax import Array
 
@@ -93,13 +96,25 @@ class SupervisedConfig:
 
 
 @struct.dataclass
+class ReplayBehaviour:
+    """Actions and behaviour-policy log-probabilities of replay-drawn train and validation rows."""
+
+    train_actions: Array
+    train_log_probabilities: Array
+    validation_actions: Array
+    validation_log_probabilities: Array
+
+
+@struct.dataclass
 class StateBuffers:
     """int32 observations a frozen policy visited: train, validation, and the exact buffer
-    exact values are computed over (`common.rollouts` fills them)."""
+    exact values are computed over (`common.rollouts` fills them). Train and validation rows
+    drawn from an agent's replay instead carry its `behaviour`."""
 
     train: Array
     validation: Array
     exact: Array
+    behaviour: ReplayBehaviour | None = None
 
 
 @struct.dataclass
@@ -268,6 +283,24 @@ def train[Model: nnx.Module, Context, Frozen](
         return state
 
     return nnx.vmap(restore_best, in_axes=0, out_axes=0)(trained), metrics
+
+
+def log_epochs(runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics) -> None:
+    """The source's train_models scalars, `model/{model}_{epoch,val,exact}_loss`, into each seed's run
+    (a host callback for `train`'s `log`; stopped seeds log nothing)."""
+    active, steps = np.asarray(metrics.active), np.asarray(metrics.step)
+    train_loss, validation = np.asarray(metrics.train_loss), np.asarray(metrics.validation_loss)
+    exact = np.asarray(metrics.exact_loss)
+    for index, run in enumerate(runs):
+        if not active[index]:
+            continue
+        row = {
+            f"model/{model}_epoch_loss": float(train_loss[index]),
+            f"model/{model}_val_loss": float(validation[index]),
+        }
+        if exact_loss:
+            row[f"model/{model}_exact_loss"] = float(exact[index])
+        run.log(row, step=int(steps[index]))
 
 
 def stack_seeds[Tree](items: list[Tree]) -> Tree:

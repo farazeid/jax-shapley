@@ -92,7 +92,7 @@ def test_live_logs_equal_the_returned_metrics() -> None:
     stage = CONFIG.characteristic
     keys = jnp.stack([jax.random.key(seed) for seed in stage.seeds])
     agents = stack_seeds([dqn.trained_agent(config, state)] * len(stage.seeds))
-    keys, buffers = nnx.jit(partial(characteristic.collect, stage))(keys, agents)
+    keys, buffers = nnx.jit(partial(characteristic.collect, stage))(keys, agents, None)
     max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
     epochs: list[EpochMetrics] = []
     _, returned = nnx.jit(

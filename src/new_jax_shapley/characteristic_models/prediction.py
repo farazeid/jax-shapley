@@ -10,7 +10,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import Array
 
-from new_jax_shapley.algorithms.dqn import Agent
+from new_jax_shapley.algorithms.dqn import Agent, TransitionBatch
 from new_jax_shapley.characteristic_models.behaviour import (
     CharacteristicConfig,
     CharacteristicModel,
@@ -21,11 +21,13 @@ from new_jax_shapley.common.networks import LayerConfig
 from new_jax_shapley.common.supervised_learning import EpochMetrics, TrainState
 
 
-def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
+def main(
+    config: CharacteristicConfig, agents: Agent, replays: TransitionBatch | None = None
+) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
     """Prediction characteristic models explaining the agents' value."""
     if config.kind != "prediction":
         raise ValueError("the prediction stage needs kind='prediction'")
-    return stage(config, agents, targets, head, "ValueCharacteristicModel")
+    return stage(config, agents, replays, targets, head, "ValueCharacteristicModel")
 
 
 def targets(config: CharacteristicConfig, agent: Agent, observations: Array) -> Values:
