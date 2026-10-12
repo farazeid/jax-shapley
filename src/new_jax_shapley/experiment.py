@@ -23,6 +23,8 @@ class ExperimentConfig:
     characteristic: CharacteristicConfig
     shapley: tuple[ShapleyConfig, ...]
     explained_seed: int = 1
+    compile_only: bool = False
+    """Only trace, lower and compile every stage (before a long run); nothing runs or is tracked."""
     track: Track = "trackio"
     project: str = "dev-jax"
     entity: str | None = "fastsverl"

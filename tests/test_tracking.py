@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import trackio
+import wandb
 from flax import nnx
 
 from new_jax_shapley.algorithms import dqn
@@ -25,7 +27,7 @@ from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice, stack_seeds
 from new_jax_shapley.envs import Mastermind
 from new_jax_shapley.experiment import ExperimentConfig
-from new_jax_shapley.main import ExperimentResult, run
+from new_jax_shapley.main import ExperimentResult, main, run
 from new_jax_shapley.shapley_models import behaviour as shapley
 from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
 
@@ -175,6 +177,15 @@ def test_trackio_runs_hand_off_through_artifacts_and_load_stages(tmp_path: Path)
         check=False,
     )
     assert failed.returncode != 0 and "different settings" in failed.stderr
+
+
+def test_compile_only_runs_and_tracks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("compile-only must not start a tracking run")
+
+    monkeypatch.setattr(wandb, "init", refuse)
+    monkeypatch.setattr(trackio, "init", refuse)
+    assert main([*SMALL_RUN, "--compile-only"]) == ""
 
 
 @pytest.mark.skipif(os.environ.get("JAX_SHAPLEY_WANDB_TEST") != "1", reason="writes to the wandb cloud")
