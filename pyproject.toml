@@ -13,7 +13,9 @@ dependencies = [
     "numpy>=2.0",
     "optax>=0.2.8",
     "orbax-checkpoint>=0.12.1",
+    "trackio>=0.40",
     "tyro>=0.9",
+    "wandb>=0.30",
 ]
 
 [project.optional-dependencies]
