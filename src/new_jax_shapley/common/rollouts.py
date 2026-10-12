@@ -34,6 +34,25 @@ def collect_buffers(
     the train buffer, unless `exact` is supplied by an earlier step. Returns the key
     advanced past the collection.
     """
+    keys: Array = jax.random.split(key, 4)
+    train = collect_observations(env, model, epsilon, keys[1], train_size, num_envs)
+    validation = collect_observations(env, model, epsilon, keys[2], validation_size, num_envs)
+    if exact is None:
+        exact = (
+            train if exact_size is None else collect_observations(env, model, epsilon, keys[3], exact_size, num_envs)
+        )
+    return keys[0], StateBuffers(train, validation, exact)
+
+
+def collect_observations(
+    env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+    model: QNetwork,
+    epsilon: Array,
+    key: Array,
+    rows: int,
+    num_envs: int,
+) -> Array:
+    """One buffer from a fresh reset: the observations before each vector step, step-major then environment."""
     params = env.default_params
 
     def step(
@@ -54,20 +73,11 @@ def collect_buffers(
         )
         return (transition.observations, transition.state, step_keys[0]), current
 
-    keys: Array = jax.random.split(key, 4)
-    sizes = [train_size, validation_size]
-    if exact is None and exact_size is not None:
-        sizes.append(exact_size)
-    collected = []
-    for rows, buffer_key in zip(sizes, keys[1:], strict=False):
-        reset_keys: Array = jax.random.split(buffer_key, num_envs + 1)
-        observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_keys[1:], params)
-        _, recorded = jax.lax.scan(
-            partial(step, env, params, num_envs, model, epsilon),
-            (observations, env_state, reset_keys[0]),
-            jnp.arange(rows // num_envs),
-        )
-        collected.append(recorded.reshape(rows, recorded.shape[-1]).astype(jnp.int32))
-    if exact is None:
-        exact = collected[2] if exact_size is not None else collected[0]
-    return keys[0], StateBuffers(collected[0], collected[1], exact)
+    reset_keys: Array = jax.random.split(key, num_envs + 1)
+    observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_keys[1:], params)
+    _, recorded = jax.lax.scan(
+        partial(step, env, params, num_envs, model, epsilon),
+        (observations, env_state, reset_keys[0]),
+        jnp.arange(rows // num_envs),
+    )
+    return recorded.reshape(rows, recorded.shape[-1]).astype(jnp.int32)

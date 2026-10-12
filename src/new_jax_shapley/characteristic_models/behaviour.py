@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from functools import partial
+from math import inf, isnan
 from pathlib import Path
 from time import time_ns
 from typing import Literal, NamedTuple, cast
@@ -30,18 +31,20 @@ from jax import Array
 from jaxtyping import Bool, Float, Int
 
 from new_jax_shapley import backends
-from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS, Agent, Env, EnvParams, EnvState
+from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS, Agent, Env, EnvParams, EnvState, TransitionBatch
 from new_jax_shapley.backends import Track
 from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.coalitions import CoalitionTable, Observations, coalition_table, mask
 from new_jax_shapley.common.networks import MLP, LayerConfig, MLPConfig
-from new_jax_shapley.common.rollouts import collect_buffers
+from new_jax_shapley.common.rollouts import collect_buffers, collect_observations
 from new_jax_shapley.common.supervised_learning import (
     EpochMetrics,
     Partition,
+    ReplayBehaviour,
     StateBuffers,
     SupervisedConfig,
     TrainState,
+    log_epochs,
     seed_slice,
     stack_seeds,
     train,
@@ -49,6 +52,7 @@ from new_jax_shapley.common.supervised_learning import (
 from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
 type Kind = Literal["behaviour", "prediction"]
+type Data = Literal["rollouts", "replay"]
 type Targets = Callable[[CharacteristicConfig, Agent, Array], Array]
 """A kind's explained output `v_F` of the agent at observations."""
 type Head = Callable[[int], LayerConfig]
@@ -68,15 +72,24 @@ EXACT_CHUNK = 512
 
 @dataclass(frozen=True, slots=True)
 class CharacteristicConfig:
-    """Which agent output is explained, the network, and the source's train_models settings.
+    """Which agent output is explained, the network, its data, and the source's train_models settings.
 
-    Every seed explains the same agent and trains in one compiled program.
+    Every seed trains in one compiled program. `data="replay"` learns from the agent's
+    training transitions (upstream `offpolicy/run_policy_prediction.py`): the first
+    `train_size` rows of a shuffled replay train and the next `validation_size` validate;
+    the exact buffer is fresh rollouts of the explained policy, so `train.exact_buffer_size`
+    is required. `off_policy` weights each row by the explained-to-behaviour policy ratio,
+    normalised over the batch when `weighting` and clipped to `[1 - clip_coef, 1 + clip_coef]`.
     """
 
     env: Env
     kind: Kind = "behaviour"
     policy: Policy = "greedy"
     hidden_widths: tuple[int, ...] = (64, 64)
+    data: Data = "rollouts"
+    off_policy: bool = False
+    weighting: bool = True
+    clip_coef: float = inf
     seeds: tuple[int, ...] = (1,)
     train: SupervisedConfig = field(default_factory=SupervisedConfig)
     checkpoint: str | None = None
@@ -98,6 +111,12 @@ class CharacteristicConfig:
             raise ValueError("characteristic kind must be behaviour or prediction")
         if self.policy not in ("greedy", "explore"):
             raise ValueError("explained policy must be greedy or explore")
+        if self.data not in ("rollouts", "replay") or (self.off_policy and self.data != "replay"):
+            raise ValueError("data must be rollouts or replay; off-policy weighting needs replay data")
+        if self.data == "replay" and self.train.exact_loss and self.train.exact_buffer_size is None:
+            raise ValueError("replay characteristics need a separate exact buffer (train.exact_buffer_size)")
+        if isnan(self.clip_coef) or self.clip_coef < 0:
+            raise ValueError("clip_coef must be nonnegative")
         if any(width < 1 for width in self.hidden_widths):
             raise ValueError("hidden widths must be positive")
         if not self.seeds or len(set(self.seeds)) != len(self.seeds):
@@ -127,12 +146,15 @@ class ExactCharacteristic:
 
 @struct.dataclass
 class CharacteristicContext:
-    """Per-seed constants a characteristic learner reads: buffers, targets and exact values."""
+    """Per-seed constants a characteristic learner reads: buffers, targets and exact values, and
+    for replay rows the explained policy's log-probability of each replay action."""
 
     buffers: StateBuffers
     train_targets: Array
     validation_targets: Array
     exact: ExactCharacteristic | None
+    train_log_probabilities: Array | None = None
+    validation_log_probabilities: Array | None = None
 
 
 class CharacteristicOutput(NamedTuple):
@@ -149,21 +171,28 @@ class CharacteristicModel(nnx.Module):
         return CharacteristicOutput(self.mlp(masked_observations))
 
 
-def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
+def main(
+    config: CharacteristicConfig, agents: Agent, replays: TransitionBatch | None = None
+) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
     """Behaviour characteristic models explaining the agents' greedy or explore policy."""
     if config.kind != "behaviour":
         raise ValueError("the behaviour stage needs kind='behaviour'")
-    return stage(config, agents, targets, head, "PolicyCharacteristicModel")
+    return stage(config, agents, replays, targets, head, "PolicyCharacteristicModel")
 
 
 def stage(
-    config: CharacteristicConfig, agents: Agent, targets: Targets, head: Head, model: str
+    config: CharacteristicConfig,
+    agents: Agent,
+    replays: TransitionBatch | None,
+    targets: Targets,
+    head: Head,
+    model: str,
 ) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
     """Train (or load) every seed of a kind, tracked by `config.track`; `model` is the source's
     model class name that prefixes the logged tags.
 
     `agents` are seed-stacked: one agent every seed explains, or one per seed (seed s
-    explains agent s).
+    explains agent s). Replay data needs `replays`, each agent's filled replay rows.
 
     Collects each seed's buffers, sizes the exact tables from them, then trains every
     seed in one compiled program. With a backend each seed logs the source's
@@ -176,8 +205,15 @@ def stage(
         agents = stack_seeds([seed_slice(agents, 0)] * len(config.seeds))
     elif agents.epsilon.shape[0] != len(config.seeds):
         raise ValueError("characteristic seeds need one agent, or one agent per seed")
+    if config.data == "replay":
+        if replays is None or replays.observations.shape[-2] < config.train.train_size + config.train.validation_size:
+            raise ValueError("replay characteristics need the agents' replays, holding train and validation rows")
+        if replays.observations.shape[0] == 1:
+            replays = stack_seeds([seed_slice(replays, 0)] * len(config.seeds))
+    else:
+        replays = None
     if config.track is None:
-        keys, buffers = nnx.jit(partial(collect, config))(keys, agents)
+        keys, buffers = nnx.jit(partial(collect, config))(keys, agents, replays)
         # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
         max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
         return nnx.jit(partial(fit, config, targets, head, max_unique, None))(keys, agents, buffers)
@@ -204,28 +240,10 @@ def stage(
                 directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
                 return checkpoints.load(Path(directory), initialize(config, head), settings), None
 
-            def log(
-                runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics
-            ) -> None:
-                """The source's train_models scalars, `model/{model}_{epoch,val,exact}_loss`, into each seed's run."""
-                active, steps = np.asarray(metrics.active), np.asarray(metrics.step)
-                train_loss, validation = np.asarray(metrics.train_loss), np.asarray(metrics.validation_loss)
-                exact = np.asarray(metrics.exact_loss)
-                for index, run in enumerate(runs):
-                    if not active[index]:
-                        continue
-                    row = {
-                        f"model/{model}_epoch_loss": float(train_loss[index]),
-                        f"model/{model}_val_loss": float(validation[index]),
-                    }
-                    if exact_loss:
-                        row[f"model/{model}_exact_loss"] = float(exact[index])
-                    run.log(row, step=int(steps[index]))
-
-            keys, buffers = nnx.jit(partial(collect, config))(keys, agents)
+            keys, buffers = nnx.jit(partial(collect, config))(keys, agents, replays)
             # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
             max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
-            epoch_log = partial(log, runs, model, config.train.exact_loss)
+            epoch_log = partial(log_epochs, runs, model, config.train.exact_loss)
             program = nnx.jit(partial(fit, config, targets, head, max_unique, epoch_log))
             state, metrics = program(keys, agents, buffers)
             directory = root / "checkpoints" / artifact
@@ -238,27 +256,52 @@ def stage(
                 run.finish()
 
 
-def collect(config: CharacteristicConfig, keys: Array, agents: Agent) -> tuple[Array, StateBuffers]:
-    """Rollouts of the explained policy: each seed's buffers, and its key advanced past them."""
+def collect(
+    config: CharacteristicConfig, keys: Array, agents: Agent, replays: TransitionBatch | None
+) -> tuple[Array, StateBuffers]:
+    """Each seed's buffers, and its key advanced past them: rollouts of the explained policy, or
+    the agent's shuffled replay rows with a rollout exact buffer."""
 
     def seed(
-        config: CharacteristicConfig, env: EpisodeStatisticsWrapper[EnvState, EnvParams], key: Array, agent: Agent
+        config: CharacteristicConfig,
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        key: Array,
+        agent: Agent,
+        replay: TransitionBatch | None,
     ) -> tuple[Array, StateBuffers]:
         epsilon = agent.epsilon if config.policy == "explore" else jnp.asarray(0.0, jnp.float32)
         training = config.train
-        return collect_buffers(
-            env,
-            agent.model,
-            epsilon,
-            key,
-            train_size=training.train_size,
-            validation_size=training.validation_size,
-            exact_size=training.exact_buffer_size,
-            num_envs=training.num_envs,
+        if replay is None:
+            return collect_buffers(
+                env,
+                agent.model,
+                epsilon,
+                key,
+                train_size=training.train_size,
+                validation_size=training.validation_size,
+                exact_size=training.exact_buffer_size,
+                num_envs=training.num_envs,
+            )
+        keys: Array = jax.random.split(key, 3)
+        order = jax.random.permutation(keys[1], replay.observations.shape[0])
+        train_rows = order[: training.train_size]
+        validation_rows = order[training.train_size : training.train_size + training.validation_size]
+        exact = collect_observations(env, agent.model, epsilon, keys[2], training.exact_size, training.num_envs)
+        behaviour = ReplayBehaviour(
+            replay.actions[train_rows],
+            replay.log_probabilities[train_rows],
+            replay.actions[validation_rows],
+            replay.log_probabilities[validation_rows],
         )
+        observations = replay.observations
+        return keys[0], StateBuffers(observations[train_rows], observations[validation_rows], exact, behaviour)
 
-    every_seed = nnx.vmap(partial(seed, config, EpisodeStatisticsWrapper(config.env)), in_axes=(0, 0), out_axes=(0, 0))
-    return every_seed(keys, agents)
+    every_seed = nnx.vmap(
+        partial(seed, config, EpisodeStatisticsWrapper(config.env)),
+        in_axes=(0, 0, None if replays is None else 0),
+        out_axes=(0, 0),
+    )
+    return every_seed(keys, agents, replays)
 
 
 def fit(
@@ -292,12 +335,33 @@ def fit(
             if config.train.exact_loss
             else None
         )
-        return CharacteristicContext(buffers, train_targets, validation_targets, exact)
+        behaviour = buffers.behaviour
+        if behaviour is None:
+            return CharacteristicContext(buffers, train_targets, validation_targets, exact)
+        # The explained policy's log-probability of each replay action (upstream choose_action):
+        # Torch Categorical renormalises and clamps before taking logs.
+        log_probabilities = []
+        for observations, actions in (
+            (buffers.train, behaviour.train_actions),
+            (buffers.validation, behaviour.validation_actions),
+        ):
+            q_values = agent.model(observations).q_values
+            ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
+            probabilities = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
+            if config.policy == "explore":
+                probabilities = agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * probabilities
+            probabilities = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
+            clamp = jnp.finfo(jnp.float32).eps
+            logits = jnp.log(jnp.clip(probabilities, clamp, 1 - clamp))
+            log_probabilities.append(jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0])
+        return CharacteristicContext(
+            buffers, train_targets, validation_targets, exact, log_probabilities[0], log_probabilities[1]
+        )
 
     contexts = nnx.vmap(partial(context, config, targets, max_unique), in_axes=(0, 0), out_axes=0)(
         state.buffers, agents
     )
-    return train(state, contexts, None, loss, config.train, features, log)
+    return train(state, contexts, None, partial(loss, config), config.train, features, log)
 
 
 def initialize(
@@ -320,10 +384,21 @@ def initialize(
     if keys is None:
         keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
     if buffers is None:
+        behaviour = (
+            ReplayBehaviour(
+                jnp.zeros(training.train_size, jnp.int32),
+                jnp.zeros(training.train_size, jnp.float32),
+                jnp.zeros(training.validation_size, jnp.int32),
+                jnp.zeros(training.validation_size, jnp.float32),
+            )
+            if config.data == "replay"
+            else None
+        )
         empty = StateBuffers(
             jnp.zeros((training.train_size, features), jnp.int32),
             jnp.zeros((training.validation_size, features), jnp.int32),
             jnp.zeros((training.exact_size, features), jnp.int32),
+            behaviour,
         )
         buffers = stack_seeds([empty] * len(config.seeds))
 
@@ -370,6 +445,7 @@ def head(actions: int) -> LayerConfig:
 
 
 def loss(
+    characteristic: CharacteristicConfig,
     model: CharacteristicModel,
     frozen: None,
     context: CharacteristicContext,
@@ -381,7 +457,9 @@ def loss(
     """MSE of a sampled train or validation batch, or the exact loss.
 
     Batches draw rows with replacement and uniform coalitions per row (the source's
-    sample_rand); validation resamples the whole validation size. The exact loss is
+    sample_rand); validation resamples the whole validation size. Off-policy replay rows
+    weigh each squared error by the explained-to-behaviour policy ratio (the source's
+    ImportanceWeightedMSELoss), normalised over the draw and clipped. The exact loss is
     the MSE over every valid unique masked observation of every coalition, equally
     weighted; only the chunks holding valid entries are evaluated, as their number
     varies at run time while the padded arrays keep static shapes.
@@ -414,15 +492,30 @@ def loss(
         )
         return total / (exact.count.astype(jnp.float32) * outputs)
     index_key, coalition_key = jax.random.split(key)
+    behaviour = context.buffers.behaviour
     if partition == "train":
         rows = jax.random.randint(index_key, (config.batch_size,), 0, config.train_size)
         observations, targets = context.buffers.train[rows], context.train_targets[rows]
+        explained, logged = (
+            context.train_log_probabilities,
+            None if behaviour is None else behaviour.train_log_probabilities,
+        )
     else:
         rows = jax.random.randint(index_key, (config.validation_size,), 0, config.validation_size)
         observations, targets = context.buffers.validation[rows], context.validation_targets[rows]
+        explained = context.validation_log_probabilities
+        logged = None if behaviour is None else behaviour.validation_log_probabilities
     coalitions = jax.random.bernoulli(coalition_key, 0.5, (rows.shape[0], features))
     predictions = model(mask(observations, coalitions)).values
-    return jnp.mean(jnp.square(predictions - jax.lax.stop_gradient(targets)))
+    errors = jnp.square(predictions - jax.lax.stop_gradient(targets))
+    if not characteristic.off_policy:
+        return jnp.mean(errors)
+    assert explained is not None and logged is not None
+    weights = jnp.exp(explained[rows] - logged[rows])
+    if characteristic.weighting:
+        weights = weights / jnp.sum(weights)
+    weights = jnp.clip(weights, 1 - characteristic.clip_coef, 1 + characteristic.clip_coef)
+    return jnp.mean(jax.lax.stop_gradient(weights)[:, None] * errors)
 
 
 def exact_characteristic(

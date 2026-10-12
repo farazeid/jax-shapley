@@ -99,11 +99,15 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
     # 1. Train the agents: one, or one per characteristic seed.
     dqn_state, dqn_metrics, agents = dqn.main(algorithm)
 
-    # 2-3. Train characteristic models explaining them.
+    # 2-3. Train characteristic models explaining them, on rollouts or on each agent's filled replay rows.
+    filled = int(dqn_state.replay.size[0])
+    replays = jax.tree.map(lambda rows: rows[:, :filled], dqn_state.replay.data)
     if characteristic_config.kind == "behaviour":
-        characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents)
+        characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents, replays)
     else:
-        characteristic_state, characteristic_metrics = characteristic_prediction.main(characteristic_config, agents)
+        characteristic_state, characteristic_metrics = characteristic_prediction.main(
+            characteristic_config, agents, replays
+        )
 
     # 4. Train Shapley models explaining characteristic seed `explained_seed` (and its agent), or
     #    each characteristic seed s with Shapley seed s.
@@ -142,10 +146,12 @@ def compile_stages(config: ExperimentConfig) -> None:
     )
     seeds = len(stage.seeds)
     keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
-    agent = dqn.trained_agent(algorithm, dqn.initialize(algorithm, jax.random.key(0)))
+    agent_state = dqn.initialize(algorithm, jax.random.key(0))
+    agent = dqn.trained_agent(algorithm, agent_state)
     agents = stack_seeds([agent] * seeds)
+    replays = stack_seeds([agent_state.replay.data] * seeds) if stage.data == "replay" else None
     template = characteristic.initialize(stage, head)
-    nnx.jit(partial(characteristic.collect, stage)).trace(keys, agents).lower().compile()
+    nnx.jit(partial(characteristic.collect, stage)).trace(keys, agents, replays).lower().compile()
     program = nnx.jit(partial(characteristic.fit, stage, targets, head, stage.train.exact_size, lambda metrics: None))
     program.trace(keys, agents, template.buffers).lower().compile()
 

@@ -55,6 +55,7 @@ from new_jax_shapley.common.supervised_learning import (
     StateBuffers,
     SupervisedConfig,
     TrainState,
+    log_epochs,
     stack_seeds,
     train,
 )
@@ -211,25 +212,7 @@ def stage(
                 directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
                 return checkpoints.load(Path(directory), initialize(config, explained, head), settings), None
 
-            def log(
-                runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics
-            ) -> None:
-                """The source's train_models scalars, `model/{model}_{epoch,val,exact}_loss`, into each seed's run."""
-                active, steps = np.asarray(metrics.active), np.asarray(metrics.step)
-                train_loss, validation = np.asarray(metrics.train_loss), np.asarray(metrics.validation_loss)
-                exact = np.asarray(metrics.exact_loss)
-                for index, run in enumerate(runs):
-                    if not active[index]:
-                        continue
-                    row = {
-                        f"model/{model}_epoch_loss": float(train_loss[index]),
-                        f"model/{model}_val_loss": float(validation[index]),
-                    }
-                    if exact_loss:
-                        row[f"model/{model}_exact_loss"] = float(exact[index])
-                    run.log(row, step=int(steps[index]))
-
-            epoch_log = partial(log, runs, model, config.train.exact_loss)
+            epoch_log = partial(log_epochs, runs, model, config.train.exact_loss)
             program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, epoch_log))
             state, metrics = program(keys, agents, characteristics, inherited)
             directory = root / "checkpoints" / artifact
