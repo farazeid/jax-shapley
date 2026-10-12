@@ -46,7 +46,14 @@ from new_jax_shapley.algorithms.dqn import (
     environment_step,
 )
 from new_jax_shapley.backends import Track
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel, Values, targets
+from new_jax_shapley.characteristic_models.behaviour import (
+    CharacteristicConfig,
+    CharacteristicModel,
+    SampledPool,
+    Values,
+    sampled_values,
+    targets,
+)
 from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.coalitions import MASK, Coalitions, Observations, coalition_table, mask
 from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig
@@ -229,10 +236,12 @@ class OnPolicyState:
 
 @struct.dataclass
 class OnPolicyContext:
-    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values."""
+    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values,
+    and that buffer with v_F (`sampled`) when the behaviour characteristic is sampled."""
 
     pool: Array
     exact: ExactOutcome | None
+    sampled: SampledPool | None = None
 
 
 class OutcomeOutput(NamedTuple):
@@ -301,10 +310,14 @@ def main(
     """
     if explained.kind != "behaviour":
         raise ValueError("outcome characteristics condition on a behaviour characteristic")
+    if explained.estimator == "sampled" and (config.variant != "on_policy" or not config.with_exact_char):
+        # The source's sampling groups: on-policy outcome runs, with exact behaviour values in the ground truth.
+        raise ValueError("sampled behaviour characteristics condition on-policy outcome runs with exact values")
     seeds = len(config.seeds)
     if agents.epsilon.shape[0] != seeds or behaviour_buffers.exact.shape[0] != seeds:
         raise ValueError("outcome inputs need one agent and behaviour characteristic per seed")
-    if replays.observations.shape[1] < max(config.train.train_size, config.train.validation_size):
+    prefix = max(config.train.train_size, config.train.validation_size)
+    if config.variant == "off_policy" and replays.observations.shape[1] < prefix:
         raise ValueError("the agents' replays hold fewer transitions than the outcome prefixes")
     keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
     # Exact values solve the environment's tabular MDP (host-side enumeration).
@@ -503,10 +516,14 @@ def fit_on_policy(
         buffers: StateBuffers,
         frozen: OutcomeFrozen,
     ) -> OnPolicyContext:
+        sampled = None
+        if explained.estimator == "sampled":
+            pooled = targets(explained, frozen.agent, buffers.train)
+            sampled = SampledPool(buffers.train, pooled, jnp.mean(pooled, axis=0))
         if tabular is None:
-            return OnPolicyContext(buffers.train, None)
+            return OnPolicyContext(buffers.train, None, sampled)
         exact = exact_outcome(tabular, buffers.exact, frozen, explained, config.with_exact_char, config.gamma)
-        return OnPolicyContext(buffers.train, exact)
+        return OnPolicyContext(buffers.train, exact, sampled)
 
     frozen = OutcomeFrozen(agents, behaviours)
     contexts = nnx.vmap(partial(context, config, explained, tabular), in_axes=(0, 0), out_axes=0)(
@@ -578,7 +595,12 @@ def on_policy_step(
     training = config.train
     global_step = state.step * training.num_envs
     keys: Array = jax.random.split(state.key, 5)
-    probabilities = conditioned_policy(explained, frozen, state.observations, state.explained, state.coalitions)
+    if context.sampled is None:
+        behaviour = frozen.behaviour(mask(state.explained, state.coalitions)).values
+    else:
+        # A sampled behaviour draws its values afresh at every decision, as the source's get_val does.
+        behaviour = sampled_values(context.sampled, jax.random.fold_in(keys[0], 1), state.explained, state.coalitions)
+    probabilities = conditioned_policy(explained, frozen.agent, behaviour, state.observations, state.explained)
     actions = jax.random.categorical(keys[0], jnp.log(probabilities), axis=-1).astype(jnp.int32)
     step_keys: Array = jax.random.split(keys[1], training.num_envs)
     transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
@@ -851,7 +873,8 @@ def loss(
     explained_rows = rows_from.observations[jax.random.randint(keys[1], (size,), 0, buffer)]
     coalitions = jax.random.bernoulli(keys[2], 0.5, (size, features))
     observations, next_observations = rows_from.observations[rows], rows_from.next_observations[rows]
-    probabilities = conditioned_policy(explained, frozen, next_observations, explained_rows, coalitions)
+    behaviour = frozen.behaviour(mask(explained_rows, coalitions)).values
+    probabilities = conditioned_policy(explained, frozen.agent, behaviour, next_observations, explained_rows)
     next_actions = jax.random.categorical(keys[3], jnp.log(probabilities), axis=-1).astype(jnp.int32)
     target_values = networks.target(next_observations, explained_rows, coalitions).values
     following = jnp.take_along_axis(target_values, next_actions[:, None], axis=-1)[:, 0]
@@ -892,16 +915,15 @@ def update(
 
 def conditioned_policy(
     explained: CharacteristicConfig,
-    frozen: OutcomeFrozen,
+    agent: Agent,
+    behaviour: Values,
     observations: Observations,
     explained_observations: Observations,
-    coalitions: Coalitions,
 ) -> Values:
-    """pi_hat(a | s; e, C): the behaviour characteristic at e given C when s == e, else the agent's
-    explained (greedy or explore) policy."""
+    """pi_hat(a | s; e, C): the behaviour characteristic's values at e given C (`behaviour`, a learnt
+    model's or a sampled one's) when s == e, else the agent's explained (greedy or explore) policy."""
     at_explained = jnp.all(observations == explained_observations, axis=-1, keepdims=True)
-    behaviour = frozen.behaviour(mask(explained_observations, coalitions)).values
-    return jnp.where(at_explained, behaviour, targets(explained, frozen.agent, observations))
+    return jnp.where(at_explained, behaviour, targets(explained, agent, observations))
 
 
 def values(
@@ -918,8 +940,8 @@ def values(
     predicted = outcome.networks.model(observations, observations, coalitions).values
     if config.variant == "on_policy":
         return predicted
-    frozen = OutcomeFrozen(outcome.agent, outcome.behaviour)
-    probabilities = conditioned_policy(explained, frozen, observations, observations, coalitions)
+    behaviour = outcome.behaviour(mask(observations, coalitions)).values
+    probabilities = conditioned_policy(explained, outcome.agent, behaviour, observations, observations)
     return jnp.sum(probabilities * predicted, axis=-1, keepdims=True)
 
 

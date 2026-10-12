@@ -39,11 +39,13 @@ from new_jax_shapley.characteristic_models.behaviour import (
     CharacteristicConfig,
     CharacteristicModel,
     Head,
+    SampledPool,
     Targets,
     UniqueValues,
     Values,
     exact_characteristic,
     head,
+    sampled_values,
     targets,
 )
 from new_jax_shapley.common import checkpoints
@@ -131,6 +133,19 @@ class ShapleyContext:
 
     buffers: StateBuffers
     exact: ExactShapley | None
+
+
+@struct.dataclass
+class SampledShapleyContext:
+    """A Shapley learner's constants against a sampled characteristic: its pool and, for exact
+    losses, the exact values and `grand`, v_F at the exact states. That is what the source's
+    sampled v(s, F) returns for states of the pool: the exact buffer is the pool, so
+    normalisation is deterministic."""
+
+    buffers: StateBuffers
+    pool: SampledPool
+    exact: ExactShapley | None
+    grand: Array | None
 
 
 class ShapleyOutput(NamedTuple):
@@ -325,6 +340,35 @@ def fit(
         )
         return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 
+    if explained.estimator == "sampled":
+        if config.buffers != "characteristic" or not config.with_exact_char:
+            raise ValueError("a sampled characteristic is explained on its own buffers, against its exact values")
+
+        def sampled_context(
+            explained: CharacteristicConfig,
+            targets: Targets,
+            exact_loss: bool,
+            max_unique: int,
+            buffers: StateBuffers,
+            agent: Agent,
+        ) -> SampledShapleyContext:
+            pooled = targets(explained, agent, buffers.train)
+            pool = SampledPool(buffers.train, pooled, jnp.mean(pooled, axis=0))
+            if not exact_loss:
+                return SampledShapleyContext(buffers, pool, None, None)
+            coalitions = jnp.asarray(coalition_table(buffers.exact.shape[-1]))
+            exact = exact_characteristic(
+                buffers.exact, targets(explained, agent, buffers.exact), coalitions, max_unique=max_unique
+            )
+            solved = ExactShapley(exact.states, exact.state_valid, exact_shapley(exact.at_states))
+            return SampledShapleyContext(buffers, pool, solved, targets(explained, agent, exact.states))
+
+        sampled = nnx.vmap(
+            partial(sampled_context, explained, targets, config.train.exact_loss, max_unique),
+            in_axes=(0, 0),
+            out_axes=0,
+        )(state.buffers, agents)
+        return train(state, sampled, None, sampled_loss, config.train, features, log)
     contexts = nnx.vmap(partial(context, config, explained, targets, max_unique), in_axes=(0, 0, 0), out_axes=0)(
         state.buffers, agents, characteristics
     )
@@ -426,6 +470,42 @@ def loss[Frozen](
         observations = context.buffers.validation[rows]
     coalition = kernel_coalitions(coalition_key, 1, features)[0]
     targets = values(frozen, observations, coalition) - null(frozen, observations)
+    predictions = jnp.sum(coalition[:, None].astype(jnp.float32) * model(observations).contributions, axis=-2)
+    return jnp.mean(jnp.square(predictions - jax.lax.stop_gradient(targets)))
+
+
+def sampled_loss(
+    model: ShapleyModel,
+    frozen: None,
+    context: SampledShapleyContext,
+    config: SupervisedConfig,
+    features: int,
+    key: Array,
+    partition: Partition,
+) -> Array:
+    """`loss` against single draws of a sampled characteristic: each batch also draws its sampling key.
+
+    The exact loss normalises with v_F at the exact states and the pool's null.
+    """
+    del frozen
+    if partition == "exact":
+        exact, grand = context.exact, context.grand
+        assert exact is not None and grand is not None
+        null = jnp.broadcast_to(context.pool.null, grand.shape)
+        contributions = model(exact.states).contributions
+        normalised = contributions + ((grand - null - jnp.sum(contributions, axis=-2)) / features)[..., None, :]
+        errors = jnp.square(normalised - exact.values)
+        valid = exact.state_valid.astype(jnp.float32)
+        return jnp.sum(errors * valid[:, None, None]) / (jnp.sum(valid) * errors.shape[-2] * errors.shape[-1])
+    index_key, coalition_key, sample_key = jax.random.split(key, 3)
+    if partition == "train":
+        rows = jax.random.randint(index_key, (config.batch_size,), 0, config.train_size)
+        observations = context.buffers.train[rows]
+    else:
+        rows = jax.random.randint(index_key, (config.validation_size,), 0, config.validation_size)
+        observations = context.buffers.validation[rows]
+    coalition = kernel_coalitions(coalition_key, 1, features)[0]
+    targets = sampled_values(context.pool, sample_key, observations, coalition) - context.pool.null
     predictions = jnp.sum(coalition[:, None].astype(jnp.float32) * model(observations).contributions, axis=-2)
     return jnp.mean(jnp.square(predictions - jax.lax.stop_gradient(targets)))
 

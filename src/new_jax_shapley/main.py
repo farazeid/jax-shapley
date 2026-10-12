@@ -79,8 +79,7 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
         tracked = {"name": config.name, "project": config.project, "entity": config.entity, "group": group}
         algorithm = replace(algorithm, track=config.track, **tracked)
         characteristic_config = replace(characteristic_config, track=config.track, **tracked)
-        if outcome_config is not None:
-            outcome_config = replace(outcome_config, track=config.track, **tracked)
+        outcome_config = None if outcome_config is None else replace(outcome_config, track=config.track, **tracked)
         shapley_configs = tuple(replace(stage, track=config.track, **tracked) for stage in shapley_configs)
 
     # 1. Train the agents: one, or one per characteristic seed.
@@ -89,39 +88,36 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
     # 2-3. Train characteristic models explaining them, on rollouts or on each agent's filled replay rows.
     filled = int(dqn_state.replay.size[0])
     replays = jax.tree.map(lambda rows: rows[:, :filled], dqn_state.replay.data)
-    if characteristic_config.kind == "behaviour":
-        characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents, replays)
-    else:
-        characteristic_state, characteristic_metrics = characteristic_prediction.main(
-            characteristic_config, agents, replays
-        )
+    characteristic_main = {"behaviour": characteristic.main, "prediction": characteristic_prediction.main}
+    characteristic_state, characteristic_metrics = characteristic_main[characteristic_config.kind](
+        characteristic_config, agents, replays
+    )
 
-    # 3b. Outcome characteristics conditioned on behaviour seed `explained_seed`, from its agent's replay prefixes.
+    # 3b. Outcome characteristics from the agent's replay prefixes (or acting), conditioned on behaviour
+    #     seed `explained_seed`, or outcome seed s on behaviour seed s and its agent.
     outcome_state, outcome_metrics, outcome_explained = None, None, None
     index = 0 if config.explained_seed is None else characteristic_config.seeds.index(config.explained_seed)
     agent_index = index if len(algorithm.seeds) > 1 else 0
     if outcome_config is not None:
         count = len(outcome_config.seeds)
-        behaviour = seed_slice(characteristic_state, index)
-        agent = stack_seeds([seed_slice(agents, agent_index)] * count)
-        replay = stack_seeds([seed_slice(dqn_state.replay.data, agent_index)] * count)
+        behaviours = characteristic_state
+        if config.explained_seed is not None:
+            behaviours = stack_seeds([seed_slice(characteristic_state, index)] * count)
+        explaining, replay = agents, dqn_state.replay.data
+        if config.explained_seed is not None or len(algorithm.seeds) == 1:
+            explaining = stack_seeds([seed_slice(agents, agent_index)] * count)
+            replay = stack_seeds([seed_slice(dqn_state.replay.data, agent_index)] * count)
         outcome_state, outcome_metrics = characteristic_outcome.main(
-            outcome_config,
-            characteristic_config,
-            agent,
-            stack_seeds([behaviour.model] * count),
-            stack_seeds([behaviour.buffers] * count),
-            replay,
+            outcome_config, characteristic_config, explaining, behaviours.model, behaviours.buffers, replay
         )
-        outcome_index = outcome_config.seeds.index(characteristic_config.seeds[index])
         stacked = (
             outcome_state.networks
             if isinstance(outcome_state, characteristic_outcome.OnPolicyState)
             else outcome_state.model
         )
-        networks = seed_slice(stacked, outcome_index)
+        outcome_index = outcome_config.seeds.index(characteristic_config.seeds[index])
         outcome_explained = characteristic_outcome.OutcomeExplained(
-            seed_slice(agents, agent_index), behaviour.model, networks
+            seed_slice(agents, agent_index), seed_slice(behaviours.model, 0), seed_slice(stacked, outcome_index)
         )
 
     # 4. Train Shapley models explaining characteristic (or outcome) seed `explained_seed` and its agent,
@@ -142,12 +138,9 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
                     stage, characteristic_config, outcome_config, explaining, outcomes, explained.buffers
                 )
             )
-        elif characteristic_config.kind == "behaviour":
-            results.append(shapley.main(stage, characteristic_config, explaining, explained.model, explained.buffers))
-        else:
-            results.append(
-                shapley_prediction.main(stage, characteristic_config, explaining, explained.model, explained.buffers)
-            )
+            continue
+        shapley_main = {"behaviour": shapley.main, "prediction": shapley_prediction.main}[characteristic_config.kind]
+        results.append(shapley_main(stage, characteristic_config, explaining, explained.model, explained.buffers))
     return ExperimentResult(
         dqn_state,
         dqn_metrics,
