@@ -159,7 +159,7 @@ def compile_stages(config: ExperimentConfig) -> None:
     for shapley_config in config.shapley:
         count = len(shapley_config.seeds)
         program = nnx.jit(
-            partial(shapley.fit, shapley_config, stage, targets, head, stage.train.exact_size, lambda metrics: None)
+            partial(shapley.fit, stage, targets, head, shapley_config, stage.train.exact_size, lambda metrics: None)
         )
         program.trace(
             jax.ShapeDtypeStruct((count,), key.dtype),
