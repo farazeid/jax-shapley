@@ -1,10 +1,12 @@
 """Step 1: train the FastSVERL DQN agent (CleanRL DQN with soft target updates).
 
-`main` trains one seed's agent, or loads it from `checkpoint`, and returns its final
-state, every vector step's metrics (None when loaded), and the frozen `Agent` the
-explanation steps explain. With a `track` backend it logs the source's scalars live and
-pushes the whole final state as an Orbax checkpoint artifact. `train` is the compiled
-part: `nnx.jit(partial(train, config, log))(key)`. Timestep and frequency
+`main` trains one agent per seed, or loads them from `checkpoint`, and returns their final
+states, every vector step's metrics (None when loaded), and the frozen `Agent`s the
+explanation steps explain, all with a leading seed axis. Each seed is the same compiled
+single-seed program, so a seed's agent does not depend on the others. With a `track`
+backend each seed logs the source's scalars live into its own run, and the whole
+seed-stacked final state is pushed as one Orbax checkpoint artifact. `train` is the
+compiled part: `nnx.jit(partial(train, config, log, log_evaluation))(key, seed_index)`. Timestep and frequency
 units count all environment transitions, as the source's `global_step` does. Replay
 matches FastSVERL `Buffer` insertion and sampling, with fixed shapes.
 """
@@ -33,6 +35,7 @@ from new_jax_shapley import backends
 from new_jax_shapley.backends import Track
 from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig, ModelInput
+from new_jax_shapley.common.supervised_learning import stack_seeds
 from new_jax_shapley.envs import (
     Gridworld,
     GridworldParams,
@@ -51,7 +54,8 @@ type Observations = Int[Array, "batch features"]  # ruff: ignore[forward-annotat
 type Actions = Int[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
 type Scalars = Float[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
 type Terminations = Bool[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
-type StepLog = Callable[[StepMetrics], None]
+type StepLog = Callable[[Array, StepMetrics], None]
+type EvaluationLog = Callable[[Array, EvaluationMetrics], None]
 type Env = Gridworld | Mastermind | Hypercube
 type EnvState = GridworldState | MastermindState | HypercubeState
 type EnvParams = GridworldParams | MastermindParams | HypercubeParams
@@ -66,7 +70,8 @@ LOG_STEPS = 100
 @dataclass(frozen=True, slots=True)
 class DQNConfig:
     env: Env
-    seed: int = 1
+    seeds: tuple[int, ...] = (1,)
+    """One agent per seed; explanation stages explain the first, or agent s explains seed s."""
     hidden_widths: tuple[int, ...] = (64, 64)
     num_envs: int = 1
     total_timesteps: int = 50_000
@@ -81,11 +86,13 @@ class DQNConfig:
     exploration_fraction: float = 0.5
     learning_starts: int = 10_000
     train_frequency: int = 10
+    eval_episodes: int = 0
+    """Greedy evaluation episodes after training, logged as `eval/episodic_return`."""
     adam: AdamConfig = field(default_factory=AdamConfig)
     checkpoint: str | None = None
     """An agent artifact to load instead of training, e.g. `GROUP--algorithm--dqn:latest`."""
     name: str = "dqn"
-    """The experiment name runs are named after: `NAME--algorithm--dqn`."""
+    """The experiment name runs are named after: `NAME--algorithm--dqn--seed-N`."""
     track: Track | None = None
     """The tracking backend; None trains untracked (tests)."""
     project: str = "dev-jax"
@@ -107,8 +114,10 @@ class DQNConfig:
                 raise ValueError(f"{name} must be positive")
         if self.vector_steps < 1:
             raise ValueError("total_timesteps must include at least one vector step")
-        if self.learning_starts < 0:
-            raise ValueError("learning_starts must be nonnegative")
+        if self.learning_starts < 0 or self.eval_episodes < 0:
+            raise ValueError("learning_starts and eval_episodes must be nonnegative")
+        if not self.seeds or len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("seeds must be distinct and nonempty")
         for name, value in (("gamma", self.gamma), ("tau", self.tau), ("start_e", self.start_e), ("end_e", self.end_e)):
             if not 0 <= value <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
@@ -165,6 +174,16 @@ class StepMetrics:
 
 
 @struct.dataclass
+class EvaluationMetrics:
+    """One evaluation step: each environment's episode return and whether it completed, and how many
+    evaluation episodes completed before this step."""
+
+    episode_return: Array
+    completed: Array
+    first_episode: Array
+
+
+@struct.dataclass
 class Agent:
     """The trained agent the explanation steps explain: its Q-network and final epsilon."""
 
@@ -202,11 +221,16 @@ class QNetwork(nnx.Module):
 
 
 def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
-    """Train (or load) one agent, tracked by `config.track`; metrics carry a leading vector-step axis."""
-    key = jax.random.key(config.seed)
+    """Train (or load) one agent per seed, tracked by `config.track`.
+
+    Everything returned has a leading seed axis; metrics then a vector-step axis.
+    """
+    keys = [jax.random.key(seed) for seed in config.seeds]
     if config.track is None:
-        state, metrics = nnx.jit(partial(train, config, None))(key)
-        return state, metrics, trained_agent(config, state)
+        program = nnx.jit(partial(train, config, None, None))
+        results = [program(key, jnp.asarray(index, jnp.int32)) for index, key in enumerate(keys)]
+        state = stack_seeds([state for state, _ in results])
+        return state, stack_seeds([metrics for _, metrics in results]), trained_agent(config, state)
     group = config.group or f"{config.name}-{time_ns()}"
     artifact = f"{group}--algorithm--dqn"
     settings = {
@@ -216,16 +240,25 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
     }
     with backends.session(config.track, config.entity) as root:
         tracking = wandb if config.track == "wandb" else trackio
-        run = tracking.init(
-            project=config.project, name=f"{config.name}--algorithm--dqn", group=group, config=asdict(config)
+        runs = tuple(
+            tracking.init(
+                project=config.project,
+                name=f"{config.name}--algorithm--dqn--seed-{seed}",
+                group=group,
+                config={**asdict(config), "seed": seed},
+            )
+            for seed in config.seeds
         )
         try:
             if config.checkpoint is not None:
-                directory = run.use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
-                state = checkpoints.load(Path(directory), initialize(config, jax.random.key(0)), settings)
+                directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
+                template = stack_seeds([initialize(config, jax.random.key(0))] * len(config.seeds))
+                state = checkpoints.load(Path(directory), template, settings)
                 return state, None, trained_agent(config, state)
 
-            def log(run: wandb.Run | trackio.Run, num_envs: int, metrics: StepMetrics) -> None:
+            def log(
+                runs: tuple[wandb.Run | trackio.Run, ...], num_envs: int, seed: Array, metrics: StepMetrics
+            ) -> None:
                 """The source's DQN scalars; episodes finishing on the same step are averaged."""
                 step = int(metrics.global_step)
                 completed = np.asarray(metrics.completed)
@@ -237,21 +270,42 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
                 if bool(metrics.updated) and step % LOG_STEPS < num_envs:
                     row["agent/DQN_loss"] = float(metrics.loss)
                 if row:
-                    run.log(row, step=step)
+                    runs[int(seed)].log(row, step=step)
 
-            state, metrics = nnx.jit(partial(train, config, partial(log, run, config.num_envs)))(key)
+            def log_evaluation(
+                runs: tuple[wandb.Run | trackio.Run, ...], seed: Array, metrics: EvaluationMetrics
+            ) -> None:
+                """Each completed evaluation episode's return, stepped by its episode number."""
+                returns = np.asarray(metrics.episode_return)[np.asarray(metrics.completed)]
+                for index, value in enumerate(returns):
+                    runs[int(seed)].log({"eval/episodic_return": float(value)}, step=int(metrics.first_episode) + index)
+
+            program = nnx.jit(
+                partial(train, config, partial(log, runs, config.num_envs), partial(log_evaluation, runs))
+            )
+            results = [program(key, jnp.asarray(index, jnp.int32)) for index, key in enumerate(keys)]
+            state = stack_seeds([state for state, _ in results])
+            metrics = stack_seeds([metrics for _, metrics in results])
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            run.log_artifact(str(directory), name=artifact, type="agent").wait()
+            runs[0].log_artifact(str(directory), name=artifact, type="agent").wait()
             print(f"Agent checkpoint: {artifact}:latest")
             return state, metrics, trained_agent(config, state)
         finally:
-            run.finish()
+            for run in runs:
+                run.finish()
 
 
-def train(config: DQNConfig, log: StepLog | None, key: Array) -> tuple[RunState, StepMetrics]:
-    """The compiled training run. `log` receives a step's metrics during the run (a host
-    callback), on steps where an episode finished or the source would log the DQN loss."""
+def train(
+    config: DQNConfig, log: StepLog | None, log_evaluation: EvaluationLog | None, key: Array, seed: Array
+) -> tuple[RunState, StepMetrics]:
+    """One seed's compiled run: training, then `eval_episodes` greedy evaluation episodes.
+
+    `log` receives the seed index and a step's metrics during the run (a host callback), on
+    steps where an episode finished or the source would log the DQN loss; `log_evaluation`
+    receives every evaluation step that completed an episode. Evaluation advances the
+    run's key, as the source's does.
+    """
     env = EpisodeStatisticsWrapper(config.env)
     state = initialize(config, key)
 
@@ -259,6 +313,7 @@ def train(config: DQNConfig, log: StepLog | None, key: Array) -> tuple[RunState,
         config: DQNConfig,
         env: EpisodeStatisticsWrapper[EnvState, EnvParams],
         log: StepLog | None,
+        seed: Array,
         state: RunState,
         index: Array,
     ) -> tuple[RunState, StepMetrics]:
@@ -362,14 +417,79 @@ def train(config: DQNConfig, log: StepLog | None, key: Array) -> tuple[RunState,
             jax.lax.cond(
                 jnp.any(transition.completed) | loss_due,
                 partial(jax.debug.callback, log, ordered=True),
-                lambda metrics: None,
+                lambda seed, metrics: None,
+                seed,
                 metrics,
             )
         return next_state, metrics
 
-    return nnx.scan(partial(step, config, env, log), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+    state, metrics = nnx.scan(partial(step, config, env, log, seed), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
         state, jnp.arange(config.vector_steps, dtype=jnp.int32)
     )
+    if not config.eval_episodes:
+        return state, metrics
+    return evaluate(config, log_evaluation, state, seed), metrics
+
+
+def evaluate(config: DQNConfig, log: EvaluationLog | None, state: RunState, seed: Array) -> RunState:
+    """The source's greedy evaluation until `eval_episodes` episodes completed, from fresh resets
+    keyed by the run's key; returns the state with that key advanced."""
+    env = EpisodeStatisticsWrapper(config.env)
+    type Evaluation = tuple[Array, EpisodeStatisticsState[EnvState], Array, Array]
+
+    def step(
+        config: DQNConfig,
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        log: EvaluationLog | None,
+        seed: Array,
+        model: QNetwork,
+        carry: Evaluation,
+    ) -> Evaluation:
+        """One greedy vector step; completed episodes count towards `eval_episodes`."""
+        observations, env_state, count, key = carry
+        actions, _, key = choose_action(model, observations, jnp.asarray(0.0, jnp.float32), key)
+        keys: Array = jax.random.split(key, config.num_envs + 1)
+        transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+            keys[1:], env_state, actions, env.default_params
+        )
+        if log is not None:
+            metrics = EvaluationMetrics(transition.episode_return, transition.completed, count)
+            jax.lax.cond(
+                jnp.any(transition.completed),
+                partial(jax.debug.callback, log, ordered=True),
+                lambda seed, metrics: None,
+                seed,
+                metrics,
+            )
+        return (
+            transition.observations,
+            transition.state,
+            count + jnp.sum(transition.completed, dtype=jnp.int32),
+            keys[0],
+        )
+
+    def unfinished(config: DQNConfig, carry: Evaluation) -> Array:
+        return carry[2] < config.eval_episodes
+
+    reset_keys: Array = jax.random.split(state.key, config.num_envs + 1)
+    observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_keys[1:], env.default_params)
+    initial: Evaluation = (observations, env_state, jnp.asarray(0, jnp.int32), reset_keys[0])
+    _, _, _, key = jax.lax.while_loop(
+        partial(unfinished, config), partial(step, config, env, log, seed, state.model), initial
+    )
+    evaluated = RunState(
+        state.model,
+        state.target,
+        state.optimizer,
+        state.replay,
+        state.observations,
+        state.env_state,
+        state.vector_step,
+        state.updates,
+        state.target_updates,
+        key,
+    )
+    return evaluated
 
 
 def initialize(config: DQNConfig, key: Array) -> RunState:

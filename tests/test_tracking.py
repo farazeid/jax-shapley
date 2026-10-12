@@ -75,7 +75,8 @@ print(json.dumps({group: backends.history(track, project=project, entity=entity,
 def test_live_logs_equal_the_returned_metrics() -> None:
     steps: list[dqn.StepMetrics] = []
     config = CONFIG.algorithm
-    state, metrics = nnx.jit(partial(dqn.train, config, steps.append))(jax.random.key(config.seed))
+    program = nnx.jit(partial(dqn.train, config, partial(_record, steps), None))
+    state, metrics = program(jax.random.key(config.seeds[0]), jnp.asarray(0, jnp.int32))
     jax.effects_barrier()
     expected = np.asarray(metrics.completed).any(axis=1) | (
         np.asarray(metrics.updated) & (np.asarray(metrics.global_step) % dqn.LOG_STEPS < config.num_envs)
@@ -103,7 +104,7 @@ def test_live_logs_equal_the_returned_metrics() -> None:
 
 def test_stage_checkpoints_restore_the_whole_state(tmp_path: Path, result: ExperimentResult) -> None:
     stages = (
-        ("agent", result.dqn_state, dqn.initialize(CONFIG.algorithm, jax.random.key(0))),
+        ("agent", result.dqn_state, stack_seeds([dqn.initialize(CONFIG.algorithm, jax.random.key(0))])),
         ("characteristic", result.characteristic_state, characteristic.initialize(CONFIG.characteristic)),
         ("shapley", result.shapley[0][0], shapley.initialize(CONFIG.shapley[0], CONFIG.characteristic)),
     )
@@ -130,7 +131,7 @@ def test_trackio_runs_hand_off_through_artifacts_and_load_stages(tmp_path: Path)
     runs = first[group]
     prefix = "mastermind222_behaviour"
     assert sorted(runs) == sorted([
-        f"{prefix}--algorithm--dqn",
+        f"{prefix}--algorithm--dqn--seed-1",
         *(
             f"{prefix}--{stage}--seed-{seed}"
             for stage in (
@@ -142,7 +143,7 @@ def test_trackio_runs_hand_off_through_artifacts_and_load_stages(tmp_path: Path)
         ),
     ])
     assert {"agent/episodic_return", "agent/DQN_loss", "_step"} <= {
-        key for row in runs[f"{prefix}--algorithm--dqn"] for key in row
+        key for row in runs[f"{prefix}--algorithm--dqn--seed-1"] for key in row
     }
     characteristic_rows = runs[f"{prefix}--characteristic--behaviour--seed-1"]
     assert "model/PolicyCharacteristicModel_exact_loss" in {key for row in characteristic_rows for key in row}
@@ -153,9 +154,9 @@ def test_trackio_runs_hand_off_through_artifacts_and_load_stages(tmp_path: Path)
     second = _read("trackio", "test", environment)
     (loaded,) = [name for name in second if name != group]
     # trackio keeps no record of a run that logged nothing.
-    assert second[loaded].get(f"{prefix}--algorithm--dqn", []) == []
+    assert second[loaded].get(f"{prefix}--algorithm--dqn--seed-1", []) == []
     for name, rows in second[loaded].items():
-        if name != f"{prefix}--algorithm--dqn":
+        if name != f"{prefix}--algorithm--dqn--seed-1":
             assert rows == runs[name], name
     # A checkpoint saved under different settings is refused.
     failed = _main(
@@ -190,6 +191,11 @@ def test_wandb_keeps_nothing_locally() -> None:
 @pytest.fixture(scope="module")
 def result() -> ExperimentResult:
     return run(CONFIG)
+
+
+def _record(items: list[dqn.StepMetrics], seed: jax.Array, metrics: dqn.StepMetrics) -> None:
+    del seed
+    items.append(metrics)
 
 
 def _main(arguments: list[str], environment: dict[str, str], *, check: bool = True) -> subprocess.CompletedProcess[str]:

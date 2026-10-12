@@ -43,7 +43,7 @@ from new_jax_shapley.algorithms import dqn
 from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS
 from new_jax_shapley.characteristic_models import behaviour as characteristic
 from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.supervised_learning import seed_slice
+from new_jax_shapley.common.supervised_learning import seed_slice, stack_seeds
 from new_jax_shapley.envs import Mastermind
 from new_jax_shapley.envs.mastermind import MastermindState
 from new_jax_shapley.experiment import ExperimentConfig, load_configs
@@ -219,7 +219,7 @@ def load_explainer(args: Args, configs: dict[str, ExperimentConfig]) -> Explaine
             directory = run.use_artifact(f"{group}--algorithm--dqn:latest").download(root=str(root / "agent"))
             agent_state = checkpoints.load(
                 Path(directory),
-                dqn.initialize(algorithm, jax.random.key(0)),
+                stack_seeds([dqn.initialize(algorithm, jax.random.key(0))] * len(algorithm.seeds)),
                 {"stage": "algorithm", "env": env.name, "config": algorithm_settings},
             )
             reference = f"{group}--characteristic--{explained.kind}:latest"
@@ -240,7 +240,9 @@ def load_explainer(args: Args, configs: dict[str, ExperimentConfig]) -> Explaine
             run.finish()
     chosen = seed_slice(characteristics, explained.seeds.index(config.explained_seed))
     model = seed_slice(shapleys, stage.seeds.index(TABLE_2_SHAPLEY_SEED)).model
-    return Explainer(dqn.trained_agent(algorithm, agent_state).model, chosen.model, model, env)
+    agents = dqn.trained_agent(algorithm, agent_state)
+    agent = seed_slice(agents, explained.seeds.index(config.explained_seed) if len(algorithm.seeds) > 1 else 0)
+    return Explainer(agent.model, chosen.model, model, env)
 
 
 def explain_board(explainer: Explainer, board: np.ndarray) -> Board:
