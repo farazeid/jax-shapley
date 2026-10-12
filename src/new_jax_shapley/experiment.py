@@ -22,7 +22,8 @@ class ExperimentConfig:
     algorithm: DQNConfig
     characteristic: CharacteristicConfig
     shapley: tuple[ShapleyConfig, ...]
-    explained_seed: int = 1
+    explained_seed: int | None = 1
+    """The characteristic seed every Shapley seed explains; None pairs Shapley seed s with characteristic seed s."""
     compile_only: bool = False
     """Only trace, lower and compile every stage (before a long run); nothing runs or is tracked."""
     track: Track = "trackio"
@@ -37,7 +38,10 @@ class ExperimentConfig:
             raise ValueError("every stage must use the same env")
         if len(self.algorithm.seeds) not in (1, len(self.characteristic.seeds)):
             raise ValueError("the agent stage trains one agent, or one per characteristic seed")
-        if self.explained_seed not in self.characteristic.seeds:
+        if self.explained_seed is None:
+            if any(stage.seeds != self.characteristic.seeds for stage in self.shapley):
+                raise ValueError("paired Shapley seeds must equal the characteristic seeds")
+        elif self.explained_seed not in self.characteristic.seeds:
             raise ValueError("explained_seed must be one of the characteristic seeds")
 
 

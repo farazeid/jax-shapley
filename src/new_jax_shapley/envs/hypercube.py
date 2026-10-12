@@ -1,10 +1,11 @@
 """JAX port of FastSVERL's obstacle-free Hypercube environment."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
+import tyro
 from flax import struct
 from gymnax.environments import environment, spaces
 
@@ -41,6 +42,8 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
     dimension: int
 
     def __post_init__(self) -> None:
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
         if self.side_length not in range(2, 7):
             raise ValueError("side_length must be one of the paper values 2, 3, 4, 5, or 6")
         if self.dimension not in range(2, 6):

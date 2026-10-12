@@ -6,11 +6,12 @@
 original name with the 2-2-2 defaults; every 2-2-2 random draw is unchanged.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
+import tyro
 from flax import struct
 from gymnax.environments import environment, spaces
 
@@ -54,6 +55,8 @@ class Mastermind(TypedEnvironment[MastermindState, MastermindParams]):
     num_pegs: int = 2
 
     def __post_init__(self) -> None:
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
         if self.code_size < 1 or self.num_guesses < 1 or self.num_pegs < 2:
             raise ValueError("Mastermind needs code_size >= 1, num_guesses >= 1 and num_pegs >= 2")
 

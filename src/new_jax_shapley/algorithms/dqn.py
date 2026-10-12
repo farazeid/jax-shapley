@@ -14,7 +14,7 @@ matches FastSVERL `Buffer` insertion and sampling, with fixed shapes.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from math import isfinite
 from pathlib import Path
@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import trackio
+import tyro
 import wandb
 from flax import nnx, struct
 from jax import Array
@@ -102,20 +103,21 @@ class DQNConfig:
     """The run group; None starts a new one, `NAME-TIMESTAMP`."""
 
     def __post_init__(self) -> None:
-        for name, value in (
-            ("num_envs", self.num_envs),
-            ("total_timesteps", self.total_timesteps),
-            ("buffer_size", self.buffer_size),
-            ("batch_size", self.batch_size),
-            ("train_frequency", self.train_frequency),
-            ("target_network_frequency", self.target_network_frequency),
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
+        for name, value, minimum in (
+            ("num_envs", self.num_envs, 1),
+            ("total_timesteps", self.total_timesteps, 1),
+            ("buffer_size", self.buffer_size, 1),
+            ("batch_size", self.batch_size, 1),
+            ("train_frequency", self.train_frequency, 1),
+            ("target_network_frequency", self.target_network_frequency, 1),
+            ("vector steps (total_timesteps // num_envs)", self.vector_steps, 1),
+            ("learning_starts", self.learning_starts, 0),
+            ("eval_episodes", self.eval_episodes, 0),
         ):
-            if value < 1:
-                raise ValueError(f"{name} must be positive")
-        if self.vector_steps < 1:
-            raise ValueError("total_timesteps must include at least one vector step")
-        if self.learning_starts < 0 or self.eval_episodes < 0:
-            raise ValueError("learning_starts and eval_episodes must be nonnegative")
+            if value < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
         if not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be distinct and nonempty")
         for name, value in (("gamma", self.gamma), ("tau", self.tau), ("start_e", self.start_e), ("end_e", self.end_e)):

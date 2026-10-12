@@ -105,15 +105,21 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
     else:
         characteristic_state, characteristic_metrics = characteristic_prediction.main(characteristic_config, agents)
 
-    # 4. Train Shapley models explaining characteristic seed `explained_seed` (and its agent).
-    index = characteristic_config.seeds.index(config.explained_seed)
-    explained = seed_slice(characteristic_state, index)
-    agent = seed_slice(agents, index if len(algorithm.seeds) > 1 else 0)
+    # 4. Train Shapley models explaining characteristic seed `explained_seed` (and its agent), or
+    #    each characteristic seed s with Shapley seed s.
     shapley_main = shapley.main if characteristic_config.kind == "behaviour" else shapley_prediction.main
-    shapley_results = tuple(
-        shapley_main(stage, characteristic_config, agent, explained.model, explained.buffers)
-        for stage in shapley_configs
-    )
+    results = []
+    for stage in shapley_configs:
+        explained, explaining = characteristic_state, agents
+        if config.explained_seed is not None:
+            index = characteristic_config.seeds.index(config.explained_seed)
+            explained = stack_seeds([seed_slice(characteristic_state, index)] * len(stage.seeds))
+            agent = seed_slice(agents, index if len(algorithm.seeds) > 1 else 0)
+            explaining = stack_seeds([agent] * len(stage.seeds))
+        elif len(algorithm.seeds) == 1:
+            explaining = stack_seeds([seed_slice(agents, 0)] * len(stage.seeds))
+        results.append(shapley_main(stage, characteristic_config, explaining, explained.model, explained.buffers))
+    shapley_results = tuple(results)
     return ExperimentResult(dqn_state, dqn_metrics, characteristic_state, characteristic_metrics, shapley_results)
 
 

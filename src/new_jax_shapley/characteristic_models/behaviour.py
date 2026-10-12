@@ -12,7 +12,7 @@ measure its error. The reference is FastSVERL's `ValuePolicyCharacteristicModel`
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from pathlib import Path
 from time import time_ns
@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import trackio
+import tyro
 import wandb
 from flax import nnx, struct
 from jax import Array
@@ -91,6 +92,8 @@ class CharacteristicConfig:
     """The run group; None starts a new one, `NAME-TIMESTAMP`."""
 
     def __post_init__(self) -> None:
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
         if self.kind not in ("behaviour", "prediction"):
             raise ValueError("characteristic kind must be behaviour or prediction")
         if self.policy not in ("greedy", "explore"):

@@ -13,7 +13,7 @@ characteristic kind's `targets` and `head`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from math import comb
 from pathlib import Path
@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import trackio
+import tyro
 import wandb
 from einops import rearrange
 from flax import nnx, struct
@@ -94,6 +95,8 @@ class ShapleyConfig:
     """The run group; None starts a new one, `NAME-TIMESTAMP`."""
 
     def __post_init__(self) -> None:
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
         if any(width < 1 for width in self.hidden_widths):
             raise ValueError("hidden widths must be positive")
         if self.buffers not in ("fresh", "characteristic"):
@@ -142,43 +145,44 @@ class ShapleyModel(nnx.Module):
 def main(
     config: ShapleyConfig,
     explained: CharacteristicConfig,
-    agent: Agent,
-    characteristic: CharacteristicModel,
+    agents: Agent,
+    characteristics: CharacteristicModel,
     characteristic_buffers: StateBuffers,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
-    """Behaviour Shapley models explaining one frozen behaviour characteristic."""
+    """Behaviour Shapley models explaining frozen behaviour characteristics."""
     if explained.kind != "behaviour":
         raise ValueError("the behaviour stage explains a behaviour characteristic")
-    return stage(config, explained, agent, characteristic, characteristic_buffers, targets, head, "PolicyShapley")
+    return stage(config, explained, agents, characteristics, characteristic_buffers, targets, head, "PolicyShapley")
 
 
 def stage(
     config: ShapleyConfig,
     explained: CharacteristicConfig,
-    agent: Agent,
-    characteristic: CharacteristicModel,
+    agents: Agent,
+    characteristics: CharacteristicModel,
     characteristic_buffers: StateBuffers,
     targets: Targets,
     head: Head,
     model: str,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
-    """Train (or load) every seed explaining one frozen characteristic (the paper protocol).
+    """Train (or load) every seed explaining frozen characteristics, tracked by `config.track`.
 
-    `targets` and `head` are the explained characteristic kind's; `model` is the source's
-    model class name that prefixes the logged tags.
-
-    `explained` is the characteristic's config. With a backend each seed logs the source's
+    The agents, characteristic models and their buffers are seed-stacked, one per Shapley
+    seed: the same one repeated (the paper protocol), or Shapley seed s explaining
+    characteristic seed s and its agent. `explained` is the characteristic's config;
+    `targets` and `head` are its kind's; `model` is the source's model class name that
+    prefixes the logged tags. With a backend each seed logs the source's
     `model/{Policy,Value}Shapley_*` scalars into its own run, and the whole seed-stacked
     final state is pushed as one Orbax checkpoint artifact. The returned state and metrics
     carry a leading seed axis (metrics: (epochs, seeds); None when loaded).
     """
     seeds = len(config.seeds)
     keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
-    agents = stack_seeds([agent] * seeds)
-    characteristics = stack_seeds([characteristic] * seeds)
-    inherited = stack_seeds([characteristic_buffers] * seeds)
-    # Exact tables are sized by the unique observations in the exact buffer (a static shape).
-    max_unique = int(np.unique(np.asarray(characteristic_buffers.exact), axis=0).shape[0])
+    if characteristic_buffers.exact.shape[0] != seeds or agents.epsilon.shape[0] != seeds:
+        raise ValueError("Shapley inputs need one agent and characteristic per seed")
+    inherited = characteristic_buffers
+    # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
+    max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(inherited.exact))
     if config.track is None:
         program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, None))
         return program(keys, agents, characteristics, inherited)

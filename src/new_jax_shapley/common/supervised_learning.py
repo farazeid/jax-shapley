@@ -9,7 +9,7 @@ model. The loop returns every epoch's metrics, (epochs, seeds) along the leading
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import partial
 from math import isfinite, nan
 from operator import itemgetter
@@ -17,6 +17,7 @@ from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
+import tyro
 from flax import nnx, struct
 from jax import Array
 
@@ -44,16 +45,17 @@ class SupervisedConfig:
     adam: AdamConfig = field(default_factory=AdamConfig)
 
     def __post_init__(self) -> None:
+        if any(getattr(self, item.name) is tyro.MISSING for item in fields(self)):
+            return  # A sweep config: validated once the command line supplies every field.
         for name, value in (
             ("epochs", self.epochs),
             ("batch_size", self.batch_size),
             ("buffer_size", self.buffer_size),
             ("num_envs", self.num_envs),
+            ("patience", self.epochs if self.patience is None else self.patience),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be positive")
-        if self.patience is not None and self.patience < 1:
-            raise ValueError("patience must be positive")
         if not isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if not 0 < self.val_fraction < 1:
