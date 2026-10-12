@@ -41,12 +41,13 @@ from new_jax_shapley.characteristic_models.behaviour import (
     Head,
     Targets,
     UniqueValues,
+    Values,
     exact_characteristic,
     head,
     targets,
 )
 from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.coalitions import MASK, Observations, coalition_table, kernel_coalitions, mask
+from new_jax_shapley.common.coalitions import MASK, Coalitions, Observations, coalition_table, kernel_coalitions, mask
 from new_jax_shapley.common.networks import MLP, LayerConfig, MLPConfig
 from new_jax_shapley.common.rollouts import collect_buffers
 from new_jax_shapley.common.supervised_learning import (
@@ -62,6 +63,15 @@ from new_jax_shapley.common.supervised_learning import (
 from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
 type BufferSource = Literal["fresh", "characteristic"]
+type CharacteristicValues[Frozen] = Callable[[Frozen, Observations, Coalitions], Values]
+"""A frozen characteristic v(s, C); coalitions broadcast against observations."""
+type CharacteristicNull[Frozen] = Callable[[Frozen, Observations], Values]
+"""v(s, empty), broadcastable against v(s, C)."""
+type Fit[Frozen] = Callable[
+    [ShapleyConfig, int, Callable[[EpochMetrics], None] | None, Array, Agent, Frozen, StateBuffers],
+    tuple[TrainState[ShapleyModel], EpochMetrics],
+]
+"""A kind's compiled Shapley training: (config, max_unique, log, keys, agents, frozen, buffers)."""
 type Contributions = Float[Array, "... features outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 type StateContributions = Float[Array, "unique features outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 
@@ -153,29 +163,43 @@ def main(
     """Behaviour Shapley models explaining frozen behaviour characteristics."""
     if explained.kind != "behaviour":
         raise ValueError("the behaviour stage explains a behaviour characteristic")
-    return stage(config, explained, agents, characteristics, characteristic_buffers, targets, head, "PolicyShapley")
+    settings = {name: value for name, value in asdict(explained).items() if name not in TRACKING_FIELDS}
+    return stage(
+        config,
+        explained,
+        agents,
+        characteristics,
+        characteristic_buffers,
+        partial(fit, explained, targets, head),
+        head,
+        settings,
+        "PolicyShapley",
+    )
 
 
-def stage(
+def stage[Frozen](
     config: ShapleyConfig,
     explained: CharacteristicConfig,
     agents: Agent,
-    characteristics: CharacteristicModel,
+    frozen: Frozen,
     characteristic_buffers: StateBuffers,
-    targets: Targets,
+    fit: Fit[Frozen],
     head: Head,
+    explained_settings: dict[str, object],
     model: str,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
     """Train (or load) every seed explaining frozen characteristics, tracked by `config.track`.
 
-    The agents, characteristic models and their buffers are seed-stacked, one per Shapley
+    The agents, frozen characteristics and their buffers are seed-stacked, one per Shapley
     seed: the same one repeated (the paper protocol), or Shapley seed s explaining
-    characteristic seed s and its agent. `explained` is the characteristic's config;
-    `targets` and `head` are its kind's; `model` is the source's model class name that
-    prefixes the logged tags. With a backend each seed logs the source's
-    `model/{Policy,Value}Shapley_*` scalars into its own run, and the whole seed-stacked
-    final state is pushed as one Orbax checkpoint artifact. The returned state and metrics
-    carry a leading seed axis (metrics: (epochs, seeds); None when loaded).
+    characteristic seed s and its agent. `explained` is the characteristic stage's config
+    (its kind names the runs); `fit` is the explained kind's compiled training, `head` its
+    output layer and `explained_settings` what its checkpoint records about it; `model` is
+    the source's model class name that prefixes the logged tags. With a backend each seed
+    logs the source's `model/{Policy,Value,Performance}Shapley_*` scalars into its own run,
+    and the whole seed-stacked final state is pushed as one Orbax checkpoint artifact. The
+    returned state and metrics carry a leading seed axis (metrics: (epochs, seeds); None
+    when loaded).
     """
     seeds = len(config.seeds)
     keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
@@ -185,15 +209,15 @@ def stage(
     # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
     max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(inherited.exact))
     if config.track is None:
-        program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, None))
-        return program(keys, agents, characteristics, inherited)
+        program = nnx.jit(partial(fit, config, max_unique, None))
+        return program(keys, agents, frozen, inherited)
     group = config.group or f"{config.name}-{time_ns()}"
     exactness = "with-exact" if config.with_exact_char else "without-exact"
     artifact = f"{group}--shapley--{explained.kind}--{exactness}"
     settings = {
         "stage": "shapley",
         "env": config.env.name,
-        "explained": {name: value for name, value in asdict(explained).items() if name not in TRACKING_FIELDS},
+        "explained": explained_settings,
         "config": {name: value for name, value in asdict(config).items() if name not in TRACKING_FIELDS},
     }
     with backends.session(config.track, config.entity) as root:
@@ -213,8 +237,8 @@ def stage(
                 return checkpoints.load(Path(directory), initialize(config, explained, head), settings), None
 
             epoch_log = partial(log_epochs, runs, model, config.train.exact_loss)
-            program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, epoch_log))
-            state, metrics = program(keys, agents, characteristics, inherited)
+            program = nnx.jit(partial(fit, config, max_unique, epoch_log))
+            state, metrics = program(keys, agents, frozen, inherited)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
             runs[0].log_artifact(str(directory), name=artifact, type="shapley").wait()
@@ -226,10 +250,10 @@ def stage(
 
 
 def fit(
-    config: ShapleyConfig,
     explained: CharacteristicConfig,
     targets: Targets,
     head: Head,
+    config: ShapleyConfig,
     max_unique: int,
     log: Callable[[EpochMetrics], None] | None,
     keys: Array,
@@ -295,14 +319,16 @@ def fit(
         values = (
             exact.at_states
             if config.with_exact_char
-            else characteristic(mask(exact.states[None], coalitions[:, None])).values
+            else masked_values(characteristic, exact.states[None], coalitions[:, None])
         )
         return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 
     contexts = nnx.vmap(partial(context, config, explained, targets, max_unique), in_axes=(0, 0, 0), out_axes=0)(
         state.buffers, agents, characteristics
     )
-    return train(state, contexts, characteristics, loss, config.train, features, log)
+    return train(
+        state, contexts, characteristics, partial(loss, masked_values, masked_null), config.train, features, log
+    )
 
 
 def initialize(
@@ -365,16 +391,19 @@ def initialize(
     return nnx.vmap(partial(seed, network, features, training), in_axes=(0, 0), out_axes=0)(keys, buffers)
 
 
-def loss(
+def loss[Frozen](
+    values: CharacteristicValues[Frozen],
+    null: CharacteristicNull[Frozen],
     model: ShapleyModel,
-    characteristic: CharacteristicModel,
+    frozen: Frozen,
     context: ShapleyContext,
     config: SupervisedConfig,
     features: int,
     key: Array,
     partition: Partition,
 ) -> Array:
-    """A sampled train or validation batch's loss, or the exact loss.
+    """A sampled train or validation batch's loss, or the exact loss, explaining the frozen
+    characteristic `values` (with `null` its empty coalition).
 
     Batches use one Shapley-kernel coalition for the whole batch, as in the source:
     sum_{i in C} phi_i ~ v(C) - v(empty). The exact loss is the MSE between learnt
@@ -383,7 +412,7 @@ def loss(
     if partition == "exact":
         exact = context.exact
         assert exact is not None
-        errors = jnp.square(explain(model, characteristic, exact.states) - exact.values)
+        errors = jnp.square(explain(values, null, model, frozen, exact.states) - exact.values)
         valid = exact.state_valid.astype(jnp.float32)
         return jnp.sum(errors * valid[:, None, None]) / (jnp.sum(valid) * errors.shape[-2] * errors.shape[-1])
     index_key, coalition_key = jax.random.split(key)
@@ -394,23 +423,38 @@ def loss(
         rows = jax.random.randint(index_key, (config.validation_size,), 0, config.validation_size)
         observations = context.buffers.validation[rows]
     coalition = kernel_coalitions(coalition_key, 1, features)[0]
-    # v(empty): one all-MASK row broadcast over the rows. It is identical for every row, and
-    # evaluating a broadcast-constant batch miscompiles on XLA CPU (jax 0.11.0) from 64 rows.
-    null = characteristic(jnp.full((1, features), MASK, jnp.int32)).values[0]
-    targets = characteristic(mask(observations, coalition)).values - null
+    targets = values(frozen, observations, coalition) - null(frozen, observations)
     predictions = jnp.sum(coalition[:, None].astype(jnp.float32) * model(observations).contributions, axis=-2)
     return jnp.mean(jnp.square(predictions - jax.lax.stop_gradient(targets)))
 
 
-def explain(model: ShapleyModel, characteristic: CharacteristicModel, observations: Observations) -> Contributions:
+def explain[Frozen](
+    values: CharacteristicValues[Frozen],
+    null: CharacteristicNull[Frozen],
+    model: ShapleyModel,
+    frozen: Frozen,
+    observations: Observations,
+) -> Contributions:
     """Normalised Shapley values: v(F) - v(empty) - sum(phi) spread equally over features (additive
     efficient normalisation), using the learnt characteristic's grand and empty coalitions."""
     features = observations.shape[-1]
-    grand = characteristic(mask(observations, jnp.ones(features, jnp.bool_))).values
-    # v(empty): one all-MASK row, broadcast (see `loss`).
-    null = characteristic(jnp.full((1, features), MASK, jnp.int32)).values[0]
+    grand = values(frozen, observations, jnp.ones(features, jnp.bool_))
     contributions = model(observations).contributions
-    return contributions + ((grand - null - jnp.sum(contributions, axis=-2)) / features)[..., None, :]
+    return (
+        contributions
+        + ((grand - null(frozen, observations) - jnp.sum(contributions, axis=-2)) / features)[..., None, :]
+    )
+
+
+def masked_values(characteristic: CharacteristicModel, observations: Observations, coalitions: Coalitions) -> Values:
+    """A behaviour or prediction characteristic v(s, C): the model on the masked observation."""
+    return characteristic(mask(observations, coalitions)).values
+
+
+def masked_null(characteristic: CharacteristicModel, observations: Observations) -> Values:
+    """v(s, empty): one all-MASK row, the same for every row. Evaluating a broadcast-constant
+    batch instead miscompiles on XLA CPU (jax 0.11.0) from 64 rows."""
+    return characteristic(jnp.full((1, observations.shape[-1]), MASK, jnp.int32)).values[0]
 
 
 def exact_shapley(values: UniqueValues) -> StateContributions:

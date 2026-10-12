@@ -2,7 +2,9 @@
 
 Every seed trains in one compiled program: state, contexts and frozen models carry a
 leading seed axis. A model module supplies one `loss` function computing a sampled
-train or validation batch's loss, or the exact loss, by its `partition` argument. An epoch draws `batches` training batches with replacement, then a
+train or validation batch's loss, or the exact loss, by its `partition` argument, and
+optionally its own training `update` (default: one Adam step on the train loss). An
+epoch draws `batches` training batches with replacement, then a
 validation loss, an optional exact loss, and early stopping on validation. Finished
 seeds no-op while others continue; at the end every seed restores its best-validation
 model. The loop returns every epoch's metrics, (epochs, seeds) along the leading axes.
@@ -13,7 +15,7 @@ from dataclasses import dataclass, field, fields
 from functools import partial
 from math import isfinite, nan
 from operator import itemgetter
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +29,32 @@ from jax import Array
 from new_jax_shapley.common.networks import AdamConfig
 
 type Partition = Literal["train", "validation", "exact"]
-type Loss[Model, Context, Frozen] = Callable[[Model, Frozen, Context, SupervisedConfig, int, Array, Partition], Array]
+type Loss[Model, Context, Frozen, Config] = Callable[[Model, Frozen, Context, Config, int, Array, Partition], Array]
+type Update[Model, Context, Frozen, Config] = Callable[
+    [Model, nnx.Optimizer[Model], Frozen, Context, Config, int, Array], Array
+]
+
+
+class Schedule(Protocol):
+    """The epoch loop settings `train` reads (`SupervisedConfig`, or a model's own training config)."""
+
+    @property
+    def epochs(self) -> int: ...
+
+    @property
+    def batches(self) -> int: ...
+
+    @property
+    def patience_epochs(self) -> int: ...
+
+    @property
+    def exact_loss(self) -> bool: ...
+
+    @property
+    def exact_condition(self) -> float | None: ...
+
+    @property
+    def track_batch(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,14 +168,15 @@ class EpochMetrics:
     active: Array
 
 
-def train[Model: nnx.Module, Context, Frozen](
+def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
     state: TrainState[Model],
     contexts: Context,
     frozen: Frozen,
-    loss: Loss[Model, Context, Frozen],
-    config: SupervisedConfig,
+    loss: Loss[Model, Context, Frozen, Config],
+    config: Config,
     features: int,
     log: Callable[[EpochMetrics], None] | None,
+    update: Update[Model, Context, Frozen, Config] | None = None,
 ) -> tuple[TrainState[Model], EpochMetrics]:
     """Every seed's epochs until all stop, then each seed's best-validation model.
 
@@ -163,8 +191,9 @@ def train[Model: nnx.Module, Context, Frozen](
     empty = EpochMetrics(integers, integers, floats, floats, floats, integers, jnp.zeros(shape, jnp.bool_))
 
     def epoch(
-        loss: Loss[Model, Context, Frozen],
-        config: SupervisedConfig,
+        loss: Loss[Model, Context, Frozen, Config],
+        update: Update[Model, Context, Frozen, Config] | None,
+        config: Config,
         features: int,
         state: TrainState[Model],
         context: Context,
@@ -178,24 +207,19 @@ def train[Model: nnx.Module, Context, Frozen](
         type BatchCarry = tuple[Model, nnx.Optimizer[Model], Frozen]
 
         def batch(
-            loss: Loss[Model, Context, Frozen],
-            config: SupervisedConfig,
+            update: Update[Model, Context, Frozen, Config],
+            config: Config,
             features: int,
             context: Context,
             carry: BatchCarry,
             key: Array,
         ) -> tuple[BatchCarry, Array]:
             model, optimizer, frozen = carry
-            # NNX transformation has a dynamic return signature; assert its loss/gradient boundary.
-            value, gradients = cast(
-                tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
-                nnx.value_and_grad(loss)(model, frozen, context, config, features, key, "train"),
-            )
-            optimizer.update(model, gradients)
-            return (model, optimizer, frozen), value
+            return (model, optimizer, frozen), update(model, optimizer, frozen, context, config, features, key)
 
+        step = partial(gradient_step, loss) if update is None else update
         _, losses = nnx.scan(
-            partial(batch, loss, config, features, context), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
+            partial(batch, step, config, features, context), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
         )((state.model, state.optimizer, frozen), jax.random.split(batch_key, config.batches))
         validation = loss(state.model, frozen, context, config, features, validation_key, "validation")
         exact = (
@@ -231,8 +255,9 @@ def train[Model: nnx.Module, Context, Frozen](
         return state, EpochMetrics(zero, zero, nothing, nothing, nothing, zero, jnp.asarray(False))
 
     def seed_epoch(
-        loss: Loss[Model, Context, Frozen],
-        config: SupervisedConfig,
+        loss: Loss[Model, Context, Frozen, Config],
+        update: Update[Model, Context, Frozen, Config] | None,
+        config: Config,
         features: int,
         state: TrainState[Model],
         context: Context,
@@ -240,7 +265,7 @@ def train[Model: nnx.Module, Context, Frozen](
     ) -> tuple[TrainState[Model], EpochMetrics]:
         return nnx.cond(
             (state.epoch < config.epochs) & ~state.stopped,
-            partial(epoch, loss, config, features),
+            partial(epoch, loss, update, config, features),
             skip,
             state,
             context,
@@ -252,15 +277,16 @@ def train[Model: nnx.Module, Context, Frozen](
     type Carry = tuple[TrainState[Model], Context, Frozen, EpochMetrics, Array]
 
     def body(
-        loss: Loss[Model, Context, Frozen],
-        config: SupervisedConfig,
+        loss: Loss[Model, Context, Frozen, Config],
+        update: Update[Model, Context, Frozen, Config] | None,
+        config: Config,
         features: int,
         log: Callable[[EpochMetrics], None] | None,
         carry: Carry,
     ) -> Carry:
         state, contexts, frozen, metrics, index = carry
         every_seed = nnx.vmap(
-            partial(seed_epoch, loss, config, features),
+            partial(seed_epoch, loss, update, config, features),
             in_axes=(0, 0, None if frozen is None else 0),
             out_axes=(0, 0),
         )
@@ -271,11 +297,13 @@ def train[Model: nnx.Module, Context, Frozen](
         recorded = EpochMetrics(*[history.at[index].set(row) for history, row in rows])
         return state, contexts, frozen, recorded, index + 1
 
-    def running(config: SupervisedConfig, carry: Carry) -> Array:
+    def running(config: Config, carry: Carry) -> Array:
         return jnp.any((carry[0].epoch < config.epochs) & ~carry[0].stopped)
 
     initial: Carry = (state, contexts, frozen, empty, jnp.asarray(0, jnp.int32))
-    looped = cast(Carry, nnx.while_loop(partial(running, config), partial(body, loss, config, features, log), initial))
+    looped = cast(
+        Carry, nnx.while_loop(partial(running, config), partial(body, loss, update, config, features, log), initial)
+    )
     trained, _, _, metrics, _ = looped
 
     def restore_best(state: TrainState[Model]) -> TrainState[Model]:
@@ -283,6 +311,26 @@ def train[Model: nnx.Module, Context, Frozen](
         return state
 
     return nnx.vmap(restore_best, in_axes=0, out_axes=0)(trained), metrics
+
+
+def gradient_step[Model: nnx.Module, Context, Frozen, Config](
+    loss: Loss[Model, Context, Frozen, Config],
+    model: Model,
+    optimizer: nnx.Optimizer[Model],
+    frozen: Frozen,
+    context: Context,
+    config: Config,
+    features: int,
+    key: Array,
+) -> Array:
+    """The default training update: one Adam step on a sampled train batch's loss; returns that loss."""
+    # NNX transformation has a dynamic return signature; assert its loss/gradient boundary.
+    value, gradients = cast(
+        tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+        nnx.value_and_grad(loss)(model, frozen, context, config, features, key, "train"),
+    )
+    optimizer.update(model, gradients)
+    return value
 
 
 def log_epochs(runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics) -> None:

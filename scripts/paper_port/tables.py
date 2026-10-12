@@ -48,7 +48,7 @@ from new_jax_shapley.envs import Mastermind
 from new_jax_shapley.envs.mastermind import MastermindState
 from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models.behaviour import ShapleyModel, explain
+from new_jax_shapley.shapley_models.behaviour import ShapleyModel, explain, masked_null, masked_values
 
 SIZES = ("443", "453", "463")
 SOURCE_BATCHES = (0.8 * 10_000) // 128
@@ -249,7 +249,7 @@ def explain_board(explainer: Explainer, board: np.ndarray) -> Board:
     """Source plot_explanations for one board: the greedy action's scaled, flipped Shapley values."""
     observation = jnp.asarray(board, jnp.int32).reshape(1, -1)
     action = int(jnp.argmax(explainer.agent(observation).q_values[0]))
-    contributions = explain(explainer.shapley, explainer.characteristic, observation)
+    contributions = explain(masked_values, masked_null, explainer.shapley, explainer.characteristic, observation)
     env = explainer.env
     values = board_values(np.asarray(contributions[0, :, action]), env.num_guesses)
     guess = "".join(LETTERS[int(peg)] for peg in env.decode_action(action))
@@ -299,7 +299,9 @@ def nullity(explainer: Explainer, boards: np.ndarray) -> tuple[float, float]:
     """Mean |scaled value| of the greedy action over empty and filled board rows."""
     observations = jnp.asarray(boards.reshape(boards.shape[0], -1))
     actions = np.asarray(jnp.argmax(explainer.agent(observations).q_values, axis=-1))
-    contributions = np.asarray(explain(explainer.shapley, explainer.characteristic, observations))
+    contributions = np.asarray(
+        explain(masked_values, masked_null, explainer.shapley, explainer.characteristic, observations)
+    )
     empty, filled = [], []
     for board, values, action in zip(boards, contributions, actions, strict=True):
         scaled = np.flipud(board_values(values[:, action], explainer.env.num_guesses))
