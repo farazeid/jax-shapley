@@ -7,6 +7,7 @@ buffers, 100,000 agent steps over 16 environments); nothing executes.
 from functools import partial
 
 import jax
+import jax.numpy as jnp
 import pytest
 from flax import nnx
 
@@ -25,7 +26,9 @@ MAX_UNIQUE = 53
 def test_tracked_stage_programs_compile() -> None:
     _, config = load_configs()["mastermind222_behaviour"]
     algorithm = config.algorithm
-    nnx.jit(partial(dqn.train, algorithm, _ignore_step)).trace(KEY).lower().compile()
+    nnx.jit(partial(dqn.train, algorithm, _ignore_step, _ignore_evaluation)).trace(
+        KEY, jax.ShapeDtypeStruct((), jnp.int32)
+    ).lower().compile()
 
     stage = config.characteristic
     seeds = len(stage.seeds)
@@ -49,8 +52,12 @@ def test_tracked_stage_programs_compile() -> None:
         ).lower().compile()
 
 
-def _ignore_step(metrics: dqn.StepMetrics) -> None:
-    del metrics
+def _ignore_step(seed: jax.Array, metrics: dqn.StepMetrics) -> None:
+    del seed, metrics
+
+
+def _ignore_evaluation(seed: jax.Array, metrics: dqn.EvaluationMetrics) -> None:
+    del seed, metrics
 
 
 def _ignore_epoch(metrics: EpochMetrics) -> None:

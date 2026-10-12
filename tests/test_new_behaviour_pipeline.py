@@ -16,7 +16,7 @@ from jax_shapley import train_dqn, train_explanations
 from jax_shapley.run_io import load_agent, load_settings
 from new_jax_shapley.algorithms.dqn import DQNConfig
 from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
-from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig
+from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice
 from new_jax_shapley.envs import Mastermind
 from new_jax_shapley.experiment import ExperimentConfig
 from new_jax_shapley.main import ExperimentResult, run
@@ -30,7 +30,7 @@ CONFIG = ExperimentConfig(
     name="test_behaviour",
     algorithm=DQNConfig(
         env=ENV,
-        seed=1,
+        seeds=(1,),
         hidden_widths=WIDTHS,
         num_envs=4,
         total_timesteps=1024,
@@ -67,14 +67,14 @@ def test_agent_matches_the_current_dqn(pipelines: tuple[ExperimentResult, Path])
     agent = _single(root / "dqn")
     loaded = load_agent(agent, load_settings(agent / "config.json").network, load_replay=False)
     old = jax.tree.leaves(nnx.state(loaded.model))
-    new = jax.tree.leaves(nnx.state(result.dqn_state.model))
+    new = jax.tree.leaves(nnx.state(seed_slice(result.dqn_state, 0).model))
     for left, right in zip(old, new, strict=True):
         np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
     rows = list(csv.DictReader((agent / "metrics.csv").open()))
     old_returns = [float(row["episode_return"]) for row in rows if row["kind"] == "episode"]
     assert result.dqn_metrics is not None
-    completed = np.asarray(result.dqn_metrics.completed)
-    new_returns = np.asarray(result.dqn_metrics.episode_return)[completed].tolist()
+    metrics = seed_slice(result.dqn_metrics, 0)
+    new_returns = np.asarray(metrics.episode_return)[np.asarray(metrics.completed)].tolist()
     assert old_returns == new_returns
 
 
@@ -97,7 +97,7 @@ def pipelines(tmp_path_factory: pytest.TempPathFactory) -> tuple[ExperimentResul
     train_dqn.main([
         "mastermind222",
         "--seed",
-        str(dqn.seed),
+        str(dqn.seeds[0]),
         "--hidden-widths",
         *map(str, WIDTHS),
         "--train.num-envs",

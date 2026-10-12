@@ -168,7 +168,7 @@ uv run python -m new_jax_shapley.main mastermind222_behaviour
 uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb --shapley.1.train.epochs 9
 ```
 
-- Each stage takes only its config and tracks itself. Its runs are named `NAME--STAGE--VARIANT`, with `--seed-N` per explanation seed: `NAME--algorithm--dqn`, `NAME--characteristic--behaviour--seed-1`, `NAME--shapley--behaviour--with-exact--seed-1`. One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
+- Each stage takes only its config and tracks itself. Its runs are named `NAME--STAGE--VARIANT`, with `--seed-N` per explanation seed: `NAME--algorithm--dqn--seed-1`, `NAME--characteristic--behaviour--seed-1`, `NAME--shapley--behaviour--with-exact--seed-1`. One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
 - The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
 - Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.
 - A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.

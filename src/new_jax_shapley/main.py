@@ -83,14 +83,16 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
             for stage in shapley_configs
         )
 
-    # 1. Train the agent.
-    dqn_state, dqn_metrics, agent = dqn.main(algorithm)
+    # 1. Train the agents: one, or one per characteristic seed.
+    dqn_state, dqn_metrics, agents = dqn.main(algorithm)
 
-    # 2-3. Train characteristic models explaining it.
-    characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agent)
+    # 2-3. Train characteristic models explaining them.
+    characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents)
 
-    # 4. Train Shapley models explaining characteristic seed `explained_seed`.
-    explained = seed_slice(characteristic_state, characteristic_config.seeds.index(config.explained_seed))
+    # 4. Train Shapley models explaining characteristic seed `explained_seed` (and its agent).
+    index = characteristic_config.seeds.index(config.explained_seed)
+    explained = seed_slice(characteristic_state, index)
+    agent = seed_slice(agents, index if len(algorithm.seeds) > 1 else 0)
     shapley_results = tuple(
         shapley.main(stage, characteristic_config, agent, explained.model, explained.buffers)
         for stage in shapley_configs

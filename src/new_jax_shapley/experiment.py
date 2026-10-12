@@ -23,8 +23,6 @@ class ExperimentConfig:
     characteristic: CharacteristicConfig
     shapley: tuple[ShapleyConfig, ...]
     explained_seed: int = 1
-    seed: int = 42
-    num_runs: int = 1
     track: Track = "trackio"
     project: str = "dev-jax"
     entity: str | None = "fastsverl"
@@ -35,6 +33,8 @@ class ExperimentConfig:
             raise ValueError("experiments need a name")
         if any(stage.env != self.algorithm.env for stage in (self.characteristic, *self.shapley)):
             raise ValueError("every stage must use the same env")
+        if len(self.algorithm.seeds) not in (1, len(self.characteristic.seeds)):
+            raise ValueError("the agent stage trains one agent, or one per characteristic seed")
         if self.explained_seed not in self.characteristic.seeds:
             raise ValueError("explained_seed must be one of the characteristic seeds")
 

@@ -39,6 +39,7 @@ from new_jax_shapley.common.supervised_learning import (
     StateBuffers,
     SupervisedConfig,
     TrainState,
+    seed_slice,
     stack_seeds,
     train,
 )
@@ -139,8 +140,11 @@ class CharacteristicModel(nnx.Module):
         return CharacteristicOutput(self.mlp(masked_observations))
 
 
-def main(config: CharacteristicConfig, agent: Agent) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
-    """Train (or load) every seed explaining `agent`, tracked by `config.track`.
+def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
+    """Train (or load) every seed, tracked by `config.track`.
+
+    `agents` are seed-stacked: one agent every seed explains, or one per seed (seed s
+    explains agent s).
 
     Collects each seed's buffers, sizes the exact tables from them, then trains every
     seed in one compiled program. With a backend each seed logs the source's
@@ -149,7 +153,10 @@ def main(config: CharacteristicConfig, agent: Agent) -> tuple[TrainState[Charact
     state and metrics carry a leading seed axis (metrics: (epochs, seeds); None when loaded).
     """
     keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
-    agents = stack_seeds([agent] * len(config.seeds))
+    if agents.epsilon.shape[0] == 1:
+        agents = stack_seeds([seed_slice(agents, 0)] * len(config.seeds))
+    elif agents.epsilon.shape[0] != len(config.seeds):
+        raise ValueError("characteristic seeds need one agent, or one agent per seed")
     if config.track is None:
         keys, buffers = nnx.jit(partial(collect, config))(keys, agents)
         # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
