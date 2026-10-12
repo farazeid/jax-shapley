@@ -6,6 +6,7 @@
 original name with the 2-2-2 defaults; every 2-2-2 random draw is unchanged.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, overload
 
 import jax
@@ -40,6 +41,7 @@ class MastermindParams(environment.EnvParams):
     max_steps_in_episode: int = 2
 
 
+@dataclass(frozen=True, slots=True)
 class Mastermind(TypedEnvironment[MastermindState, MastermindParams]):
     """FastSVERL's code-breaking game: guess a `code_size`-peg code over `num_pegs` colours in `num_guesses`.
 
@@ -47,13 +49,13 @@ class Mastermind(TypedEnvironment[MastermindState, MastermindParams]):
     reward is -1 per guess, plus `num_guesses` on the winning guess.
     """
 
-    def __init__(self, code_size: int = 2, num_guesses: int = 2, num_pegs: int = 2) -> None:
-        super().__init__()
-        if code_size < 1 or num_guesses < 1 or num_pegs < 2:
+    code_size: int = 2
+    num_guesses: int = 2
+    num_pegs: int = 2
+
+    def __post_init__(self) -> None:
+        if self.code_size < 1 or self.num_guesses < 1 or self.num_pegs < 2:
             raise ValueError("Mastermind needs code_size >= 1, num_guesses >= 1 and num_pegs >= 2")
-        self.code_size = code_size
-        self.num_guesses = num_guesses
-        self.num_pegs = num_pegs
 
     @property
     def default_params(self) -> MastermindParams:

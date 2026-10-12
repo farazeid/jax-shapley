@@ -1,6 +1,7 @@
 """JAX port of FastSVERL's deterministic 2 x 4 Gridworld."""
 
-from typing import TYPE_CHECKING, overload
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar, overload
 
 import jax
 import jax.numpy as jnp
@@ -32,12 +33,13 @@ class GridworldParams(environment.EnvParams):
     max_steps_in_episode: int = 2**31 - 1
 
 
+@dataclass(frozen=True, slots=True)
 class Gridworld(TypedEnvironment[GridworldState, GridworldParams]):
     """FastSVERL-compatible Gridworld (registered there as ``GWB-v0``)."""
 
-    _action_deltas: jax.Array = jnp.asarray([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.int32)
-    _starts: jax.Array = jnp.asarray([[0, 0], [1, 0]], dtype=jnp.int32)
-    _blocked: jax.Array = jnp.asarray([0, 1], dtype=jnp.int32)
+    _action_deltas: ClassVar[jax.Array] = jnp.asarray([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.int32)
+    _starts: ClassVar[jax.Array] = jnp.asarray([[0, 0], [1, 0]], dtype=jnp.int32)
+    _blocked: ClassVar[jax.Array] = jnp.asarray([0, 1], dtype=jnp.int32)
 
     @property
     def default_params(self) -> GridworldParams:

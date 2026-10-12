@@ -1,5 +1,6 @@
 """JAX port of FastSVERL's obstacle-free Hypercube environment."""
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, overload
 
 import jax
@@ -32,18 +33,18 @@ class HypercubeParams(environment.EnvParams):
     max_steps_in_episode: int = 2**31 - 1
 
 
+@dataclass(frozen=True, slots=True)
 class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
     """An obstacle-free ``n``-sided, ``d``-dimensional gridworld."""
 
-    def __init__(self, side_length: int, dimension: int) -> None:
-        if side_length not in range(2, 7):
+    side_length: int
+    dimension: int
+
+    def __post_init__(self) -> None:
+        if self.side_length not in range(2, 7):
             raise ValueError("side_length must be one of the paper values 2, 3, 4, 5, or 6")
-        if dimension not in range(2, 6):
+        if self.dimension not in range(2, 6):
             raise ValueError("dimension must be one of the paper values 2, 3, 4, or 5")
-        self.side_length = side_length
-        self.dimension = dimension
-        self._start = jnp.zeros(dimension, dtype=jnp.int32)
-        self._goal = jnp.full(dimension, side_length - 1, dtype=jnp.int32)
 
     @property
     def default_params(self) -> HypercubeParams:
@@ -56,7 +57,7 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
     ) -> tuple[Observation, HypercubeState]:
         del key, params
         state = HypercubeState(
-            position=self._start,
+            position=jnp.zeros(self.dimension, dtype=jnp.int32),
             terminated=jnp.asarray(False),
             time=jnp.asarray(0, dtype=jnp.int32),
         )
@@ -76,7 +77,7 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
         candidate = state.position.at[axis].add(direction)
         valid = jnp.all((candidate >= 0) & (candidate < self.side_length))
         position = jnp.where(valid, candidate, state.position)
-        terminated = jnp.all(position == self._goal)
+        terminated = jnp.all(position == jnp.full(self.dimension, self.side_length - 1, dtype=jnp.int32))
         reward = jnp.where(terminated, float(self.side_length * self.dimension - 1), -1.0).astype(jnp.float32)
         next_state = HypercubeState(
             position=position,
@@ -104,8 +105,8 @@ class Hypercube(TypedEnvironment[HypercubeState, HypercubeParams]):
             state,
             side_length=self.side_length,
             dimension=self.dimension,
-            start=self._start,
-            goal=self._goal,
+            start=jnp.zeros(self.dimension, dtype=jnp.int32),
+            goal=jnp.full(self.dimension, self.side_length - 1, dtype=jnp.int32),
             config=render_config,
         )
 
