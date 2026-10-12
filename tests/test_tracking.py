@@ -95,7 +95,9 @@ def test_live_logs_equal_the_returned_metrics() -> None:
     keys, buffers = nnx.jit(partial(characteristic.collect, stage))(keys, agents)
     max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
     epochs: list[EpochMetrics] = []
-    _, returned = nnx.jit(partial(characteristic.fit, stage, max_unique, epochs.append))(keys, agents, buffers)
+    _, returned = nnx.jit(
+        partial(characteristic.fit, stage, characteristic.targets, characteristic.head, max_unique, epochs.append)
+    )(keys, agents, buffers)
     jax.effects_barrier()
     active = np.asarray(returned.active).any(axis=1)
     assert len(epochs) == int(active.sum())
@@ -107,8 +109,16 @@ def test_live_logs_equal_the_returned_metrics() -> None:
 def test_stage_checkpoints_restore_the_whole_state(tmp_path: Path, result: ExperimentResult) -> None:
     stages = (
         ("agent", result.dqn_state, stack_seeds([dqn.initialize(CONFIG.algorithm, jax.random.key(0))])),
-        ("characteristic", result.characteristic_state, characteristic.initialize(CONFIG.characteristic)),
-        ("shapley", result.shapley[0][0], shapley.initialize(CONFIG.shapley[0], CONFIG.characteristic)),
+        (
+            "characteristic",
+            result.characteristic_state,
+            characteristic.initialize(CONFIG.characteristic, characteristic.head),
+        ),
+        (
+            "shapley",
+            result.shapley[0][0],
+            shapley.initialize(CONFIG.shapley[0], CONFIG.characteristic, characteristic.head),
+        ),
     )
     for name, state, template in stages:
         checkpoints.save(tmp_path / name, state, {"stage": name})

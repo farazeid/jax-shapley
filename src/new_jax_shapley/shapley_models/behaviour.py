@@ -1,11 +1,13 @@
-"""Step 4: Shapley models, phi(s) learnt against a frozen characteristic (behaviour; shared with others).
+"""Step 4: behaviour Shapley models, phi(s) learnt against a frozen characteristic; the shared stage.
 
 A Shapley model maps a full state to per-feature contributions of shape
 (..., features, outputs). Following FastSHAP, it is trained by weighted least squares:
 for a Shapley-kernel coalition C, sum_{i in C} phi_i(s) ~ v(s, C) - v(s, empty). An
 additive correction then makes contributions sum to v(s, F) - v(s, empty). The
 reference is FastSVERL's `Shapley` and its Policy, Value and Performance subclasses,
-which differ only in the characteristic they explain.
+which differ only in the characteristic they explain: `stage`, `fit`, `initialize`, `loss`,
+`explain` and `exact_shapley` are shared with the other kinds, which supply their
+characteristic kind's `targets` and `head`.
 """
 
 from __future__ import annotations
@@ -35,8 +37,12 @@ from new_jax_shapley.backends import Track
 from new_jax_shapley.characteristic_models.behaviour import (
     CharacteristicConfig,
     CharacteristicModel,
+    Head,
+    Targets,
     UniqueValues,
     exact_characteristic,
+    head,
+    targets,
 )
 from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.coalitions import MASK, Observations, coalition_table, kernel_coalitions, mask
@@ -140,7 +146,26 @@ def main(
     characteristic: CharacteristicModel,
     characteristic_buffers: StateBuffers,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
+    """Behaviour Shapley models explaining one frozen behaviour characteristic."""
+    if explained.kind != "behaviour":
+        raise ValueError("the behaviour stage explains a behaviour characteristic")
+    return stage(config, explained, agent, characteristic, characteristic_buffers, targets, head, "PolicyShapley")
+
+
+def stage(
+    config: ShapleyConfig,
+    explained: CharacteristicConfig,
+    agent: Agent,
+    characteristic: CharacteristicModel,
+    characteristic_buffers: StateBuffers,
+    targets: Targets,
+    head: Head,
+    model: str,
+) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
     """Train (or load) every seed explaining one frozen characteristic (the paper protocol).
+
+    `targets` and `head` are the explained characteristic kind's; `model` is the source's
+    model class name that prefixes the logged tags.
 
     `explained` is the characteristic's config. With a backend each seed logs the source's
     `model/{Policy,Value}Shapley_*` scalars into its own run, and the whole seed-stacked
@@ -155,7 +180,7 @@ def main(
     # Exact tables are sized by the unique observations in the exact buffer (a static shape).
     max_unique = int(np.unique(np.asarray(characteristic_buffers.exact), axis=0).shape[0])
     if config.track is None:
-        program = nnx.jit(partial(fit, config, explained, max_unique, None))
+        program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, None))
         return program(keys, agents, characteristics, inherited)
     group = config.group or f"{config.name}-{time_ns()}"
     exactness = "with-exact" if config.with_exact_char else "without-exact"
@@ -180,7 +205,7 @@ def main(
         try:
             if config.checkpoint is not None:
                 directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
-                return checkpoints.load(Path(directory), initialize(config, explained), settings), None
+                return checkpoints.load(Path(directory), initialize(config, explained, head), settings), None
 
             def log(
                 runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics
@@ -200,9 +225,8 @@ def main(
                         row[f"model/{model}_exact_loss"] = float(exact[index])
                     run.log(row, step=int(steps[index]))
 
-            model = f"{'Policy' if explained.kind == 'behaviour' else 'Value'}Shapley"
             epoch_log = partial(log, runs, model, config.train.exact_loss)
-            program = nnx.jit(partial(fit, config, explained, max_unique, epoch_log))
+            program = nnx.jit(partial(fit, config, explained, targets, head, max_unique, epoch_log))
             state, metrics = program(keys, agents, characteristics, inherited)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
@@ -217,6 +241,8 @@ def main(
 def fit(
     config: ShapleyConfig,
     explained: CharacteristicConfig,
+    targets: Targets,
+    head: Head,
     max_unique: int,
     log: Callable[[EpochMetrics], None] | None,
     keys: Array,
@@ -260,12 +286,13 @@ def fit(
         partial(rollouts, config, explained, EpisodeStatisticsWrapper(config.env)), in_axes=(0, 0, 0), out_axes=(0, 0)
     )
     keys, buffers = collect(keys, agents, inherited)
-    state = initialize(config, explained, keys, buffers)
+    state = initialize(config, explained, head, keys, buffers)
     features = state.buffers.train.shape[-1]
 
     def context(
         config: ShapleyConfig,
         explained: CharacteristicConfig,
+        targets: Targets,
         max_unique: int,
         buffers: StateBuffers,
         agent: Agent,
@@ -273,17 +300,10 @@ def fit(
     ) -> ShapleyContext:
         if not config.train.exact_loss:
             return ShapleyContext(buffers, None)
-        # `v_F` on the exact buffer: the agent's greedy/explore policy, or its value for prediction.
-        q_values = agent.model(buffers.exact).q_values
-        if explained.kind == "prediction":
-            targets = jnp.max(q_values, axis=-1, keepdims=True)
-        else:
-            ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
-            targets = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
-            if explained.policy == "explore":
-                targets = agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * targets
         coalitions = jnp.asarray(coalition_table(buffers.exact.shape[-1]))
-        exact = exact_characteristic(buffers.exact, targets, coalitions, max_unique=max_unique)
+        exact = exact_characteristic(
+            buffers.exact, targets(explained, agent, buffers.exact), coalitions, max_unique=max_unique
+        )
         # Training always uses the learnt characteristic; with_exact_char only changes the ground truth.
         values = (
             exact.at_states
@@ -292,7 +312,7 @@ def fit(
         )
         return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 
-    contexts = nnx.vmap(partial(context, config, explained, max_unique), in_axes=(0, 0, 0), out_axes=0)(
+    contexts = nnx.vmap(partial(context, config, explained, targets, max_unique), in_axes=(0, 0, 0), out_axes=0)(
         state.buffers, agents, characteristics
     )
     return train(state, contexts, characteristics, loss, config.train, features, log)
@@ -301,6 +321,7 @@ def fit(
 def initialize(
     config: ShapleyConfig,
     explained: CharacteristicConfig,
+    head: Head,
     keys: Array | None = None,
     buffers: StateBuffers | None = None,
 ) -> TrainState[ShapleyModel]:
@@ -315,8 +336,8 @@ def initialize(
     if len(shape) != 1:
         raise ValueError("explanations require flat observations")
     features = int(shape[0])
-    # One contribution per feature and action (behaviour) or per feature (prediction).
-    outputs = wrapped.num_actions if explained.kind == "behaviour" else 1
+    # One contribution per feature and explained output (the characteristic head's width).
+    outputs = head(wrapped.num_actions).features
     hidden = tuple(LayerConfig(width, "relu") for width in config.hidden_widths)
     network = MLPConfig(features, (*hidden, LayerConfig(features * outputs)))
     training = config.train

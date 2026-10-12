@@ -32,9 +32,11 @@ from flax import nnx
 from new_jax_shapley import backends
 from new_jax_shapley.algorithms import dqn
 from new_jax_shapley.characteristic_models import behaviour as characteristic
+from new_jax_shapley.characteristic_models import prediction as characteristic_prediction
 from new_jax_shapley.common.supervised_learning import EpochMetrics, TrainState, seed_slice, stack_seeds
 from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.shapley_models import behaviour as shapley
+from new_jax_shapley.shapley_models import prediction as shapley_prediction
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,14 +100,18 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
     dqn_state, dqn_metrics, agents = dqn.main(algorithm)
 
     # 2-3. Train characteristic models explaining them.
-    characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents)
+    if characteristic_config.kind == "behaviour":
+        characteristic_state, characteristic_metrics = characteristic.main(characteristic_config, agents)
+    else:
+        characteristic_state, characteristic_metrics = characteristic_prediction.main(characteristic_config, agents)
 
     # 4. Train Shapley models explaining characteristic seed `explained_seed` (and its agent).
     index = characteristic_config.seeds.index(config.explained_seed)
     explained = seed_slice(characteristic_state, index)
     agent = seed_slice(agents, index if len(algorithm.seeds) > 1 else 0)
+    shapley_main = shapley.main if characteristic_config.kind == "behaviour" else shapley_prediction.main
     shapley_results = tuple(
-        shapley.main(stage, characteristic_config, agent, explained.model, explained.buffers)
+        shapley_main(stage, characteristic_config, agent, explained.model, explained.buffers)
         for stage in shapley_configs
     )
     return ExperimentResult(dqn_state, dqn_metrics, characteristic_state, characteristic_metrics, shapley_results)
@@ -123,19 +129,26 @@ def compile_stages(config: ExperimentConfig) -> None:
     program = nnx.jit(partial(dqn.train, algorithm, lambda seed, metrics: None, lambda seed, metrics: None))
     program.trace(key, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile()
 
+    targets, head = (
+        (characteristic.targets, characteristic.head)
+        if stage.kind == "behaviour"
+        else (characteristic_prediction.targets, characteristic_prediction.head)
+    )
     seeds = len(stage.seeds)
     keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
     agent = dqn.trained_agent(algorithm, dqn.initialize(algorithm, jax.random.key(0)))
     agents = stack_seeds([agent] * seeds)
-    template = characteristic.initialize(stage)
+    template = characteristic.initialize(stage, head)
     nnx.jit(partial(characteristic.collect, stage)).trace(keys, agents).lower().compile()
-    program = nnx.jit(partial(characteristic.fit, stage, stage.train.exact_size, lambda metrics: None))
+    program = nnx.jit(partial(characteristic.fit, stage, targets, head, stage.train.exact_size, lambda metrics: None))
     program.trace(keys, agents, template.buffers).lower().compile()
 
     explained = seed_slice(template, 0)
     for shapley_config in config.shapley:
         count = len(shapley_config.seeds)
-        program = nnx.jit(partial(shapley.fit, shapley_config, stage, stage.train.exact_size, lambda metrics: None))
+        program = nnx.jit(
+            partial(shapley.fit, shapley_config, stage, targets, head, stage.train.exact_size, lambda metrics: None)
+        )
         program.trace(
             jax.ShapeDtypeStruct((count,), key.dtype),
             stack_seeds([agent] * count),

@@ -168,6 +168,8 @@ uv run python -m new_jax_shapley.main mastermind222_behaviour
 uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb --shapley.1.train.epochs 9
 ```
 
+`experiments/NAME.sh` runs one experiment, compiling every stage first (`--compile-only`); `experiments/smoke.sh NAME` runs it shrunk to a few updates per stage. Explanation kinds live in one module each (`characteristic_models/` and `shapley_models/`: `behaviour.py`, `prediction.py`), the behaviour module holding the stage the other kinds share.
+
 - Each stage takes only its config and tracks itself. Its runs are named `NAME--STAGE--VARIANT`, with `--seed-N` per explanation seed: `NAME--algorithm--dqn--seed-1`, `NAME--characteristic--behaviour--seed-1`, `NAME--shapley--behaviour--with-exact--seed-1`. One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
 - The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
 - Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.

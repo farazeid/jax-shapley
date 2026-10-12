@@ -226,14 +226,14 @@ def load_explainer(args: Args, configs: dict[str, ExperimentConfig]) -> Explaine
             directory = run.use_artifact(reference).download(root=str(root / "characteristic"))
             characteristics = checkpoints.load(
                 Path(directory),
-                characteristic.initialize(explained),
+                characteristic.initialize(explained, characteristic.head),
                 {"stage": "characteristic", "env": env.name, "config": explained_settings},
             )
             reference = f"{group}--shapley--{explained.kind}--{exactness}:latest"
             directory = run.use_artifact(reference).download(root=str(root / "shapley"))
             shapleys = checkpoints.load(
                 Path(directory),
-                shapley.initialize(stage, explained),
+                shapley.initialize(stage, explained, characteristic.head),
                 {"stage": "shapley", "env": env.name, "explained": explained_settings, "config": shapley_settings},
             )
         finally:
