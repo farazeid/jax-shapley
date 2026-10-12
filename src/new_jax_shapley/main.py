@@ -49,7 +49,9 @@ class ExperimentResult:
     characteristic_state: TrainState[characteristic.CharacteristicModel]
     characteristic_metrics: EpochMetrics | None
     shapley: tuple[tuple[TrainState[shapley.ShapleyModel], EpochMetrics | None], ...]
-    outcome_state: TrainState[characteristic_outcome.OutcomeNetworks] | None = None
+    outcome_state: TrainState[characteristic_outcome.OutcomeNetworks] | characteristic_outcome.OnPolicyState | None = (
+        None
+    )
     outcome_metrics: EpochMetrics | None = None
 
 
@@ -112,8 +114,14 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
             replay,
         )
         outcome_index = outcome_config.seeds.index(characteristic_config.seeds[index])
+        stacked = (
+            outcome_state.networks
+            if isinstance(outcome_state, characteristic_outcome.OnPolicyState)
+            else outcome_state.model
+        )
+        networks = seed_slice(stacked, outcome_index)
         outcome_explained = characteristic_outcome.OutcomeExplained(
-            seed_slice(agents, agent_index), behaviour.model, seed_slice(outcome_state, outcome_index).model
+            seed_slice(agents, agent_index), behaviour.model, networks
         )
 
     # 4. Train Shapley models explaining characteristic (or outcome) seed `explained_seed` and its agent,
