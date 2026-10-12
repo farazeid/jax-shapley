@@ -18,7 +18,27 @@ from jaxtyping import Float, Int
 
 type Features = Float[Array, "... features"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 type ModelInput = Int[Array, "... features"] | Features  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
-type Activation = Literal["identity", "relu", "softmax"]
+type Activation = Literal["identity", "relu", "tanh", "softmax"]
+
+
+@dataclass(frozen=True, slots=True)
+class TorchLinearInit:
+    """PyTorch Linear default: kernel and bias uniform in ±1/sqrt(fan_in)."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrthogonalInit:
+    """FastSVERL's explicit layer_init override: orthogonal kernel, constant bias."""
+
+    gain: float = 1.0
+    bias: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.gain) or not isfinite(self.bias):
+            raise ValueError("orthogonal initialization gain and bias must be finite")
+
+
+type LinearInit = TorchLinearInit | OrthogonalInit
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,11 +47,12 @@ class LayerConfig:
 
     features: int
     activation: Activation = "identity"
+    initialization: LinearInit = TorchLinearInit()
 
     def __post_init__(self) -> None:
         if self.features < 1:
             raise ValueError("layer features must be positive")
-        if self.activation not in ("identity", "relu", "softmax"):
+        if self.activation not in ("identity", "relu", "tanh", "softmax"):
             raise ValueError("unsupported activation")
 
 
@@ -74,7 +95,7 @@ class MLP(nnx.Module):
         self.config = config
         widths = (config.input_features, *(layer.features for layer in config.layers))
         self.layers: nnx.List[Linear] = nnx.List(
-            Linear(width, layer.features, rngs=rngs) for width, layer in zip(widths[:-1], config.layers, strict=True)
+            Linear(width, layer, rngs=rngs) for width, layer in zip(widths[:-1], config.layers, strict=True)
         )
 
     def __call__(self, observations: ModelInput) -> Features:
@@ -88,18 +109,29 @@ class MLP(nnx.Module):
             outputs = outputs @ layer.kernel[...] + layer.bias[...]
             if config.activation == "relu":
                 outputs = jax.nn.relu(outputs)
+            elif config.activation == "tanh":
+                outputs = jnp.tanh(outputs)
             elif config.activation == "softmax":
                 outputs = jax.nn.softmax(outputs, axis=-1)
         return outputs
 
 
 class Linear(nnx.Module):
-    """Affine layer with PyTorch Linear's default initialization: uniform in ±1/sqrt(fan_in)."""
+    """Affine layer with upstream-compatible initialization: PyTorch Linear's default, or orthogonal."""
 
-    def __init__(self, input_features: int, output_features: int, *, rngs: nnx.Rngs) -> None:
+    def __init__(self, input_features: int, config: LayerConfig, *, rngs: nnx.Rngs) -> None:
         kernel_key, bias_key = rngs.params(), rngs.params()
-        bound = 1.0 / sqrt(input_features)
-        kernel = jax.random.uniform(kernel_key, (input_features, output_features), jnp.float32, -bound, bound)
-        bias = jax.random.uniform(bias_key, (output_features,), jnp.float32, -bound, bound)
+        if isinstance(config.initialization, OrthogonalInit):
+            # Torch initializes (out, in); retain that orientation before transposing.
+            kernel = jax.nn.initializers.orthogonal(config.initialization.gain)(
+                kernel_key, (config.features, input_features), jnp.float32
+            ).T
+            bias = jnp.full((config.features,), config.initialization.bias, dtype=jnp.float32)
+        else:
+            bound = 1.0 / sqrt(input_features)
+            kernel = jax.random.uniform(
+                kernel_key, (input_features, config.features), jnp.float32, minval=-bound, maxval=bound
+            )
+            bias = jax.random.uniform(bias_key, (config.features,), jnp.float32, minval=-bound, maxval=bound)
         self.kernel: nnx.Param[Array] = nnx.Param(kernel)
         self.bias: nnx.Param[Array] = nnx.Param(bias)
