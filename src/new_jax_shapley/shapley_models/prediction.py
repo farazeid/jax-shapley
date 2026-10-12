@@ -37,4 +37,5 @@ def main(
         prediction.head,
         settings,
         "ValueShapley",
+        explained.kind,
     )

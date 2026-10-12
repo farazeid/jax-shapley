@@ -174,6 +174,7 @@ def main(
         head,
         settings,
         "PolicyShapley",
+        explained.kind,
     )
 
 
@@ -187,15 +188,16 @@ def stage[Frozen](
     head: Head,
     explained_settings: dict[str, object],
     model: str,
+    kind: str,
 ) -> tuple[TrainState[ShapleyModel], EpochMetrics | None]:
     """Train (or load) every seed explaining frozen characteristics, tracked by `config.track`.
 
     The agents, frozen characteristics and their buffers are seed-stacked, one per Shapley
     seed: the same one repeated (the paper protocol), or Shapley seed s explaining
-    characteristic seed s and its agent. `explained` is the characteristic stage's config
-    (its kind names the runs); `fit` is the explained kind's compiled training, `head` its
+    characteristic seed s and its agent. `explained` is the characteristic stage's config;
+    `fit` is the explained kind's compiled training, `head` its
     output layer and `explained_settings` what its checkpoint records about it; `model` is
-    the source's model class name that prefixes the logged tags. With a backend each seed
+    the source's model class name that prefixes the logged tags, and `kind` names the runs. With a backend each seed
     logs the source's `model/{Policy,Value,Performance}Shapley_*` scalars into its own run,
     and the whole seed-stacked final state is pushed as one Orbax checkpoint artifact. The
     returned state and metrics carry a leading seed axis (metrics: (epochs, seeds); None
@@ -213,7 +215,7 @@ def stage[Frozen](
         return program(keys, agents, frozen, inherited)
     group = config.group or f"{config.name}-{time_ns()}"
     exactness = "with-exact" if config.with_exact_char else "without-exact"
-    artifact = f"{group}--shapley--{explained.kind}--{exactness}"
+    artifact = f"{group}--shapley--{kind}--{exactness}"
     settings = {
         "stage": "shapley",
         "env": config.env.name,
@@ -225,7 +227,7 @@ def stage[Frozen](
         runs = tuple(
             tracking.init(
                 project=config.project,
-                name=f"{config.name}--shapley--{explained.kind}--{exactness}--seed-{seed}",
+                name=f"{config.name}--shapley--{kind}--{exactness}--seed-{seed}",
                 group=group,
                 config={**asdict(config), "seed": seed},
             )
