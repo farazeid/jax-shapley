@@ -1,9 +1,9 @@
-"""Off-policy outcome characteristics and their Shapley models (new_jax_shapley) reproduce jax_shapley bitwise.
+"""Outcome characteristics and their Shapley models (new_jax_shapley) reproduce jax_shapley bitwise.
 
-Mastermind-222 at small scale: an agent, a behaviour characteristic sweep, off-policy outcome
-characteristics conditioned on behaviour seed 1 (exact values conditioned on the exact or the
-learnt behaviour characteristic), and Shapley models explaining outcome seed 1 against the
-exact or the learnt outcome values.
+At small scale: an agent, a behaviour characteristic sweep, off-policy (Mastermind-222) or
+on-policy (Mastermind-222, Gridworld) outcome characteristics conditioned on behaviour seed 1
+(exact values conditioned on the exact or the learnt behaviour characteristic), and Shapley
+models explaining outcome seed 1 against the exact or the learnt outcome values.
 """
 
 import csv
@@ -15,18 +15,26 @@ import pytest
 from jax_shapley import train_dqn, train_explanations
 from new_jax_shapley.algorithms.dqn import DQNConfig
 from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
-from new_jax_shapley.characteristic_models.outcome import OutcomeConfig, OutcomeTrainConfig
+from new_jax_shapley.characteristic_models.outcome import OutcomeConfig, OutcomeTrainConfig, Variant
 from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig
-from new_jax_shapley.envs import Mastermind
+from new_jax_shapley.envs import Gridworld, Mastermind
 from new_jax_shapley.experiment import ExperimentConfig
 from new_jax_shapley.main import ExperimentResult, run
 from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
 
 SEEDS = (1, 2)
 WIDTHS = (16, 16)
-ENV = Mastermind(2, 2, 2)
 TRAINING = SupervisedConfig(epochs=3, batch_size=16, buffer_size=160, num_envs=4)
-OUTCOME = OutcomeTrainConfig(epochs=3, batch_size=16, train_size=512, validation_size=40)
+OUTCOME = OutcomeTrainConfig(
+    epochs=3, batch_size=16, train_size=512, validation_size=40, total_timesteps=480, num_envs=4
+)
+# Environment, outcome variant and whether exact outcome values condition on the exact behaviour.
+CASES: list[tuple[str, Variant, bool]] = [
+    ("mastermind222", "off_policy", True),
+    ("mastermind222", "off_policy", False),
+    ("mastermind222", "on_policy", True),
+    ("gridworld", "on_policy", False),
+]
 
 
 def test_outcome_matches_the_current_cli(pipelines: tuple[ExperimentResult, Path]) -> None:
@@ -42,16 +50,17 @@ def test_outcome_shapley_matches_the_current_cli(
     _assert_epochs(_single(root / f"shapley-{exact}"), result.shapley[index][1])
 
 
-@pytest.fixture(scope="module", params=[True, False], ids=["exact-behaviour", "learnt-behaviour"])
+@pytest.fixture(scope="module", params=CASES, ids=["-".join(map(str, case)) for case in CASES])
 def pipelines(
     request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
 ) -> tuple[ExperimentResult, Path]:
     """The new pipeline in process, and the current CLIs with the same settings."""
-    with_exact_char: bool = request.param
+    environment, variant, with_exact_char = request.param
+    env = Mastermind(2, 2, 2) if environment == "mastermind222" else Gridworld()
     config = ExperimentConfig(
         name="test_outcome",
         algorithm=DQNConfig(
-            env=ENV,
+            env=env,
             hidden_widths=WIDTHS,
             num_envs=4,
             total_timesteps=1024,
@@ -60,19 +69,25 @@ def pipelines(
             batch_size=16,
             exploration_fraction=0.25,
         ),
-        characteristic=CharacteristicConfig(env=ENV, hidden_widths=WIDTHS, seeds=SEEDS, train=TRAINING),
+        characteristic=CharacteristicConfig(env=env, hidden_widths=WIDTHS, seeds=SEEDS, train=TRAINING),
         outcome=OutcomeConfig(
-            env=ENV, with_exact_char=with_exact_char, tau=0.01, hidden_widths=WIDTHS, seeds=SEEDS, train=OUTCOME
+            env=env,
+            variant=variant,
+            with_exact_char=with_exact_char,
+            tau=0.01,
+            hidden_widths=WIDTHS,
+            seeds=SEEDS,
+            train=OUTCOME,
         ),
         shapley=tuple(
-            ShapleyConfig(env=ENV, hidden_widths=WIDTHS, with_exact_char=exact, seeds=SEEDS, train=TRAINING)
+            ShapleyConfig(env=env, hidden_widths=WIDTHS, with_exact_char=exact, seeds=SEEDS, train=TRAINING)
             for exact in (True, False)
         ),
     )
     root = tmp_path_factory.mktemp("old")
     dqn = config.algorithm
     train_dqn.main([
-        "mastermind222",
+        environment,
         "--seed",
         "1",
         "--hidden-widths",
@@ -126,7 +141,7 @@ def pipelines(
         "--characteristic",
         str(_single(root / "characteristic") / "seed-1"),
         "--variant",
-        "off_policy",
+        variant,
         f"--{'' if with_exact_char else 'no-'}with-exact-char",
         "--tau",
         "0.01",
@@ -142,6 +157,10 @@ def pipelines(
         str(OUTCOME.train_size),
         "--train.validation-size",
         str(OUTCOME.validation_size),
+        "--train.total-timesteps",
+        str(OUTCOME.total_timesteps),
+        "--train.num-envs",
+        str(OUTCOME.num_envs),
         "--output",
         str(root / "outcome"),
     ])
@@ -168,7 +187,8 @@ def _assert_epochs(sweep: Path, metrics: EpochMetrics | None) -> None:
     active = np.asarray(metrics.active)
     for index, seed in enumerate(SEEDS):
         rows = list(csv.DictReader((sweep / f"seed-{seed}" / "metrics.csv").open()))
-        old = np.asarray([[float(row[name]) for name in names] for row in rows])
+        # On-policy rows leave the losses the source does not log empty.
+        old = np.asarray([[float(row[name] or "nan") for name in names] for row in rows])
         epochs = np.flatnonzero(active[:, index])
         new = np.stack([np.asarray(getattr(metrics, name))[epochs, index] for name in names], axis=1)
         np.testing.assert_array_equal(new, old)

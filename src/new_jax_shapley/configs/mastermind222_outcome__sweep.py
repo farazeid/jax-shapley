@@ -2,16 +2,17 @@
 
 Pinned from FastSVERL 25b2cbe: `experiments/fastsverl/agents/dqn_mastermind.py` (agent),
 `characteristics/dqn_policy_mastermind.py` (the behaviour characteristic sweep),
-`characteristics/dqn_performance_mastermind.py` (off-policy) and
-`shapleys/dqn_performance_mastermind.py`. 20 outcome seeds condition on behaviour
-characteristic seed 1 and learn from the agent's replay; 20 Shapley seeds explain outcome
-seed 1 against the exact outcome values and against the learnt ones. The paper's groups:
-w_policy (exact behaviour, exact outcome values), wo_policy (learnt behaviour, exact
-outcome values) and wo_perf (learnt behaviour, learnt outcome values).
+`characteristics/dqn_performance_mastermind.py` and `shapleys/dqn_performance_mastermind.py`.
+20 outcome seeds condition on behaviour characteristic seed 1 and learn off-policy from the
+agent's replay or on-policy by acting (200,000 steps over 16 environments); 20 Shapley
+seeds explain outcome seed 1 against the exact outcome values and against the learnt ones.
+The paper's Shapley groups explain the off-policy outcome: w_policy (exact behaviour, exact
+outcome values), wo_policy (learnt behaviour, exact outcome values) and wo_perf (learnt
+behaviour, learnt outcome values).
 
 Swept (MISSING here, supplied by `experiments/mastermind222_outcome__sweep.sh`): the outcome
-stage's `with-exact-char`, which conditions the exact outcome values on the exact or the
-learnt behaviour characteristic.
+stage's `variant` and `with-exact-char`, which conditions the exact outcome values on the
+exact or the learnt behaviour characteristic.
 """
 
 import tyro
@@ -65,11 +66,11 @@ CONFIG = ExperimentConfig(
     characteristic=CharacteristicConfig(
         env=ENV, kind="behaviour", policy="greedy", hidden_widths=(64, 64), seeds=SEEDS, train=explanation_training(50)
     ),
-    # Source outcome settings: 200,000 steps over 16 environments sample batches of 64 from
-    # the first 100,000 replay transitions, so epochs = 200,000 * 64 // 100,000.
+    # Source outcome settings: off-policy, 200,000 steps' worth of batches of 64 from the first
+    # 100,000 replay transitions, so epochs = 200,000 * 64 // 100,000.
     outcome=OutcomeConfig(
         env=ENV,
-        variant="off_policy",
+        variant=tyro.MISSING,
         with_exact_char=tyro.MISSING,
         tau=0.01,
         gamma=1.0,
@@ -83,6 +84,8 @@ CONFIG = ExperimentConfig(
             validation_size=160,
             exact_loss=True,
             track_batch=True,
+            total_timesteps=200_000,
+            num_envs=16,
         ),
     ),
     shapley=tuple(

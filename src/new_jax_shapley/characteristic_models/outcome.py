@@ -35,7 +35,16 @@ from jax import Array
 from jaxtyping import Bool, Float, Int
 
 from new_jax_shapley import backends
-from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS, Agent, Env, TransitionBatch
+from new_jax_shapley.algorithms.dqn import (
+    LOG_STEPS,
+    TRACKING_FIELDS,
+    Agent,
+    Env,
+    EnvParams,
+    EnvState,
+    TransitionBatch,
+    environment_step,
+)
 from new_jax_shapley.backends import Track
 from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel, Values, targets
 from new_jax_shapley.common import checkpoints
@@ -51,7 +60,7 @@ from new_jax_shapley.common.supervised_learning import (
     train,
 )
 from new_jax_shapley.common.tabular import ActionTable, TabularModel, policy_q_values, state_indices, transition_model
-from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
+from new_jax_shapley.envs.wrappers import EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 type Variant = Literal["off_policy", "on_policy"]
 type ExactTable = Float[Array, "coalitions unique"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
@@ -65,7 +74,9 @@ class OutcomeTrainConfig:
     """Source outcome settings, shared like the source's CharacteristicArgs.
 
     Off-policy runs use train_models over prefixes of the agent's replay: the first
-    `train_size` and `validation_size` transitions, so they overlap.
+    `train_size` and `validation_size` transitions, so they overlap. On-policy runs use
+    train_V_on_policy: `total_timesteps` environment steps across `num_envs` environments,
+    with a replay as large as the run.
     """
 
     epochs: int = 128
@@ -77,6 +88,10 @@ class OutcomeTrainConfig:
     exact_loss: bool = True
     exact_condition: float | None = None
     track_batch: bool = True
+    total_timesteps: int = 100_000
+    num_envs: int = 8
+    train_frequency: int = 1
+    target_network_frequency: int = 1
     adam: AdamConfig = field(default_factory=AdamConfig)
 
     def __post_init__(self) -> None:
@@ -89,6 +104,10 @@ class OutcomeTrainConfig:
             ("validation_size", self.validation_size),
             ("patience", self.epochs if self.patience is None else self.patience),
             ("batches", self.batches),
+            ("num_envs", self.num_envs),
+            ("train_frequency", self.train_frequency),
+            ("target_network_frequency", self.target_network_frequency),
+            ("vector steps (total_timesteps // num_envs)", self.vector_steps),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be positive")
@@ -104,6 +123,11 @@ class OutcomeTrainConfig:
     @property
     def patience_epochs(self) -> int:
         return self.epochs if self.patience is None else self.patience
+
+    @property
+    def vector_steps(self) -> int:
+        """On-policy loop length: the source's range(total_timesteps // num_envs)."""
+        return self.total_timesteps // max(self.num_envs, 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +197,44 @@ class OutcomeContext:
     exact: ExactOutcome | None
 
 
+@struct.dataclass
+class ConditionedReplay:
+    """On-policy experience and the (e, C) each decision was conditioned on (source V.buffer with e_obs, C)."""
+
+    transitions: TransitionBatch
+    explained: Array
+    coalitions: Array
+    pointer: Array
+    size: Array
+
+
+@struct.dataclass
+class OnPolicyState:
+    """Source train_V_on_policy loop state for one seed; `step` counts completed vector steps.
+
+    The final model is the last one (the source saves no best model on-policy).
+    """
+
+    networks: OutcomeNetworks
+    optimizer: nnx.Optimizer[OutcomeNetworks]
+    replay: ConditionedReplay
+    observations: Array
+    env_state: EpisodeStatisticsState[EnvState]
+    explained: Array
+    coalitions: Array
+    step: Array
+    stopped: Array
+    key: Array
+
+
+@struct.dataclass
+class OnPolicyContext:
+    """Per-seed constants: the behaviour characteristic's train buffer (the e_obs pool) and exact values."""
+
+    pool: Array
+    exact: ExactOutcome | None
+
+
 class OutcomeOutput(NamedTuple):
     values: Values
 
@@ -226,19 +288,19 @@ def main(
     behaviours: CharacteristicModel,
     behaviour_buffers: StateBuffers,
     replays: TransitionBatch,
-) -> tuple[TrainState[OutcomeNetworks], EpochMetrics | None]:
+) -> tuple[TrainState[OutcomeNetworks] | OnPolicyState, EpochMetrics | None]:
     """Train (or load) every seed's outcome characteristic, tracked by `config.track`.
 
     The agents, behaviour characteristics (and their buffers, whose exact buffer the exact
     values explain) and the agents' replays are seed-stacked, one per outcome seed.
-    `explained` is the behaviour characteristic's config. With a backend each seed logs the
-    source's `model/PerformanceCharacteristicOffPolicy_*` scalars into its own run, and the
-    whole seed-stacked final state is pushed as one Orbax checkpoint artifact.
+    `explained` is the behaviour characteristic's config. Off-policy runs learn from the
+    replays' prefixes; on-policy runs act and draw e from the behaviour characteristic's
+    train buffer. With a backend each seed logs the source's
+    `model/PerformanceCharacteristic{Off,On}Policy_*` scalars into its own run, and the whole
+    seed-stacked final state is pushed as one Orbax checkpoint artifact.
     """
     if explained.kind != "behaviour":
         raise ValueError("outcome characteristics condition on a behaviour characteristic")
-    if config.variant != "off_policy":
-        raise NotImplementedError("on-policy outcome characteristics are not ported yet")
     seeds = len(config.seeds)
     if agents.epsilon.shape[0] != seeds or behaviour_buffers.exact.shape[0] != seeds:
         raise ValueError("outcome inputs need one agent and behaviour characteristic per seed")
@@ -247,9 +309,15 @@ def main(
     keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
     # Exact values solve the environment's tabular MDP (host-side enumeration).
     tabular = transition_model(config.env) if config.train.exact_loss else None
+    off_policy = config.variant == "off_policy"
     if config.track is None:
-        program = nnx.jit(partial(fit, config, explained, tabular, None))
-        return program(keys, agents, behaviours, behaviour_buffers, replays)
+        if off_policy:
+            return nnx.jit(partial(fit, config, explained, tabular, None))(
+                keys, agents, behaviours, behaviour_buffers, replays
+            )
+        return nnx.jit(partial(fit_on_policy, config, explained, tabular, None))(
+            keys, agents, behaviours, behaviour_buffers
+        )
     group = config.group or f"{config.name}-{time_ns()}"
     variant = config.variant.replace("_", "-")
     exactness = "with-exact" if config.with_exact_char else "without-exact"
@@ -274,10 +342,16 @@ def main(
         try:
             if config.checkpoint is not None:
                 directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
-                return checkpoints.load(Path(directory), initialize(config, explained), settings), None
-            epoch_log = partial(log_epochs, runs, "PerformanceCharacteristicOffPolicy", config.train.exact_loss)
-            program = nnx.jit(partial(fit, config, explained, tabular, epoch_log))
-            state, metrics = program(keys, agents, behaviours, behaviour_buffers, replays)
+                template = initialize(config, explained) if off_policy else initialize_on_policy(config, explained)
+                return checkpoints.load(Path(directory), template, settings), None
+            model = f"PerformanceCharacteristic{'OffPolicy' if off_policy else 'OnPolicy'}"
+            epoch_log = partial(log_epochs, runs, model, config.train.exact_loss)
+            if off_policy:
+                program = nnx.jit(partial(fit, config, explained, tabular, epoch_log))
+                state, metrics = program(keys, agents, behaviours, behaviour_buffers, replays)
+            else:
+                program = nnx.jit(partial(fit_on_policy, config, explained, tabular, epoch_log))
+                state, metrics = program(keys, agents, behaviours, behaviour_buffers)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
             runs[0].log_artifact(str(directory), name=artifact, type="outcome").wait()
@@ -402,6 +476,349 @@ def initialize(
     return nnx.vmap(partial(seed, network, training), in_axes=(0, 0), out_axes=0)(keys, buffers)
 
 
+def fit_on_policy(
+    config: OutcomeConfig,
+    explained: CharacteristicConfig,
+    tabular: TabularModel | None,
+    log: Callable[[EpochMetrics], None] | None,
+    keys: Array,
+    agents: Agent,
+    behaviours: CharacteristicModel,
+    behaviour_buffers: StateBuffers,
+) -> tuple[OnPolicyState, EpochMetrics]:
+    """Source train_V_on_policy for every seed: act with pi_hat, store (e, C) with each step, learn V.
+
+    e_obs rows come from the behaviour characteristic's train buffer and one coalition is
+    shared by all environments; both are resampled every decision. A seed stops once its
+    exact loss falls below `exact_condition`; metrics have one row per vector step, active
+    where the source logs (learning steps crossing a multiple of 100 environment steps).
+    """
+    env = EpisodeStatisticsWrapper(config.env)
+    state = initialize_on_policy(config, explained, keys, behaviour_buffers.train)
+
+    def context(
+        config: OutcomeConfig,
+        explained: CharacteristicConfig,
+        tabular: TabularModel | None,
+        buffers: StateBuffers,
+        frozen: OutcomeFrozen,
+    ) -> OnPolicyContext:
+        if tabular is None:
+            return OnPolicyContext(buffers.train, None)
+        exact = exact_outcome(tabular, buffers.exact, frozen, explained, config.with_exact_char, config.gamma)
+        return OnPolicyContext(buffers.train, exact)
+
+    frozen = OutcomeFrozen(agents, behaviours)
+    contexts = nnx.vmap(partial(context, config, explained, tabular), in_axes=(0, 0), out_axes=0)(
+        behaviour_buffers, frozen
+    )
+
+    def seed_step(
+        config: OutcomeConfig,
+        explained: CharacteristicConfig,
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        state: OnPolicyState,
+        context: OnPolicyContext,
+        frozen: OutcomeFrozen,
+    ) -> tuple[OnPolicyState, EpochMetrics]:
+        """One source train_V_on_policy iteration for one seed, or a no-op once it has stopped."""
+        training = config.train
+        running = (state.step < training.vector_steps) & ~state.stopped
+        return nnx.cond(
+            running,
+            partial(on_policy_step, config, explained, env),
+            partial(skip_on_policy_step),
+            state,
+            context,
+            frozen,
+        )
+
+    # Frozen models ride in the scan carry: NNX transforms only accept graph nodes created at
+    # their own trace level as arguments.
+    type Carry = tuple[OnPolicyState, OutcomeFrozen]
+
+    def step(
+        config: OutcomeConfig,
+        explained: CharacteristicConfig,
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        contexts: OnPolicyContext,
+        log: Callable[[EpochMetrics], None] | None,
+        carry: Carry,
+        index: Array,
+    ) -> tuple[Carry, EpochMetrics]:
+        del index
+        state, frozen = carry
+        every_seed = nnx.vmap(partial(seed_step, config, explained, env), in_axes=(0, 0, 0), out_axes=(0, 0))
+        state, metrics = every_seed(state, contexts, frozen)
+        if log is not None:
+            jax.lax.cond(
+                jnp.any(metrics.active),
+                partial(jax.debug.callback, log, ordered=True),
+                lambda metrics: None,
+                metrics,
+            )
+        return (state, frozen), metrics
+
+    (trained, _), metrics = nnx.scan(
+        partial(step, config, explained, env, contexts, log), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
+    )((state, frozen), jnp.arange(config.train.vector_steps, dtype=jnp.int32))
+    return trained, metrics
+
+
+def on_policy_step(
+    config: OutcomeConfig,
+    explained: CharacteristicConfig,
+    env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+    state: OnPolicyState,
+    context: OnPolicyContext,
+    frozen: OutcomeFrozen,
+) -> tuple[OnPolicyState, EpochMetrics]:
+    """Act with pi_hat in every environment, store the step, redraw (e, C), learn V by TD(0) when due,
+    measure the exact loss when the source logs, and soft-update the target."""
+    training = config.train
+    global_step = state.step * training.num_envs
+    keys: Array = jax.random.split(state.key, 5)
+    probabilities = conditioned_policy(explained, frozen, state.observations, state.explained, state.coalitions)
+    actions = jax.random.categorical(keys[0], jnp.log(probabilities), axis=-1).astype(jnp.int32)
+    step_keys: Array = jax.random.split(keys[1], training.num_envs)
+    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+        step_keys, state.env_state, actions, env.default_params
+    )
+    # Insert in environment order, as the source Buffer.add does. Terminal rows store the
+    # pre-reset observation; the (1 - terminated) mask makes the source's stored reset
+    # observation equivalent.
+    replay = state.replay
+    capacity = replay.explained.shape[0]
+    rows = (replay.pointer + jnp.arange(training.num_envs, dtype=jnp.int32)) % capacity
+    inserted = TransitionBatch(
+        state.observations,
+        actions,
+        transition.rewards,
+        transition.raw_observations.astype(jnp.int32),
+        transition.terminated,
+        jnp.zeros(training.num_envs, jnp.float32),
+    )
+    stored = zip(jax.tree.leaves(replay.transitions), jax.tree.leaves(inserted), strict=True)
+    replay = ConditionedReplay(
+        TransitionBatch(*[storage.at[rows].set(values) for storage, values in stored]),
+        replay.explained.at[rows].set(state.explained),
+        replay.coalitions.at[rows].set(state.coalitions),
+        (replay.pointer + training.num_envs) % capacity,
+        jnp.minimum(replay.size + training.num_envs, capacity).astype(jnp.int32),
+    )
+    # The next decision's e_obs rows (with replacement) and one coalition for every environment.
+    draw_keys: Array = jax.random.split(keys[2])
+    pool = context.pool
+    explained_rows = pool[jax.random.randint(draw_keys[0], (training.num_envs,), 0, pool.shape[0])]
+    coalition = jax.random.bernoulli(draw_keys[1], 0.5, (1, pool.shape[-1]))
+    coalitions = jnp.broadcast_to(coalition, (training.num_envs, pool.shape[-1]))
+    learn = global_step % training.train_frequency < training.num_envs
+    sampled = jax.random.randint(keys[3], (training.batch_size,), 0, replay.size, dtype=jnp.int32)
+    batch = TransitionBatch(*[leaf[sampled] for leaf in jax.tree.leaves(replay.transitions)])
+
+    def learn_step(
+        gamma: float,
+        networks: OutcomeNetworks,
+        optimizer: nnx.Optimizer[OutcomeNetworks],
+        batch: TransitionBatch,
+        explained: Array,
+        coalitions: Array,
+    ) -> Array:
+        # NNX transformation has a dynamic return signature; assert its loss/gradient boundary.
+        value, gradients = cast(
+            tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+            nnx.value_and_grad(on_policy_loss)(networks, batch, explained, coalitions, gamma),
+        )
+        optimizer.update(networks, gradients)
+        return value
+
+    def skip_learn(
+        gamma: float,
+        networks: OutcomeNetworks,
+        optimizer: nnx.Optimizer[OutcomeNetworks],
+        batch: TransitionBatch,
+        explained: Array,
+        coalitions: Array,
+    ) -> Array:
+        del gamma, networks, optimizer, batch, explained, coalitions
+        return jnp.asarray(jnp.nan, jnp.float32)
+
+    loss_value = nnx.cond(
+        learn,
+        partial(learn_step, config.gamma),
+        partial(skip_learn, config.gamma),
+        state.networks,
+        state.optimizer,
+        batch,
+        replay.explained[sampled],
+        replay.coalitions[sampled],
+    )
+    logged = learn & (global_step % LOG_STEPS < training.num_envs)
+    exact = jnp.asarray(jnp.nan, jnp.float32)
+    if context.exact is not None:
+
+        def exact_loss(
+            config: OutcomeConfig,
+            explained: CharacteristicConfig,
+            exact: ExactOutcome,
+            frozen: OutcomeFrozen,
+            networks: OutcomeNetworks,
+        ) -> Array:
+            outcome = OutcomeExplained(frozen.agent, frozen.behaviour, networks)
+            return exact_values_loss(config, explained, outcome, exact)
+
+        exact = nnx.cond(
+            logged,
+            partial(exact_loss, config, explained, context.exact),
+            lambda frozen, networks: jnp.asarray(jnp.nan, jnp.float32),
+            frozen,
+            state.networks,
+        )
+    stopped = jnp.asarray(False)
+    if training.exact_condition is not None:
+        stopped = logged & (exact < training.exact_condition)
+    # The source breaks out of the loop before this step's target update.
+    target = (global_step % training.target_network_frequency < training.num_envs) & ~stopped
+
+    def soft_update(tau: float, networks: OutcomeNetworks) -> None:
+        for source, destination in zip(networks.model.mlp.layers, networks.target.mlp.layers, strict=True):
+            destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
+            destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
+
+    nnx.cond(target, partial(soft_update, config.tau), lambda networks: None, state.networks)
+    step = state.step + 1
+    next_state = OnPolicyState(
+        state.networks,
+        state.optimizer,
+        replay,
+        transition.observations.astype(jnp.int32),
+        transition.state,
+        explained_rows,
+        coalitions,
+        step,
+        stopped,
+        keys[4],
+    )
+    nothing = jnp.asarray(jnp.nan, jnp.float32)
+    return next_state, EpochMetrics(step, global_step, loss_value, nothing, exact, step, logged)
+
+
+def skip_on_policy_step(
+    state: OnPolicyState, context: OnPolicyContext, frozen: OutcomeFrozen
+) -> tuple[OnPolicyState, EpochMetrics]:
+    """A stopped seed's step: nothing changes, nothing is logged."""
+    del context, frozen
+    zero, nothing = jnp.asarray(0, jnp.int32), jnp.asarray(0.0, jnp.float32)
+    return state, EpochMetrics(zero, zero, nothing, nothing, nothing, zero, jnp.asarray(False))
+
+
+def initialize_on_policy(
+    config: OutcomeConfig, explained: CharacteristicConfig, keys: Array | None = None, pools: Array | None = None
+) -> OnPolicyState:
+    """Every seed's fresh on-policy state, seed-stacked: networks, optimizer, an empty replay as large
+    as the run, reset environments and a first (e, C) drawn from the pool.
+
+    Without keys and pools it is the template a checkpoint is restored into.
+    """
+    env = EpisodeStatisticsWrapper(config.env)
+    shape = env.observation_space(env.default_params).shape
+    if len(shape) != 1:
+        raise ValueError("explanations require flat observations")
+    features = int(shape[0])
+    hidden = tuple(LayerConfig(width, "relu") for width in config.hidden_widths)
+    network = MLPConfig(3 * features, (*hidden, LayerConfig(1)))
+    training = config.train
+    if keys is None:
+        keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
+    if pools is None:
+        pools = jnp.zeros((len(config.seeds), explained.train.train_size, features), jnp.int32)
+
+    def seed(
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        network: MLPConfig,
+        training: OutcomeTrainConfig,
+        key: Array,
+        pool: Array,
+    ) -> OnPolicyState:
+        keys: Array = jax.random.split(key, 4)
+        networks = OutcomeNetworks(network, rngs=nnx.Rngs(keys[0]))
+        adam = training.adam
+        # Torch Adam: constant rate, epsilon outside the square root, no root epsilon.
+        optimizer = nnx.Optimizer(
+            networks,
+            optax.adam(training.learning_rate, b1=adam.beta1, b2=adam.beta2, eps=adam.epsilon, eps_root=0.0),
+            wrt=nnx.Param,
+        )
+        reset_keys: Array = jax.random.split(keys[1], training.num_envs)
+        observations, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env.default_params)
+        draw_keys: Array = jax.random.split(keys[2])
+        explained_rows = pool[jax.random.randint(draw_keys[0], (training.num_envs,), 0, pool.shape[0])]
+        coalition = jax.random.bernoulli(draw_keys[1], 0.5, (1, pool.shape[-1]))
+        capacity, width = training.total_timesteps, pool.shape[-1]
+        stored = jnp.zeros((capacity, width), jnp.int32)
+        replay = ConditionedReplay(
+            TransitionBatch(
+                stored,
+                jnp.zeros(capacity, jnp.int32),
+                jnp.zeros(capacity, jnp.float32),
+                stored,
+                jnp.zeros(capacity, jnp.bool_),
+                jnp.zeros(capacity, jnp.float32),
+            ),
+            stored,
+            jnp.zeros((capacity, width), jnp.bool_),
+            jnp.asarray(0, jnp.int32),
+            jnp.asarray(0, jnp.int32),
+        )
+        return OnPolicyState(
+            networks,
+            optimizer,
+            replay,
+            observations.astype(jnp.int32),
+            env_state,
+            explained_rows,
+            jnp.broadcast_to(coalition, (training.num_envs, width)),
+            jnp.asarray(0, jnp.int32),
+            jnp.asarray(False),
+            keys[3],
+        )
+
+    return nnx.vmap(partial(seed, env, network, training), in_axes=(0, 0), out_axes=0)(keys, pools)
+
+
+def on_policy_loss(
+    networks: OutcomeNetworks, batch: TransitionBatch, explained: Array, coalitions: Array, gamma: float
+) -> Array:
+    """TD(0) towards r + gamma V_target(s' | e, C) (1 - terminated); actions are not used."""
+    following = networks.target(batch.next_observations, explained, coalitions).values[:, 0]
+    alive = (~batch.terminated).astype(jnp.float32)
+    targets = jax.lax.stop_gradient(batch.rewards + gamma * following * alive)
+    predictions = networks.model(batch.observations, explained, coalitions).values[:, 0]
+    return jnp.mean(jnp.square(predictions - targets))
+
+
+def exact_values_loss(
+    config: OutcomeConfig, explained: CharacteristicConfig, outcome: OutcomeExplained, exact: ExactOutcome
+) -> Array:
+    """MSE between the learnt and exact outcome values over every (coalition, valid unique state) pair."""
+    states = exact.states
+
+    def per_coalition(
+        config: OutcomeConfig,
+        explained: CharacteristicConfig,
+        outcome: OutcomeExplained,
+        states: Array,
+        coalition: Array,
+    ) -> Array:
+        return values(config, explained, outcome, states, jnp.broadcast_to(coalition, states.shape))[:, 0]
+
+    coalitions = jnp.asarray(coalition_table(states.shape[-1]))
+    approximations = jax.lax.map(partial(per_coalition, config, explained, outcome, states), coalitions)
+    valid = exact.state_valid.astype(jnp.float32)[None, :]
+    errors = jnp.square(approximations - exact.values) * valid
+    return jnp.sum(errors) / (jnp.sum(valid) * coalitions.shape[0])
+
+
 def loss(
     config: OutcomeConfig,
     explained: CharacteristicConfig,
@@ -424,23 +841,7 @@ def loss(
     if partition == "exact":
         exact = context.exact
         assert exact is not None
-        states = exact.states
-        explained_values = partial(values, config, explained)
-        outcome = OutcomeExplained(frozen.agent, frozen.behaviour, networks)
-
-        def per_coalition(
-            values: Callable[[OutcomeExplained, Observations, Coalitions], Values],
-            outcome: OutcomeExplained,
-            states: Array,
-            coalition: Array,
-        ) -> Array:
-            return values(outcome, states, jnp.broadcast_to(coalition, states.shape))[:, 0]
-
-        coalitions = jnp.asarray(coalition_table(features))
-        approximations = jax.lax.map(partial(per_coalition, explained_values, outcome, states), coalitions)
-        valid = exact.state_valid.astype(jnp.float32)[None, :]
-        errors = jnp.square(approximations - exact.values) * valid
-        return jnp.sum(errors) / (jnp.sum(valid) * coalitions.shape[0])
+        return exact_values_loss(config, explained, OutcomeExplained(frozen.agent, frozen.behaviour, networks), exact)
     rows_from, size = (
         (context.train, training.batch_size) if partition == "train" else (context.validation, training.validation_size)
     )
