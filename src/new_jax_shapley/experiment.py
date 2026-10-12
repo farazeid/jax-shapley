@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from new_jax_shapley.algorithms.dqn import DQNConfig
 from new_jax_shapley.backends import Track
 from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
+from new_jax_shapley.characteristic_models.outcome import OutcomeConfig
 from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
 
 
@@ -22,6 +23,9 @@ class ExperimentConfig:
     algorithm: DQNConfig
     characteristic: CharacteristicConfig
     shapley: tuple[ShapleyConfig, ...]
+    outcome: OutcomeConfig | None = None
+    """An outcome characteristic stage after the (behaviour) characteristic one; the Shapley models
+    then explain outcome seed `explained_seed`."""
     explained_seed: int | None = 1
     """The characteristic seed every Shapley seed explains; None pairs Shapley seed s with characteristic seed s."""
     compile_only: bool = False
@@ -38,6 +42,13 @@ class ExperimentConfig:
             raise ValueError("every stage must use the same env")
         if len(self.algorithm.seeds) not in (1, len(self.characteristic.seeds)):
             raise ValueError("the agent stage trains one agent, or one per characteristic seed")
+        if self.outcome is not None and (
+            self.characteristic.kind != "behaviour"
+            or self.explained_seed is None
+            or self.explained_seed not in self.outcome.seeds
+            or self.outcome.env != self.algorithm.env
+        ):
+            raise ValueError("an outcome stage conditions on behaviour seed explained_seed, also an outcome seed")
         if self.explained_seed is None:
             if any(stage.seeds != self.characteristic.seeds for stage in self.shapley):
                 raise ValueError("paired Shapley seeds must equal the characteristic seeds")
