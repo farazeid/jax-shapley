@@ -6,12 +6,13 @@ This guide maps every figure and table in the FastSVERL paper (arXiv 2511.06094)
 
 1. **Agents.** Agents are trained with `experiments/dqn/*.sh`, the large Mastermind agents with `experiments/dqn/mastermind.sh SIZE`, and the per-seed agents inside the off-policy and Hypercube recipes.
 2. **Explanations.** The `experiments/explanations/*.sh` recipes below run explanations; the `runs/paper/run_*.sh` chains run them in dependency order.
-3. **Figures and tables.** `scripts/paper_port/figures.py` regenerates every published curve with upstream `plot()` statistics: nearest-step merge, interpolation, mean and standard error, `n_batches` scaling, `start_epoch` offsets and SEM correction. It also regenerates the Hypercube bars with upstream `barcharts`. `scripts/paper_port/tables.py` regenerates Tables 1–4 with upstream `calculate_final_stats` and `plot_explanations.py`.
+3. **Figures and tables.** Both scripts read only from the tracking backend (`--track wandb|trackio`, `--project`, `--entity`), taking each experiment's latest run group from `python -m new_jax_shapley.main NAME --track ...`. Figures and tables whose experiments are not ported to `new_jax_shapley/configs/` yet, or have no tracked runs, are reported missing. `scripts/paper_port/figures.py` regenerates every published curve with upstream `plot()` statistics: nearest-step merge, interpolation, mean and standard error, `n_batches` scaling, `start_epoch` offsets and SEM correction. It also regenerates the Hypercube bars with upstream `barcharts`. `scripts/paper_port/tables.py` regenerates Tables 1–4 with upstream `calculate_final_stats` and `plot_explanations.py`. Table 2 restores its models from the experiment's checkpoint artifacts. With wandb, the cloud is the source of truth: everything pulled locally is deleted when the script or experiment ends.
 4. **Comparison.** `scripts/paper_port/compare.py` applies the criteria in `docs/data/paper--criteria.md`, which were committed before any comparison run, to the targets extracted from upstream's own plot files (`scripts/paper_port/extract_published.py`). It writes `docs/data/paper--comparison.csv`, `docs/data/paper--claims-results.csv` and overlays in `docs/figures/paper/`.
 
 ```bash
-uv run --group benchmark python scripts/paper_port/figures.py
-uv run python scripts/paper_port/tables.py
+uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb
+uv run --group benchmark python scripts/paper_port/figures.py --track wandb
+uv run python scripts/paper_port/tables.py --track wandb
 uv run --group benchmark python scripts/paper_port/compare.py
 ```
 

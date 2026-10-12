@@ -1,38 +1,58 @@
-"""Regenerate the paper's large-Mastermind tables (Tables 1-4) from completed JAX runs.
+"""Regenerate the paper's large-Mastermind tables (Tables 1-4) from tracked JAX runs.
 
-Tables 1, 3 and 4 follow the source's table scripts (`plot_main.py`, `plot_app.py`):
-`calculate_final_stats` over 10 seeds per group, with 62 batches per epoch. Each
-size's runs live under `ROOT/mastermind-SIZE/{behaviour,prediction,outcome}/...`, as
-`runs/paper/run_large.sh` writes them.
+Tables 1, 3 and 4 follow the source's table scripts (`plot_main.py`, `plot_app.py`) and
+`fastsverl.utils.calculate_final_stats`: each group of runs is summarised by its last
+logged epoch, with 62 batches per epoch:
+
+- updates = that epoch's logging step x batches per epoch, so the patience tail counts;
+- final loss = that epoch's training loss (the source's `*_epoch_loss` tag);
+- standard errors are std(ddof=1) / sqrt(n).
 
 Table 2 follows `plot_explanations.py` on the paper's Mastermind-463 board: the
-behaviour Shapley values (Shapley seed 1) for the agent's greedy action, scaled by
-the largest magnitude. The script checks that the action is the paper's CCCB.
+behaviour Shapley values (Shapley seed 1) for the agent's greedy action, scaled by the
+largest magnitude. The script checks that the action is the paper's CCCB.
 
-Usage: uv run python scripts/paper_port/tables.py [--root runs/paper] [--output docs/data]
+Runs come only from the tracking backend: each size's experiment
+(`mastermind{SIZE}_{behaviour,prediction,outcome}`) is read from its latest run group,
+and Table 2 restores the agent, characteristic and Shapley checkpoints from that group's
+artifacts (as a `table-2` run that records their use). Tables whose experiments are not
+ported yet, or have no tracked runs, are reported missing.
+
+Usage: uv run python scripts/paper_port/tables.py --track wandb|trackio [--output docs/data]
 """
 
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+import math
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from html import escape
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import trackio
 import tyro
+import wandb
+from jaxtyping import Float
 
-from jax_shapley.envs.mastermind import Mastermind, MastermindState
-from jax_shapley.explanation_io import load_characteristic, load_shapley, sweep_folders
-from jax_shapley.networks import QNetwork
-from jax_shapley.reporting import BoardValues, GroupStats, board_values, group_stats, latex_table, write_table_csv
-from jax_shapley.run_io import load_agent, load_settings
-from jax_shapley.shapley import MaskedCharacteristic, ShapleyModel, explain
-from jax_shapley.train_dqn import MastermindConfig
+from new_jax_shapley import backends
+from new_jax_shapley.algorithms import dqn
+from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS
+from new_jax_shapley.characteristic_models import behaviour as characteristic
+from new_jax_shapley.common import checkpoints
+from new_jax_shapley.common.supervised_learning import seed_slice
+from new_jax_shapley.envs import Mastermind
+from new_jax_shapley.envs.mastermind import MastermindState
+from new_jax_shapley.experiment import ExperimentConfig, load_configs
+from new_jax_shapley.shapley_models import behaviour as shapley
+from new_jax_shapley.shapley_models.behaviour import ShapleyModel, explain
 
 SIZES = ("443", "453", "463")
+SOURCE_BATCHES = (0.8 * 10_000) // 128
+"""62.0: the n_batches the source's large-scale table scripts pass."""
 LETTERS = {-1: "", 1: "A", 2: "B", 3: "C"}
 # Paper Table 2, first guess first: [Clue 1 (misplaced), pegs..., Clue 2 (exact)], A=1, B=2, C=3.
 TABLE_2_BOARD = (
@@ -44,11 +64,19 @@ TABLE_2_BOARD = (
     (-1, -1, -1, -1, -1, -1),
 )
 TABLE_2_ACTION = "CCCB"
+TABLE_2_EXPERIMENT = "mastermind463_behaviour"
+TABLE_2_SHAPLEY_SEED = 1
+
+type BoardValues = Float[np.ndarray, "guesses columns"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
+type FeatureValues = Float[np.ndarray, "features"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
+type RunValues = Float[np.ndarray, "runs"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
 
 
 @dataclass(frozen=True, slots=True)
 class Args:
-    root: Path = Path("runs/paper")
+    track: backends.Track
+    project: str = "jax-shapley"
+    entity: str | None = None
     output: Path = Path("docs/data")
     tables: bool = True
     """Tables 1, 3 and 4."""
@@ -56,11 +84,23 @@ class Args:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupStats:
+    """One table row: mean and standard error of updates and final loss over a group's runs."""
+
+    label: str
+    updates_mean: float
+    updates_se: float
+    loss_mean: float
+    loss_se: float
+    runs: int
+
+
+@dataclass(frozen=True, slots=True)
 class Explainer:
     """The explained agent's Q-network, its behaviour characteristic and Shapley model."""
 
-    agent: QNetwork
-    characteristic: MaskedCharacteristic
+    agent: dqn.QNetwork
+    characteristic: characteristic.CharacteristicModel
     shapley: ShapleyModel
     env: Mastermind
 
@@ -75,8 +115,13 @@ class Board:
     action_row: int
 
 
+class MissingRunsError(Exception):
+    """The runs a table needs do not exist (yet)."""
+
+
 def main(args: Args) -> None:
     args.output.mkdir(parents=True, exist_ok=True)
+    configs = {name: config for name, (_, config) in load_configs().items()}
     for table, kind, models in (
         ()
         if not args.tables
@@ -89,17 +134,49 @@ def main(args: Args) -> None:
         domains, labels, groups = [], [], []
         try:
             for size in SIZES:
+                experiment = f"mastermind{size}_{kind}"
+                group = _group(args, configs, experiment)
+                history = backends.history(args.track, project=args.project, entity=args.entity, group=group)
                 for model in models:
-                    label = f"Mastermind-{size} {model}"
                     domains.append(f"Mastermind-{size}")
                     labels.append(model)
-                    groups.append(group_stats(label, _completed(_sweep(args.root, size, kind, model))))
-        except ValueError as error:
+                    label = f"Mastermind-{size} {model}"
+                    # The characteristic sweep, or the experiment's first Shapley sweep.
+                    shapley_config = configs[experiment].shapley[0]
+                    exactness = "with-exact" if shapley_config.with_exact_char else "without-exact"
+                    stage = f"characteristic--{kind}" if model == "Characteristic" else f"shapley--{kind}--{exactness}"
+                    prefix = f"{experiment}--{stage}--"
+                    runs = [rows for name, rows in sorted(history.items()) if name.startswith(prefix)]
+                    explained = "Policy" if kind == "behaviour" else "Value"
+                    tag = f"model/{explained}{'CharacteristicModel' if model == 'Characteristic' else 'Shapley'}_epoch_loss"
+                    # Source calculate_final_stats: each run's last logged epoch of the training loss.
+                    finals = [
+                        [(row["_step"], row[tag]) for row in rows if tag in row and "_step" in row] for rows in runs
+                    ]
+                    if len(finals) < 2 or any(not logged for logged in finals):
+                        raise MissingRunsError(f"{label}: needs two or more runs that logged {tag}")
+                    updates = np.asarray([logged[-1][0] for logged in finals], np.float64) * SOURCE_BATCHES
+                    losses = np.asarray([logged[-1][1] for logged in finals], np.float64)
+                    groups.append(
+                        GroupStats(
+                            label,
+                            float(updates.mean()),
+                            standard_error(updates),
+                            float(losses.mean()),
+                            standard_error(losses),
+                            len(runs),
+                        )
+                    )
+        except MissingRunsError as error:
             print(f"missing {table}: {error}")
             continue
         _write_table(args.output, table, domains, labels, groups)
     if args.table_2:
-        explainer = load_explainer(args.root)
+        try:
+            explainer = load_explainer(args, configs)
+        except MissingRunsError as error:
+            print(f"missing table_2: {error}")
+            return
         paper = explain_board(explainer, np.asarray(TABLE_2_BOARD, np.int32))
         boards, wins = greedy_boards(explainer, guesses_made=4)
         analogue = explain_board(explainer, boards[int(np.argmax(wins))])
@@ -117,15 +194,53 @@ def main(args: Args) -> None:
         print(f"Nullity over {len(reached)} greedy states: mean |value| {empty:.4f} empty, {filled:.4f} filled")
 
 
-def load_explainer(root: Path) -> Explainer:
+def load_explainer(args: Args, configs: dict[str, ExperimentConfig]) -> Explainer:
     """The Mastermind-463 agent, behaviour characteristic and Shapley seed 1 behind Table 2."""
-    shapley = load_shapley(sweep_folders(_sweep(root, "463", "behaviour", "Shapley"))[0])
-    characteristic = load_characteristic(shapley.config.characteristic)
-    settings = load_settings(shapley.config.agent / "config.json")
-    if not isinstance(settings.env, MastermindConfig) or settings.env.num_guesses != len(TABLE_2_BOARD):
+    group = _group(args, configs, TABLE_2_EXPERIMENT)
+    config = configs[TABLE_2_EXPERIMENT]
+    env = config.algorithm.env
+    if not isinstance(env, Mastermind) or env.num_guesses != len(TABLE_2_BOARD):
         raise ValueError("Table 2 explains a Mastermind-463 agent")
-    agent = load_agent(shapley.config.agent, settings.network, load_replay=False)
-    return Explainer(agent.model, MaskedCharacteristic(characteristic.model), shapley.model, settings.env.make())
+    algorithm, explained, stage = config.algorithm, config.characteristic, config.shapley[0]
+    exactness = "with-exact" if stage.with_exact_char else "without-exact"
+    # The settings each stage's checkpoint was saved with, as the stages write them.
+    algorithm_settings = {n: v for n, v in asdict(algorithm).items() if n not in TRACKING_FIELDS}
+    explained_settings = {n: v for n, v in asdict(explained).items() if n not in TRACKING_FIELDS}
+    shapley_settings = {n: v for n, v in asdict(stage).items() if n not in TRACKING_FIELDS}
+    with backends.session(args.track, args.entity) as root:
+        tracking = wandb if args.track == "wandb" else trackio
+        run = tracking.init(
+            project=args.project,
+            name=f"{TABLE_2_EXPERIMENT}--report--table-2",
+            group=group,
+            config={"report": "table_2"},
+        )
+        try:
+            directory = run.use_artifact(f"{group}--algorithm--dqn:latest").download(root=str(root / "agent"))
+            agent_state = checkpoints.load(
+                Path(directory),
+                dqn.initialize(algorithm, jax.random.key(0)),
+                {"stage": "algorithm", "env": env.name, "config": algorithm_settings},
+            )
+            reference = f"{group}--characteristic--{explained.kind}:latest"
+            directory = run.use_artifact(reference).download(root=str(root / "characteristic"))
+            characteristics = checkpoints.load(
+                Path(directory),
+                characteristic.initialize(explained),
+                {"stage": "characteristic", "env": env.name, "config": explained_settings},
+            )
+            reference = f"{group}--shapley--{explained.kind}--{exactness}:latest"
+            directory = run.use_artifact(reference).download(root=str(root / "shapley"))
+            shapleys = checkpoints.load(
+                Path(directory),
+                shapley.initialize(stage, explained),
+                {"stage": "shapley", "env": env.name, "explained": explained_settings, "config": shapley_settings},
+            )
+        finally:
+            run.finish()
+    chosen = seed_slice(characteristics, explained.seeds.index(config.explained_seed))
+    model = seed_slice(shapleys, stage.seeds.index(TABLE_2_SHAPLEY_SEED)).model
+    return Explainer(dqn.trained_agent(algorithm, agent_state).model, chosen.model, model, env)
 
 
 def explain_board(explainer: Explainer, board: np.ndarray) -> Board:
@@ -216,24 +331,74 @@ def board_html(board: Board) -> str:
     )
 
 
-def _completed(sweep: Path) -> list[Path]:
-    """A sweep's seed folders, when every seed has finished."""
-    seeds = sweep_folders(sweep)
-    if any(not (seed / "summary.json").exists() for seed in seeds):
-        raise ValueError(f"{sweep} has unfinished seeds")
-    return seeds
+def board_values(contributions: FeatureValues, guesses: int) -> BoardValues:
+    """Source plot_explanations: reshape to the board, last guess first, scaled into [-1, 1]."""
+    values = np.flipud(np.reshape(np.asarray(contributions, np.float64), (guesses, -1)))
+    if values.max() - values.min() != 0:
+        values = values / max(abs(values.max()), abs(values.min()))
+    return values
 
 
-def _sweep(root: Path, size: str, kind: str, model: str) -> Path:
-    stage = "characteristic" if model == "Characteristic" else "shapley"
-    matches = sorted((root / f"mastermind-{size}" / kind / stage).glob("*sweep*"))
-    if len(matches) != 1:
-        raise ValueError(f"expected one {kind} {stage} sweep for Mastermind-{size}, found {len(matches)}")
-    return matches[0]
+def latex_table(groups: Sequence[GroupStats]) -> str:
+    """The source's `DataFrame.to_latex(index=False, escape=False)` layout."""
+    rows = [("Group", "Updates", "Final Loss")]
+    rows += [
+        (
+            group.label,
+            format_scientific(group.updates_mean, group.updates_se),
+            format_scientific(group.loss_mean, group.loss_se),
+        )
+        for group in groups
+    ]
+    lines = [" & ".join(row) + " \\\\" for row in rows]
+    return "\n".join((
+        "\\begin{tabular}{lll}",
+        "\\toprule",
+        lines[0],
+        "\\midrule",
+        *lines[1:],
+        "\\bottomrule",
+        "\\end{tabular}",
+        "",
+    ))
+
+
+def format_scientific(mean: float, standard_error: float) -> str:
+    """Source _format_scientific: `$(m \\pm s) \\times 10^{e}$` with e = floor(log10|mean|)."""
+    exponent = 0 if mean == 0 else math.floor(math.log10(abs(mean)))
+    scale = 10.0**exponent
+    return f"$({mean / scale:.3f} \\pm {standard_error / scale:.3f}) \\times 10^{{{exponent}}}$"
+
+
+def standard_error(values: RunValues) -> float:
+    return float(np.std(values, ddof=1) / np.sqrt(values.shape[0]))
+
+
+def _group(args: Args, configs: dict[str, ExperimentConfig], experiment: str) -> str:
+    if experiment not in configs:
+        raise MissingRunsError(f"experiment {experiment} is not ported")
+    found = backends.groups(args.track, project=args.project, entity=args.entity, prefix=f"{experiment}-")
+    if not found:
+        raise MissingRunsError(f"no tracked runs of {experiment} in {args.track} project {args.project}")
+    return found[-1]
 
 
 def _write_table(output: Path, table: str, domains: list[str], models: list[str], groups: list[GroupStats]) -> None:
-    write_table_csv(output / f"paper--jax-{table}.csv", table, domains, models, groups)
+    """Rows in the schema of docs/data/paper--published-tables.csv, and the source's LaTeX."""
+    with (output / f"paper--jax-{table}.csv").open("w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(("table", "domain", "model", "updates_mean", "updates_se", "loss_mean", "loss_se", "runs"))
+        for domain, model, group in zip(domains, models, groups, strict=True):
+            writer.writerow((
+                table,
+                domain,
+                model,
+                group.updates_mean,
+                group.updates_se,
+                group.loss_mean,
+                group.loss_se,
+                group.runs,
+            ))
     (output / f"paper--jax-{table}.tex").write_text(latex_table(groups))
 
 
