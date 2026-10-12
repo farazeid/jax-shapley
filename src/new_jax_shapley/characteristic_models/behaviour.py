@@ -1,7 +1,9 @@
-"""Step 3: characteristic models, v(s, C) learnt from masked states (behaviour; shared with prediction).
+"""Step 3: behaviour characteristic models, v(s, C) learnt from masked states; the shared stage.
 
 A characteristic model maps a state whose unknown features are MASKed to the explained
-output `v_F(s)`: the agent's action probabilities (behaviour) or value (prediction).
+output `v_F(s)`: here the agent's action probabilities. `stage`, `collect`, `fit`,
+`initialize`, `loss` and `exact_characteristic` are shared with the other kinds, which
+supply their own `targets` (the explained output) and `head` (the network's last layer).
 Least squares over random coalitions makes it learn the mean over states sharing the
 known features, which is the characteristic value. Exact values over the exact buffer
 measure its error. The reference is FastSVERL's `ValuePolicyCharacteristicModel`.
@@ -46,6 +48,10 @@ from new_jax_shapley.common.supervised_learning import (
 from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
 type Kind = Literal["behaviour", "prediction"]
+type Targets = Callable[[CharacteristicConfig, Agent, Array], Array]
+"""A kind's explained output `v_F` of the agent at observations."""
+type Head = Callable[[int], LayerConfig]
+"""A kind's network output layer, given the number of actions."""
 type Policy = Literal["greedy", "explore"]
 type Values = Float[Array, "... outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 type Output = Float[Array, "outputs"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
@@ -141,7 +147,17 @@ class CharacteristicModel(nnx.Module):
 
 
 def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
-    """Train (or load) every seed, tracked by `config.track`.
+    """Behaviour characteristic models explaining the agents' greedy or explore policy."""
+    if config.kind != "behaviour":
+        raise ValueError("the behaviour stage needs kind='behaviour'")
+    return stage(config, agents, targets, head, "PolicyCharacteristicModel")
+
+
+def stage(
+    config: CharacteristicConfig, agents: Agent, targets: Targets, head: Head, model: str
+) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
+    """Train (or load) every seed of a kind, tracked by `config.track`; `model` is the source's
+    model class name that prefixes the logged tags.
 
     `agents` are seed-stacked: one agent every seed explains, or one per seed (seed s
     explains agent s).
@@ -161,7 +177,7 @@ def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[Charac
         keys, buffers = nnx.jit(partial(collect, config))(keys, agents)
         # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
         max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
-        return nnx.jit(partial(fit, config, max_unique, None))(keys, agents, buffers)
+        return nnx.jit(partial(fit, config, targets, head, max_unique, None))(keys, agents, buffers)
     group = config.group or f"{config.name}-{time_ns()}"
     artifact = f"{group}--characteristic--{config.kind}"
     settings = {
@@ -183,7 +199,7 @@ def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[Charac
         try:
             if config.checkpoint is not None:
                 directory = runs[0].use_artifact(config.checkpoint).download(root=str(root / "artifacts" / artifact))
-                return checkpoints.load(Path(directory), initialize(config), settings), None
+                return checkpoints.load(Path(directory), initialize(config, head), settings), None
 
             def log(
                 runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics
@@ -203,12 +219,12 @@ def main(config: CharacteristicConfig, agents: Agent) -> tuple[TrainState[Charac
                         row[f"model/{model}_exact_loss"] = float(exact[index])
                     run.log(row, step=int(steps[index]))
 
-            model = f"{'Policy' if config.kind == 'behaviour' else 'Value'}CharacteristicModel"
             keys, buffers = nnx.jit(partial(collect, config))(keys, agents)
             # Exact tables are sized by the most unique observations in any seed's exact buffer (a static shape).
             max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
             epoch_log = partial(log, runs, model, config.train.exact_loss)
-            state, metrics = nnx.jit(partial(fit, config, max_unique, epoch_log))(keys, agents, buffers)
+            program = nnx.jit(partial(fit, config, targets, head, max_unique, epoch_log))
+            state, metrics = program(keys, agents, buffers)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
             runs[0].log_artifact(str(directory), name=artifact, type="characteristic").wait()
@@ -244,6 +260,8 @@ def collect(config: CharacteristicConfig, keys: Array, agents: Agent) -> tuple[A
 
 def fit(
     config: CharacteristicConfig,
+    targets: Targets,
+    head: Head,
     max_unique: int,
     log: Callable[[EpochMetrics], None] | None,
     keys: Array,
@@ -255,37 +273,32 @@ def fit(
     Each seed's context holds the frozen agent's explained outputs on every buffer and,
     with the exact loss, exact characteristic values on the exact buffer.
     """
-    state = initialize(config, keys, buffers)
+    state = initialize(config, head, keys, buffers)
     features = state.buffers.train.shape[-1]
 
     def context(
-        config: CharacteristicConfig, max_unique: int, buffers: StateBuffers, agent: Agent
+        config: CharacteristicConfig, targets: Targets, max_unique: int, buffers: StateBuffers, agent: Agent
     ) -> CharacteristicContext:
-        # `v_F`: the agent's greedy/explore policy for behaviour, or its value for prediction.
-        targets = []
-        for observations in (buffers.train, buffers.validation, buffers.exact):
-            q_values = agent.model(observations).q_values
-            if config.kind == "prediction":
-                targets.append(jnp.max(q_values, axis=-1, keepdims=True))
-                continue
-            ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
-            greedy = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
-            explore = agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * greedy
-            targets.append(greedy if config.policy == "greedy" else explore)
+        train_targets = targets(config, agent, buffers.train)
+        validation_targets = targets(config, agent, buffers.validation)
         coalitions = jnp.asarray(coalition_table(buffers.exact.shape[-1]))
         exact = (
-            exact_characteristic(buffers.exact, targets[2], coalitions, max_unique=max_unique)
+            exact_characteristic(
+                buffers.exact, targets(config, agent, buffers.exact), coalitions, max_unique=max_unique
+            )
             if config.train.exact_loss
             else None
         )
-        return CharacteristicContext(buffers, targets[0], targets[1], exact)
+        return CharacteristicContext(buffers, train_targets, validation_targets, exact)
 
-    contexts = nnx.vmap(partial(context, config, max_unique), in_axes=(0, 0), out_axes=0)(state.buffers, agents)
+    contexts = nnx.vmap(partial(context, config, targets, max_unique), in_axes=(0, 0), out_axes=0)(
+        state.buffers, agents
+    )
     return train(state, contexts, None, loss, config.train, features, log)
 
 
 def initialize(
-    config: CharacteristicConfig, keys: Array | None = None, buffers: StateBuffers | None = None
+    config: CharacteristicConfig, head: Head, keys: Array | None = None, buffers: StateBuffers | None = None
 ) -> TrainState[CharacteristicModel]:
     """Every seed's fresh training state, seed-stacked.
 
@@ -297,10 +310,9 @@ def initialize(
     if len(shape) != 1:
         raise ValueError("explanations require flat observations")
     features = int(shape[0])
-    # Experiment-script layout: ReLU hidden layers; behaviour ends in Softmax(-1).
-    # Prediction keeps the source's trailing singleton value axis.
-    output = LayerConfig(wrapped.num_actions, "softmax") if config.kind == "behaviour" else LayerConfig(1)
-    network = MLPConfig(features, (*(LayerConfig(width, "relu") for width in config.hidden_widths), output))
+    # Experiment-script layout: ReLU hidden layers, then the kind's head.
+    hidden = tuple(LayerConfig(width, "relu") for width in config.hidden_widths)
+    network = MLPConfig(features, (*hidden, head(wrapped.num_actions)))
     training = config.train
     if keys is None:
         keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
@@ -337,6 +349,21 @@ def initialize(
         )
 
     return nnx.vmap(partial(seed, network, training), in_axes=(0, 0), out_axes=0)(keys, buffers)
+
+
+def targets(config: CharacteristicConfig, agent: Agent, observations: Array) -> Values:
+    """`v_F`: the agent's greedy policy (ties shared equally), or its epsilon-greedy explore policy."""
+    q_values = agent.model(observations).q_values
+    ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
+    greedy = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
+    if config.policy == "greedy":
+        return greedy
+    return agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * greedy
+
+
+def head(actions: int) -> LayerConfig:
+    """Action probabilities: the experiment scripts end behaviour models in Softmax(-1)."""
+    return LayerConfig(actions, "softmax")
 
 
 def loss(

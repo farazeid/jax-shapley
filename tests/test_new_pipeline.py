@@ -1,7 +1,8 @@
-"""The refactored behaviour pipeline (new_jax_shapley) reproduces the current jax_shapley CLIs bitwise.
+"""The refactored pipeline (new_jax_shapley) reproduces the current jax_shapley CLIs bitwise.
 
-A scaled-down Mastermind-222 behaviour experiment runs through both: the agent's weights
-and every logged DQN, characteristic and Shapley metric must agree.
+Scaled-down behaviour and prediction experiments on Mastermind-222 and Gridworld run
+through both: the agent's weights and every logged DQN, characteristic and Shapley
+metric must agree.
 """
 
 import csv
@@ -17,7 +18,7 @@ from jax_shapley.run_io import load_agent, load_settings
 from new_jax_shapley.algorithms.dqn import DQNConfig
 from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
 from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice
-from new_jax_shapley.envs import Mastermind
+from new_jax_shapley.envs import Gridworld, Mastermind
 from new_jax_shapley.experiment import ExperimentConfig
 from new_jax_shapley.main import ExperimentResult, run
 from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
@@ -25,27 +26,12 @@ from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
 SEEDS = (1, 2)
 WIDTHS = (16, 16)
 TRAINING = SupervisedConfig(epochs=3, batch_size=16, buffer_size=160, num_envs=4)
-ENV = Mastermind(2, 2, 2)
-CONFIG = ExperimentConfig(
-    name="test_behaviour",
-    algorithm=DQNConfig(
-        env=ENV,
-        seeds=(1,),
-        hidden_widths=WIDTHS,
-        num_envs=4,
-        total_timesteps=1024,
-        buffer_size=1024,
-        learning_starts=128,
-        train_frequency=10,
-        batch_size=16,
-        exploration_fraction=0.25,
-    ),
-    characteristic=CharacteristicConfig(env=ENV, hidden_widths=WIDTHS, seeds=SEEDS, train=TRAINING),
-    shapley=tuple(
-        ShapleyConfig(env=ENV, hidden_widths=WIDTHS, with_exact_char=exact, seeds=SEEDS, train=TRAINING)
-        for exact in (True, False)
-    ),
-)
+CASES = [
+    ("mastermind222", "behaviour"),
+    ("mastermind222", "prediction"),
+    ("gridworld", "behaviour"),
+    ("gridworld", "prediction"),
+]
 EXPLANATION_ARGUMENTS = [
     "--hidden-widths",
     *map(str, WIDTHS),
@@ -89,13 +75,37 @@ def test_shapley_matches_the_current_sweep(pipelines: tuple[ExperimentResult, Pa
     _assert_epochs(_single(root / f"shapley-{exact}"), result.shapley[index][1])
 
 
-@pytest.fixture(scope="module")
-def pipelines(tmp_path_factory: pytest.TempPathFactory) -> tuple[ExperimentResult, Path]:
+@pytest.fixture(scope="module", params=CASES, ids=["-".join(case) for case in CASES])
+def pipelines(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> tuple[ExperimentResult, Path]:
     """The new pipeline in process, and the current CLIs with the same settings."""
-    root = tmp_path_factory.mktemp("old")
-    dqn = CONFIG.algorithm
+    environment, kind = request.param
+    env = Mastermind(2, 2, 2) if environment == "mastermind222" else Gridworld()
+    config = ExperimentConfig(
+        name="test_pipeline",
+        algorithm=DQNConfig(
+            env=env,
+            seeds=(1,),
+            hidden_widths=WIDTHS,
+            num_envs=4,
+            total_timesteps=1024,
+            buffer_size=1024,
+            learning_starts=128,
+            train_frequency=10,
+            batch_size=16,
+            exploration_fraction=0.25,
+        ),
+        characteristic=CharacteristicConfig(env=env, kind=kind, hidden_widths=WIDTHS, seeds=SEEDS, train=TRAINING),
+        shapley=tuple(
+            ShapleyConfig(env=env, hidden_widths=WIDTHS, with_exact_char=exact, seeds=SEEDS, train=TRAINING)
+            for exact in (True, False)
+        ),
+    )
+    root = tmp_path_factory.mktemp(f"old-{environment}-{kind}")
+    dqn = config.algorithm
     train_dqn.main([
-        "mastermind222",
+        environment,
         "--seed",
         str(dqn.seeds[0]),
         "--hidden-widths",
@@ -125,7 +135,7 @@ def pipelines(tmp_path_factory: pytest.TempPathFactory) -> tuple[ExperimentResul
         "--agent",
         str(agent),
         "--kind",
-        "behaviour",
+        kind,
         "--policy",
         "greedy",
         *EXPLANATION_ARGUMENTS,
@@ -147,7 +157,7 @@ def pipelines(tmp_path_factory: pytest.TempPathFactory) -> tuple[ExperimentResul
             "--output",
             str(root / f"shapley-{exact}"),
         ])
-    return run(CONFIG), root
+    return run(config), root
 
 
 def _assert_epochs(sweep: Path, metrics: EpochMetrics | None) -> None:
