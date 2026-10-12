@@ -9,6 +9,9 @@ An experiment is the paper's linear pipeline for one explanation kind:
 Configs live in `new_jax_shapley/configs/NAME.py` as a module-level `CONFIG`; any field can be
 overridden on the command line, e.g. `--algorithm.total-timesteps 5000` or `--shapley.1.train.epochs 9`.
 
+`--compile-only` traces, lowers and compiles every stage's programs at the configured
+shapes, then exits without running or tracking anything.
+
 Each stage tracks itself: one run per seed named `NAME--STAGE--VARIANT[--seed-N]`, all in
 one run group `NAME-TIMESTAMP`, and its whole final state pushed as an Orbax checkpoint
 artifact. A stage given a `checkpoint` artifact (e.g. `--algorithm.checkpoint
@@ -18,14 +21,18 @@ GROUP--algorithm--dqn:latest`) loads it instead of training.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
 from time import time_ns
 
+import jax
+import jax.numpy as jnp
 import tyro
+from flax import nnx
 
 from new_jax_shapley import backends
 from new_jax_shapley.algorithms import dqn
 from new_jax_shapley.characteristic_models import behaviour as characteristic
-from new_jax_shapley.common.supervised_learning import EpochMetrics, TrainState, seed_slice
+from new_jax_shapley.common.supervised_learning import EpochMetrics, TrainState, seed_slice, stack_seeds
 from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.shapley_models import behaviour as shapley
 
@@ -40,8 +47,12 @@ class ExperimentResult:
 
 
 def main(args: list[str] | None = None) -> str:
-    """Run the named experiment, tracked; returns its run group."""
+    """Run the named experiment, tracked; returns its run group (empty when only compiling)."""
     config = tyro.extras.overridable_config_cli(load_configs(), args=args)
+    if config.compile_only:
+        compile_stages(config)
+        print(f"Compiled {config.name}.")
+        return ""
     group = f"{config.name}-{time_ns()}"
     # One scratch folder for the whole experiment: later stages reuse earlier stages' files.
     with backends.session(config.track, config.entity):
@@ -98,6 +109,39 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
         for stage in shapley_configs
     )
     return ExperimentResult(dqn_state, dqn_metrics, characteristic_state, characteristic_metrics, shapley_results)
+
+
+def compile_stages(config: ExperimentConfig) -> None:
+    """Trace, lower and compile every stage's programs at the configured shapes, with live-logging
+    callbacks; nothing runs and nothing is tracked.
+
+    Exact tables are sized by an upper bound on unique states (the exact buffer's rows), so
+    the compiled shapes can exceed a real run's, which sizes them from its buffers.
+    """
+    key = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
+    algorithm, stage = config.algorithm, config.characteristic
+    program = nnx.jit(partial(dqn.train, algorithm, lambda seed, metrics: None, lambda seed, metrics: None))
+    program.trace(key, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile()
+
+    seeds = len(stage.seeds)
+    keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
+    agent = dqn.trained_agent(algorithm, dqn.initialize(algorithm, jax.random.key(0)))
+    agents = stack_seeds([agent] * seeds)
+    template = characteristic.initialize(stage)
+    nnx.jit(partial(characteristic.collect, stage)).trace(keys, agents).lower().compile()
+    program = nnx.jit(partial(characteristic.fit, stage, stage.train.exact_size, lambda metrics: None))
+    program.trace(keys, agents, template.buffers).lower().compile()
+
+    explained = seed_slice(template, 0)
+    for shapley_config in config.shapley:
+        count = len(shapley_config.seeds)
+        program = nnx.jit(partial(shapley.fit, shapley_config, stage, stage.train.exact_size, lambda metrics: None))
+        program.trace(
+            jax.ShapeDtypeStruct((count,), key.dtype),
+            stack_seeds([agent] * count),
+            stack_seeds([explained.model] * count),
+            stack_seeds([explained.buffers] * count),
+        ).lower().compile()
 
 
 if __name__ == "__main__":

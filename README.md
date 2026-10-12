@@ -174,4 +174,5 @@ uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb --sh
 - A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.
 - **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.
 - **trackio:** the source of truth is its local store, `TRACKIO_DIR`.
+- `--compile-only` traces, lowers and compiles every stage at the configured shapes and exits, without running or tracking anything; run it before a long experiment.
 - `scripts/paper_port/figures.py` and `tables.py` read results from the same backend.
