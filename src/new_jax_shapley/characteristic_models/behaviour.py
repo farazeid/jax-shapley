@@ -34,7 +34,7 @@ from new_jax_shapley import backends
 from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS, Agent, Env, EnvParams, EnvState, TransitionBatch
 from new_jax_shapley.backends import Track
 from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.coalitions import CoalitionTable, Observations, coalition_table, mask
+from new_jax_shapley.common.coalitions import Coalitions, CoalitionTable, Observations, coalition_table, mask
 from new_jax_shapley.common.networks import MLP, LayerConfig, MLPConfig
 from new_jax_shapley.common.rollouts import collect_buffers, collect_observations
 from new_jax_shapley.common.supervised_learning import (
@@ -53,6 +53,7 @@ from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
 type Kind = Literal["behaviour", "prediction"]
 type Data = Literal["rollouts", "replay"]
+type Estimator = Literal["model", "sampled"]
 type Targets = Callable[[CharacteristicConfig, Agent, Array], Array]
 """A kind's explained output `v_F` of the agent at observations."""
 type Head = Callable[[int], LayerConfig]
@@ -68,6 +69,8 @@ type StateFlags = Bool[Array, "unique"]  # ruff: ignore[undefined-name] -- jaxty
 
 # Rows per exact-loss evaluation chunk; padding beyond the valid entries is never evaluated.
 EXACT_CHUNK = 512
+# Rows a sampled characteristic matches against its pool at once; bounds the (rows, pool, features) comparison.
+SAMPLE_CHUNK = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,9 @@ class CharacteristicConfig:
     policy: Policy = "greedy"
     hidden_widths: tuple[int, ...] = (64, 64)
     data: Data = "rollouts"
+    estimator: Estimator = "model"
+    """`sampled` trains nothing: values are single draws from the train buffer (upstream
+    `ValuePolicyCharacteristicSample`); Shapley models then reuse its buffers."""
     off_policy: bool = False
     weighting: bool = True
     clip_coef: float = inf
@@ -113,6 +119,11 @@ class CharacteristicConfig:
             raise ValueError("explained policy must be greedy or explore")
         if self.data not in ("rollouts", "replay") or (self.off_policy and self.data != "replay"):
             raise ValueError("data must be rollouts or replay; off-policy weighting needs replay data")
+        if self.estimator not in ("model", "sampled") or (
+            self.estimator == "sampled"
+            and (self.data != "rollouts" or self.train.exact_loss or self.train.exact_buffer_size is not None)
+        ):
+            raise ValueError("sampled characteristics draw from rollouts, with exact values on their pool and no loss")
         if self.data == "replay" and self.train.exact_loss and self.train.exact_buffer_size is None:
             raise ValueError("replay characteristics need a separate exact buffer (train.exact_buffer_size)")
         if isnan(self.clip_coef) or self.clip_coef < 0:
@@ -121,6 +132,15 @@ class CharacteristicConfig:
             raise ValueError("hidden widths must be positive")
         if not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be distinct and nonempty")
+
+
+@struct.dataclass
+class SampledPool:
+    """The rows a sampled characteristic draws from, with v_F of each, and v(empty): v_F's pool mean."""
+
+    observations: RowObservations
+    values: RowValues
+    null: Output
 
 
 @struct.dataclass
@@ -313,13 +333,17 @@ def fit(
     keys: Array,
     agents: Agent,
     buffers: StateBuffers,
-) -> tuple[TrainState[CharacteristicModel], EpochMetrics]:
-    """Train every seed from its buffers; exact tables hold `max_unique` states.
+) -> tuple[TrainState[CharacteristicModel], EpochMetrics | None]:
+    """Train every seed from its buffers (a sampled characteristic trains nothing); exact tables
+    hold `max_unique` states.
 
     Each seed's context holds the frozen agent's explained outputs on every buffer and,
     with the exact loss, exact characteristic values on the exact buffer.
     """
     state = initialize(config, head, keys, buffers)
+    if config.estimator == "sampled":
+        # The source's sampled characteristic trains nothing; its pool is the train buffer.
+        return state, None
     features = state.buffers.train.shape[-1]
 
     def context(
@@ -571,3 +595,33 @@ def exact_characteristic(
     count = jnp.sum(flat_valid, dtype=jnp.int32)
     # Coalition 0 masks every feature, so every state shares its single key.
     return ExactCharacteristic(states, state_counts > 0, at_states, compact_keys, compact_values, count, values[0, 0])
+
+
+def sampled_values(pool: SampledPool, key: Array, observations: Observations, coalitions: Coalitions) -> Values:
+    """A sampled characteristic (upstream ValuePolicyCharacteristicSample, one draw): for every row,
+    v_F of a pool row agreeing with it on the coalition, uniform among the matching rows.
+
+    Like the source, which reads `Cs[0]`, every row uses the first coalition. The source scores
+    each (row, pool row) pair with `torch.rand` where they match and MASK where they do not, and
+    takes the top score (a uniform pool row when nothing matches, as `topk` ties then pick from
+    the freshly permuted pool). Here one uniform score per pair is raised by 1 for matches.
+    """
+    features = observations.shape[-1]
+    rows = observations.reshape(-1, features)
+    coalition = coalitions.reshape(-1, features)[0]
+    count = rows.shape[0]
+    size = min(SAMPLE_CHUNK, count)
+    chunks = -(-count // size)
+    padded = jnp.pad(rows, ((0, chunks * size - count), (0, 0)))
+
+    def chunk(coalition: Array, pool: Array, inputs: tuple[Array, Array]) -> Array:
+        chunk_key, rows = inputs
+        scores = jax.random.uniform(chunk_key, (rows.shape[0], pool.shape[0]), jnp.float32)
+        matches = jnp.all((rows[:, None, :] == pool[None, :, :]) | ~coalition, axis=-1)
+        return jnp.argmax(jnp.where(matches, scores + 1.0, scores), axis=-1).astype(jnp.int32)
+
+    picked: Array = jax.lax.map(
+        partial(chunk, coalition, pool.observations), (jax.random.split(key, chunks), padded.reshape(chunks, size, -1))
+    )
+    indices = picked.reshape(-1)[:count]
+    return pool.values[indices].reshape(*observations.shape[:-1], pool.values.shape[-1])

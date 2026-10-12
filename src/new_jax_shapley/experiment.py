@@ -44,11 +44,14 @@ class ExperimentConfig:
             raise ValueError("the agent stage trains one agent, or one per characteristic seed")
         if self.outcome is not None and (
             self.characteristic.kind != "behaviour"
-            or self.explained_seed is None
-            or self.explained_seed not in self.outcome.seeds
             or self.outcome.env != self.algorithm.env
+            or (self.explained_seed is not None and self.explained_seed not in self.outcome.seeds)
+            or (self.explained_seed is None and (self.outcome.seeds != self.characteristic.seeds or self.shapley))
         ):
-            raise ValueError("an outcome stage conditions on behaviour seed explained_seed, also an outcome seed")
+            raise ValueError(
+                "an outcome stage conditions on behaviour seed explained_seed (also an outcome seed, which "
+                "Shapley models explain), or pairs outcome seed s with behaviour seed s (no Shapley models)"
+            )
         if self.explained_seed is None:
             if any(stage.seeds != self.characteristic.seeds for stage in self.shapley):
                 raise ValueError("paired Shapley seeds must equal the characteristic seeds")
