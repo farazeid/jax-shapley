@@ -13,7 +13,7 @@ matches FastSVERL `Buffer` insertion and sampling, with fixed shapes.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from math import isfinite
@@ -35,7 +35,7 @@ from jaxtyping import Bool, Float, Int
 from new_jax_shapley import backends
 from new_jax_shapley.backends import Track
 from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig, ModelInput
+from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig, ModelInput, soft_update
 from new_jax_shapley.common.supervised_learning import stack_seeds
 from new_jax_shapley.envs import (
     Gridworld,
@@ -258,32 +258,8 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
                 state = checkpoints.load(Path(directory), template, settings)
                 return state, None, trained_agent(config, state)
 
-            def log(
-                runs: tuple[wandb.Run | trackio.Run, ...], num_envs: int, seed: Array, metrics: StepMetrics
-            ) -> None:
-                """The source's DQN scalars; episodes finishing on the same step are averaged."""
-                step = int(metrics.global_step)
-                completed = np.asarray(metrics.completed)
-                row: dict[str, float] = {}
-                if completed.any():
-                    row["agent/episodic_return"] = float(np.asarray(metrics.episode_return)[completed].mean())
-                    row["agent/episodic_length"] = float(np.asarray(metrics.episode_length)[completed].mean())
-                    row["agent/epsilon"] = float(metrics.epsilon)
-                if bool(metrics.updated) and step % LOG_STEPS < num_envs:
-                    row["agent/DQN_loss"] = float(metrics.loss)
-                if row:
-                    runs[int(seed)].log(row, step=step)
-
-            def log_evaluation(
-                runs: tuple[wandb.Run | trackio.Run, ...], seed: Array, metrics: EvaluationMetrics
-            ) -> None:
-                """Each completed evaluation episode's return, stepped by its episode number."""
-                returns = np.asarray(metrics.episode_return)[np.asarray(metrics.completed)]
-                for index, value in enumerate(returns):
-                    runs[int(seed)].log({"eval/episodic_return": float(value)}, step=int(metrics.first_episode) + index)
-
             program = nnx.jit(
-                partial(train, config, partial(log, runs, config.num_envs), partial(log_evaluation, runs))
+                partial(train, config, partial(log_step, runs, config.num_envs), partial(log_evaluation, runs))
             )
             results = [program(key, jnp.asarray(index, jnp.int32)) for index, key in enumerate(keys)]
             state = stack_seeds([state for state, _ in results])
@@ -296,6 +272,30 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
         finally:
             for run in runs:
                 run.finish()
+
+
+def log_step(runs: Sequence[backends.Logger], num_envs: int, seed: Array, metrics: StepMetrics) -> None:
+    """The source's DQN scalars into seed `seed`'s run (a host callback): episode statistics when episodes
+    finished (averaged when several finish on the same step: a step holds one value per tag), and the
+    loss when the global step crosses a multiple of 100."""
+    step = int(metrics.global_step)
+    completed = np.asarray(metrics.completed)
+    row: dict[str, float] = {}
+    if completed.any():
+        row["agent/episodic_return"] = float(np.asarray(metrics.episode_return)[completed].mean())
+        row["agent/episodic_length"] = float(np.asarray(metrics.episode_length)[completed].mean())
+        row["agent/epsilon"] = float(metrics.epsilon)
+    if bool(metrics.updated) and step % LOG_STEPS < num_envs:
+        row["agent/DQN_loss"] = float(metrics.loss)
+    if row:
+        runs[int(seed)].log(row, step=step)
+
+
+def log_evaluation(runs: Sequence[backends.Logger], seed: Array, metrics: EvaluationMetrics) -> None:
+    """Each completed evaluation episode's return, stepped by its episode number (a host callback)."""
+    returns = np.asarray(metrics.episode_return)[np.asarray(metrics.completed)]
+    for index, value in enumerate(returns):
+        runs[int(seed)].log({"agent/eval_episodic_return": float(value)}, step=int(metrics.first_episode) + index)
 
 
 def train(
@@ -393,12 +393,14 @@ def step(
 
     loss = nnx.cond(should_learn, learn, skip, state.model, state.target, state.optimizer, sampled, config.gamma)
 
-    def soft_update(model: QNetwork, target: QNetwork, tau: float) -> None:
-        for source, destination in zip(model.mlp.layers, target.mlp.layers, strict=True):
-            destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
-            destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
-
-    nnx.cond(should_target, soft_update, lambda model, target, tau: None, state.model, state.target, config.tau)
+    nnx.cond(
+        should_target,
+        lambda model, target, tau: soft_update(model.mlp, target.mlp, tau),
+        lambda model, target, tau: None,
+        state.model,
+        state.target,
+        config.tau,
+    )
     next_state = RunState(
         state.model,
         state.target,
@@ -549,11 +551,16 @@ def choose_action(model: QNetwork, observations: ModelInput, epsilon: Array, key
     keys: Array = jax.random.split(key)
     # Sampling uses true zero-probability logits; the clamp applies only to reported log probabilities.
     actions: Array = jax.random.categorical(keys[1], jnp.log(probabilities), axis=-1).astype(jnp.int32)
-    # Torch Categorical renormalizes probabilities and clamps before converting to logits.
+    return actions, log_probabilities(probabilities, actions), keys[0]
+
+
+def log_probabilities(probabilities: Array, actions: Array) -> Array:
+    """The log-probability of each action, as Torch Categorical reports it: probabilities renormalised
+    and clamped to [eps, 1 - eps] before taking logs."""
     normalised = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
     clamp = jnp.finfo(jnp.float32).eps
     logits = jnp.log(jnp.clip(normalised, clamp, 1 - clamp))
-    return actions, jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0], keys[0]
+    return jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0]
 
 
 def environment_step(

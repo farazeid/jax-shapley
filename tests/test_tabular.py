@@ -6,22 +6,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 
-from jax_shapley.networks import QNetwork, dqn_config
-from jax_shapley.tabular import TabularModel, policy_q_values, state_indices, transition_model
-from jax_shapley.train_dqn import (
-    EnvironmentConfig,
-    GridworldConfig,
-    HypercubeConfig,
-    Mastermind222Config,
-    exploration_probabilities,
-)
-from tests.explanation_support import assign
-from tests.explanation_support import load_fixture as load_explanations
+from new_jax_shapley.algorithms.dqn import Env
+from new_jax_shapley.characteristic_models import behaviour
+from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
+from new_jax_shapley.common.tabular import TabularModel, policy_q_values, state_indices, transition_model
+from new_jax_shapley.envs import Gridworld, Hypercube, Mastermind
+from tests.fixture_support import layout, load_agent
+from tests.fixture_support import load_fixture as load_explanations
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_outcome.npz"
-CONFIGS: dict[str, EnvironmentConfig] = {"gridworld": GridworldConfig(), "mastermind222": Mastermind222Config()}
+CONFIGS: dict[str, Env] = {"gridworld": Gridworld(), "mastermind222": Mastermind(2, 2, 2)}
 
 
 @pytest.mark.parametrize("case", tuple(CONFIGS))
@@ -56,10 +51,9 @@ def test_policy_q_values_match_upstream_value_iteration(case: str, policy: str) 
     if policy == "uniform":
         probabilities = jnp.full(model.rewards.shape, 1.0 / actions, jnp.float32)
     else:
-        explanations = load_explanations()
-        agent = QNetwork(dqn_config(model.states.shape[1], actions, hidden_widths=(64, 64)), rngs=nnx.Rngs(0))
-        assign(agent.mlp, explanations, f"{case}_agent")
-        probabilities = exploration_probabilities(agent(model.states).q_values, jnp.asarray(0.2, jnp.float32))
+        agent = load_agent(load_explanations(), layout(case))
+        config = CharacteristicConfig(CONFIGS[case], policy="explore")
+        probabilities = behaviour.targets(config, agent, model.states)
     q_values = policy_q_values(model, probabilities, 1.0)
     rows, valid = state_indices(model, jnp.asarray(fixture[f"{case}_q_{policy}_states"]))
     assert bool(valid.all())
@@ -68,7 +62,7 @@ def test_policy_q_values_match_upstream_value_iteration(case: str, policy: str) 
 
 
 def test_hypercube_model_structure_and_index_lookup() -> None:
-    model = transition_model(HypercubeConfig(3, 3))
+    model = transition_model(Hypercube(3, 3))
     assert model.states.shape == (26, 3)  # Every cell except the goal.
     sums = np.asarray(model.continuation.sum(axis=-1))
     np.testing.assert_allclose(sums[sums > 0], 1.0)  # Only goal-reaching moves terminate.
@@ -79,7 +73,7 @@ def test_hypercube_model_structure_and_index_lookup() -> None:
 
 
 def test_vectorised_policy_evaluation_compiles_and_matches() -> None:
-    model = transition_model(Mastermind222Config())
+    model = transition_model(Mastermind(2, 2, 2))
     policies = jax.nn.softmax(jax.random.normal(jax.random.key(0), (6, *model.rewards.shape)), axis=-1)
 
     def evaluate(model: TabularModel, policies: jax.Array) -> jax.Array:

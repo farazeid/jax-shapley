@@ -17,12 +17,18 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Protocol
 
 import wandb
 
 type Track = Literal["wandb", "trackio"]
 type Scalars = dict[str, float]
+
+
+class Logger(Protocol):
+    """What live logging needs of a run: wandb's and trackio's `Run.log`."""
+
+    def log(self, data: dict[str, float], /, step: int | None = None) -> None: ...
 
 
 class TrackedRun(NamedTuple):

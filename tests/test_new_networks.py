@@ -12,34 +12,33 @@ import pytest
 from flax import nnx
 
 from jax_shapley import networks as old
-from new_jax_shapley.algorithms.dqn import QNetwork
-from new_jax_shapley.algorithms.ppo import PPOActor, PPOCritic
-from new_jax_shapley.common.networks import LayerConfig, MLPConfig, OrthogonalInit, TorchLinearInit
+from new_jax_shapley.common.networks import OrthogonalInit
 from tests.network_cases import NETWORK_CASES, NetworkCase, make_network
 
 
 @pytest.mark.parametrize("case", NETWORK_CASES, ids=lambda case: case.name)
 def test_networks_match_the_current_package(case: NetworkCase) -> None:
+    # The cases build new_jax_shapley networks; the reference is jax_shapley's from the same config.
     layers = tuple(
-        LayerConfig(
+        old.LayerConfig(
             layer.features,
             layer.activation,
-            OrthogonalInit(layer.initialization.gain, layer.initialization.bias)
-            if isinstance(layer.initialization, old.OrthogonalInit)
-            else TorchLinearInit(),
+            old.OrthogonalInit(layer.initialization.gain, layer.initialization.bias)
+            if isinstance(layer.initialization, OrthogonalInit)
+            else old.TorchLinearInit(),
         )
         for layer in case.config.layers
     )
-    config = MLPConfig(case.config.input_features, layers)
+    config = old.MLPConfig(case.config.input_features, layers)
     rngs = nnx.Rngs(0)
-    network = (
-        PPOActor(config, rngs=rngs)
+    reference = (
+        old.PPOActor(config, rngs=rngs)
         if case.kind == "actor"
-        else PPOCritic(config, rngs=rngs)
+        else old.PPOCritic(config, rngs=rngs)
         if case.kind == "critic"
-        else QNetwork(config, rngs=rngs)
+        else old.QNetwork(config, rngs=rngs)
     )
-    reference = make_network(case, seed=0)
+    network = make_network(case, seed=0)
     for left, right in zip(jax.tree.leaves(nnx.state(reference)), jax.tree.leaves(nnx.state(network)), strict=True):
         np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
     features = case.config.input_features

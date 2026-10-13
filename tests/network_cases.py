@@ -5,7 +5,9 @@ from typing import Literal
 
 from flax import nnx
 
-from jax_shapley.networks import LayerConfig, MLPConfig, OrthogonalInit, PPOActor, PPOCritic, QNetwork, dqn_config
+from new_jax_shapley.algorithms.dqn import QNetwork
+from new_jax_shapley.algorithms.ppo import PPOActor, PPOCritic
+from new_jax_shapley.common.networks import LayerConfig, MLPConfig, OrthogonalInit
 
 type AgentNetwork = QNetwork | PPOActor | PPOCritic
 
@@ -24,6 +26,13 @@ def make_network(case: NetworkCase, seed: int = 0) -> AgentNetwork:
     if case.kind == "critic":
         return PPOCritic(case.config, rngs=rngs)
     return QNetwork(case.config, rngs=rngs)
+
+
+def dqn_config(input_features: int, num_actions: int, *, hidden_widths: tuple[int, ...] = (64, 64)) -> MLPConfig:
+    """The experiment scripts' DQN architecture: ReLU hidden layers, one unactivated output per action."""
+    return MLPConfig(
+        input_features, (*tuple(LayerConfig(width, "relu") for width in hidden_widths), LayerConfig(num_actions))
+    )
 
 
 NETWORK_CASES = (

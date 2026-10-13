@@ -10,7 +10,7 @@ seeds no-op while others continue; at the end every seed restores its best-valid
 model. The loop returns every epoch's metrics, (epochs, seeds) along the leading axes.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, fields
 from functools import partial
 from math import isfinite, nan
@@ -20,12 +20,11 @@ from typing import Literal, Protocol, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
-import trackio
 import tyro
-import wandb
 from flax import nnx, struct
 from jax import Array
 
+from new_jax_shapley import backends
 from new_jax_shapley.common.networks import AdamConfig
 
 type Partition = Literal["train", "validation", "exact"]
@@ -333,7 +332,7 @@ def gradient_step[Model: nnx.Module, Context, Frozen, Config](
     return value
 
 
-def log_epochs(runs: tuple[wandb.Run | trackio.Run, ...], model: str, exact_loss: bool, metrics: EpochMetrics) -> None:
+def log_epochs(runs: Sequence[backends.Logger], model: str, exact_loss: bool, metrics: EpochMetrics) -> None:
     """The source's train_models scalars, `model/{model}_{epoch,val,exact}_loss`, into each seed's run
     (a host callback for `train`'s `log`; stopped seeds log nothing)."""
     active, steps = np.asarray(metrics.active), np.asarray(metrics.step)

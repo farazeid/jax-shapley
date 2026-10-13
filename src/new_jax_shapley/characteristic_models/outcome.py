@@ -56,7 +56,7 @@ from new_jax_shapley.characteristic_models.behaviour import (
 )
 from new_jax_shapley.common import checkpoints
 from new_jax_shapley.common.coalitions import MASK, Coalitions, Observations, coalition_table, mask
-from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig
+from new_jax_shapley.common.networks import MLP, AdamConfig, LayerConfig, MLPConfig, soft_update
 from new_jax_shapley.common.supervised_learning import (
     EpochMetrics,
     Partition,
@@ -702,12 +702,13 @@ def on_policy_step(
     # The source breaks out of the loop before this step's target update.
     target = (global_step % training.target_network_frequency < training.num_envs) & ~stopped
 
-    def soft_update(tau: float, networks: OutcomeNetworks) -> None:
-        for source, destination in zip(networks.model.mlp.layers, networks.target.mlp.layers, strict=True):
-            destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
-            destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
-
-    nnx.cond(target, partial(soft_update, config.tau), lambda networks: None, state.networks)
+    nnx.cond(
+        target,
+        lambda networks, tau: soft_update(networks.model.mlp, networks.target.mlp, tau),
+        lambda networks, tau: None,
+        state.networks,
+        config.tau,
+    )
     step = state.step + 1
     next_state = OnPolicyState(
         state.networks,
@@ -906,10 +907,7 @@ def update(
         ),
     )
     optimizer.update(networks, gradients)
-    tau = config.tau
-    for source, target in zip(networks.model.mlp.layers, networks.target.mlp.layers, strict=True):
-        target.kernel[...] = tau * source.kernel[...] + (1 - tau) * target.kernel[...]
-        target.bias[...] = tau * source.bias[...] + (1 - tau) * target.bias[...]
+    soft_update(networks.model.mlp, networks.target.mlp, config.tau)
     return value
 
 
