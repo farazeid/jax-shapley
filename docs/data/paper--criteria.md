@@ -1,6 +1,6 @@
 # Pre-registered criteria: JAX runs against the published FastSVERL results
 
-Committed before any JAX run used in the comparison exists. The published targets are `paper--published-{curves,bars,tables}.csv`, extracted from upstream's own plot outputs and tables at FastSVERL `25b2cbe` (`scripts/paper_port/extract_published.py`). `scripts/paper_port/compare.py` applies these rules unchanged.
+Committed before any JAX run used in the comparison exists. The published targets are `paper--published-{curves,bars,tables}.csv`, extracted from upstream's own plot outputs and tables at FastSVERL `25b2cbe` (`scripts/paper/extract_published.py`). `scripts/paper/compare.py` applies these rules unchanged.
 
 ## Why tolerances rather than equivalence tests
 

@@ -14,7 +14,7 @@ group whose matching run was configured with the series' settings (e.g. a Hyperc
 and dimension). Figures whose experiments are not ported yet, or have no tracked runs, are
 listed as missing.
 
-Usage: uv run --group benchmark python scripts/paper_port/figures.py --track wandb|trackio [--output docs/data]
+Usage: uv run --group benchmark python scripts/paper/figures.py --track wandb|trackio [--output docs/data]
 """
 
 from __future__ import annotations

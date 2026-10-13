@@ -49,7 +49,7 @@ Initialization distributions and deterministic JAX key handling are validated; s
 Normal tests only read these committed fixtures. To regenerate them, use an isolated PyTorch environment and a clean checkout of the pinned FastSVERL source:
 
 ```bash
-uv run --script scripts/networks_port/collect_fastsverl_networks.py \
+uv run --script scripts/fixtures/collect_fastsverl_networks.py \
   /path/to/fastsverl tests/fixtures/fastsverl_networks.npz
 ```
 

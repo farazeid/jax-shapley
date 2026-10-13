@@ -6,14 +6,14 @@ This guide maps every figure and table in the FastSVERL paper (arXiv 2511.06094)
 
 1. **Agents.** Agents are trained with `experiments/dqn/*.sh`, the large Mastermind agents with `experiments/dqn/mastermind.sh SIZE`, and the per-seed agents inside the off-policy and Hypercube recipes.
 2. **Explanations.** The `experiments/explanations/*.sh` recipes below run explanations; the `runs/paper/run_*.sh` chains run them in dependency order.
-3. **Figures and tables.** Both scripts read only from the tracking backend (`--track wandb|trackio`, `--project`, `--entity`), taking each experiment's latest run group from `python -m new_jax_shapley.main NAME --track ...`. Figures and tables whose experiments are not ported to `new_jax_shapley/configs/` yet, or have no tracked runs, are reported missing. `scripts/paper_port/figures.py` regenerates every published curve with upstream `plot()` statistics: nearest-step merge, interpolation, mean and standard error, `n_batches` scaling, `start_epoch` offsets and SEM correction. It also regenerates the Hypercube bars with upstream `barcharts`. `scripts/paper_port/tables.py` regenerates Tables 1–4 with upstream `calculate_final_stats` and `plot_explanations.py`. Table 2 restores its models from the experiment's checkpoint artifacts. With wandb, the cloud is the source of truth: everything pulled locally is deleted when the script or experiment ends.
-4. **Comparison.** `scripts/paper_port/compare.py` applies the criteria in `docs/data/paper--criteria.md`, which were committed before any comparison run, to the targets extracted from upstream's own plot files (`scripts/paper_port/extract_published.py`). It writes `docs/data/paper--comparison.csv`, `docs/data/paper--claims-results.csv` and overlays in `docs/figures/paper/`.
+3. **Figures and tables.** Both scripts read only from the tracking backend (`--track wandb|trackio`, `--project`, `--entity`), taking each experiment's latest run group from `python -m new_jax_shapley.main NAME --track ...`. Figures and tables whose experiments are not ported to `new_jax_shapley/configs/` yet, or have no tracked runs, are reported missing. `scripts/paper/figures.py` regenerates every published curve with upstream `plot()` statistics: nearest-step merge, interpolation, mean and standard error, `n_batches` scaling, `start_epoch` offsets and SEM correction. It also regenerates the Hypercube bars with upstream `barcharts`. `scripts/paper/tables.py` regenerates Tables 1–4 with upstream `calculate_final_stats` and `plot_explanations.py`. Table 2 restores its models from the experiment's checkpoint artifacts. With wandb, the cloud is the source of truth: everything pulled locally is deleted when the script or experiment ends.
+4. **Comparison.** `scripts/paper/compare.py` applies the criteria in `docs/data/paper--criteria.md`, which were committed before any comparison run, to the targets extracted from upstream's own plot files (`scripts/paper/extract_published.py`). It writes `docs/data/paper--comparison.csv`, `docs/data/paper--claims-results.csv` and overlays in `docs/figures/paper/`.
 
 ```bash
 uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb
-uv run --group benchmark python scripts/paper_port/figures.py --track wandb
-uv run python scripts/paper_port/tables.py --track wandb
-uv run --group benchmark python scripts/paper_port/compare.py
+uv run --group benchmark python scripts/paper/figures.py --track wandb
+uv run python scripts/paper/tables.py --track wandb
+uv run --group benchmark python scripts/paper/compare.py
 ```
 
 ## Figures and tables
@@ -24,7 +24,7 @@ uv run --group benchmark python scripts/paper_port/compare.py
 | Fig 4 (Mastermind-333) | `fastsverl/{characteristics,shapleys}/dqn_{policy,value}_mastermind.py` | `mastermind.sh 333` | 20 seeds; every Shapley seed explains characteristic seed 1 |
 | Figs 2, 5: Hypercube updates to target loss | `hypercube/hypercube_{policy,value}.py` | `hypercube.sh` | 20 cubes × 20 seeds, one agent per seed |
 | Tables 1, 3, 4; Fig 6: large Mastermind | `fastsverl/{characteristics,shapleys}/dqn_*_mastermind.py` | `mastermind.sh 443\|453\|463` | 10 seeds per stage; one off-policy outcome characteristic over the 10M replay |
-| Table 2: Mastermind-463 behaviour explanation | `shapleys/plots/plot_explanations.py` | `scripts/paper_port/tables.py` | Shapley seed 1 |
+| Table 2: Mastermind-463 behaviour explanation | `shapleys/plots/plot_explanations.py` | `scripts/paper/tables.py` | Shapley seed 1 |
 | Figs 3a, 7: off-policy characteristics (Mastermind-222) | `offpolicy/*/dqn_{policy,value}_mastermind.py` | `offpolicy.sh mastermind222` | 20 seeds, one agent per seed |
 | Figs 8, 9: importance weighting and clipping (Gridworld) | `offpolicy/*/dqn_{policy,value}_gwb.py` | `offpolicy.sh gridworld` | 20 seeds, one agent per seed |
 | Figs 3b, 10: continual learning | `parallel/dqn_{policy,value,performance}_*` | `continual.sh` | 20 seeds × ratios 1, 2, 10, 50; w_exact and w_policy groups |

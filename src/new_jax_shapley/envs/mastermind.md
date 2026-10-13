@@ -170,7 +170,7 @@ The offline reference fixture exhaustively covers 64 valid transitions: 4 goals 
 
 **Configuration.** DQN and explanation runs select a size with `train_dqn mastermind --env.code-size … --env.num-guesses … --env.num-pegs …` (`MastermindConfig`). `mastermind222` remains the 2-2-2 subcommand. `experiments/dqn/mastermind.sh 333|443|453|463` holds the paper's large agents.
 
-**Parity.** These sizes have too many histories to enumerate. `tests/fixtures/fastsverl_mastermind.npz` (from `scripts/envs_port/collect_fastsverl_transitions.py --fixtures mastermind`) holds 29,135 transitions from the unchanged upstream environment:
+**Parity.** These sizes have too many histories to enumerate. `tests/fixtures/fastsverl_mastermind.npz` (from `scripts/fixtures/collect_fastsverl_transitions.py --fixtures mastermind`) holds 29,135 transitions from the unchanged upstream environment:
 
 - every first guess against every goal, which pins the clue logic
 - 100 winning episodes per guess index and 200 losing episodes per size, which pin rewards and termination

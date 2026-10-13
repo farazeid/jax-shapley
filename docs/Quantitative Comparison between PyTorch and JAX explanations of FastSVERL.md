@@ -206,11 +206,4 @@ The steady-state gain comes from compiling each whole epoch (batch sampling, coa
 
 ## Reproduction
 
-From the repository root:
-
-```bash
-bash scripts/explanations_port/run.sh --margins-only   # JAX side, then pre-registered margins (commit them)
-bash scripts/explanations_port/run.sh --skip-jax       # upstream side, then the comparison
-```
-
-The script clones the pinned FastSVERL commit into a temporary directory and runs `./check.sh`. `run_jax.py` and `run_upstream.py` run sequentially, followed by `compare.py`, which refuses to run without committed margins. Raw losses and timings go to `docs/data/explanations-port--{jax,upstream}-{runs,timing}.csv`, the margins to `docs/data/explanations-port--margins.csv`, the tables to `docs/data/explanations-port--{summary,speed}.csv`, and the figures to `docs/figures/explanations-port--*.svg`. Temporary run artifacts are removed on exit.
+The comparison harness (`scripts/explanations_port/run.sh`, `run_jax.py`, `run_upstream.py` and `compare.py`) ran against the retired `jax_shapley` CLIs and was removed with them; it is preserved at commit `689be0f`. Its raw losses and timings remain in `docs/data/explanations-port--{jax,upstream}-{runs,timing}.csv`, the margins in `docs/data/explanations-port--margins.csv`, the tables in `docs/data/explanations-port--{summary,speed}.csv`, and the figures in `docs/figures/explanations-port--*.svg`.

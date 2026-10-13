@@ -61,13 +61,7 @@ For Hypercube 6x5, the unmodified source owns a large transition dictionary per 
 
 ## Reproduction
 
-Run the complete pipeline from the repository root. It temporarily clones the pinned FastSVERL commit and removes the checkout on exit:
-
-```bash
-bash scripts/envs_port/run.sh
-```
-
-The equivalent individual stages are:
+The throughput benchmark (`scripts/envs_port/run.sh`, `benchmark_throughput.py`, `summarise_throughput.py` and `plot_throughput.py`) was retired after the port; it is preserved at commit `689be0f`, and its results remain in `docs/data/` and `docs/figures/`. The remaining stages are:
 
 ```bash
 uv sync --all-groups --extra cuda
@@ -77,23 +71,14 @@ JAX_PLATFORMS=cpu uv run --extra cuda pytest
 JAX_PLATFORMS=cuda uv run --extra cuda pytest tests/test_env_transition_parity.py -m gpu
 
 # Reference transitions; SOURCE_ROOT is a local checkout at the pinned commit
-uv run scripts/envs_port/collect_fastsverl_transitions.py --source-root "$SOURCE_ROOT"
+uv run scripts/fixtures/collect_fastsverl_transitions.py --source-root "$SOURCE_ROOT"
 
 # Parity CSVs are optional pytest outputs
 JAX_PLATFORMS=cpu uv run --extra cuda pytest tests/test_env_transition_parity.py -m "not gpu" --parity-output docs/data/envs-port--parity--cpu.csv
 JAX_PLATFORMS=cuda uv run --extra cuda pytest tests/test_env_transition_parity.py -m gpu --parity-output docs/data/envs-port--parity--gpu.csv
-
-# Throughput; SOURCE_ROOT is the same pinned local checkout
-uv run --group benchmark scripts/envs_port/benchmark_throughput.py --backend original --source-root "$SOURCE_ROOT" --output docs/data/envs-port--throughput--gymnasium-cpu.csv
-JAX_PLATFORMS=cpu uv run --all-groups --extra cuda scripts/envs_port/benchmark_throughput.py --backend jax --output docs/data/envs-port--throughput--jax-cpu.csv
-JAX_PLATFORMS=cuda uv run --all-groups --extra cuda scripts/envs_port/benchmark_throughput.py --backend jax --output docs/data/envs-port--throughput--jax-gpu.csv
-
-# Derived data and figures
-uv run --group benchmark scripts/envs_port/summarise_throughput.py
-uv run --group benchmark scripts/envs_port/plot_throughput.py
 ```
 
-GPU-specific test and benchmark stages log that they were skipped and exit successfully when no JAX GPU backend is available. Skipped GPU benchmark points are recorded with `status=gpu_unavailable` and excluded from the generated summary and figure.
+GPU-specific tests log that they were skipped and exit successfully when no JAX GPU backend is available.
 
 All adjustable script settings—including rollout sizes, sample counts, timing thresholds, figure dimensions, and output paths—are exposed through `tyro`. Run any entry point with `--help` to inspect them. This Markdown report is maintained by hand; the scripts regenerate only measurements, the summary CSV, and figures.
 

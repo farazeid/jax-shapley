@@ -298,7 +298,7 @@ controlled numerical dependencies, batches, and weights; it does not initialize
 telemetry. Regenerate only in a separate PyTorch environment:
 
 ```bash
-uv run --script scripts/networks_port/collect_fastsverl_dqn.py \
+uv run --script scripts/fixtures/collect_fastsverl_dqn.py \
     /path/to/pinned/fastsverl tests/fixtures/fastsverl_dqn.npz
 ```
 
@@ -312,7 +312,7 @@ events using controlled agent/environment inputs in the separate reference
 environment. Its collector verifies the source hash:
 
 ```bash
-uv run --script scripts/networks_port/collect_fastsverl_logging.py \
+uv run --script scripts/fixtures/collect_fastsverl_logging.py \
     --source /path/to/pinned/fastsverl/fastsverl/training.py
 ```
 
