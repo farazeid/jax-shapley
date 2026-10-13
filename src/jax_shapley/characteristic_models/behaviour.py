@@ -352,14 +352,13 @@ def fit(
     ) -> CharacteristicContext:
         train_targets = targets(config, agent, buffers.train)
         validation_targets = targets(config, agent, buffers.validation)
-        coalitions = jnp.asarray(coalition_table(buffers.exact.shape[-1]))
-        exact = (
-            exact_characteristic(
+        exact = None
+        if config.train.exact_loss:
+            # Every coalition: 2^features rows, so only built when exact values are wanted.
+            coalitions = jnp.asarray(coalition_table(buffers.exact.shape[-1]))
+            exact = exact_characteristic(
                 buffers.exact, targets(config, agent, buffers.exact), coalitions, max_unique=max_unique
             )
-            if config.train.exact_loss
-            else None
-        )
         behaviour = buffers.behaviour
         if behaviour is None:
             return CharacteristicContext(buffers, train_targets, validation_targets, exact)
