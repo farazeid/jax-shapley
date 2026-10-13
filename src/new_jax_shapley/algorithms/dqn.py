@@ -310,127 +310,127 @@ def train(
     """
     env = EpisodeStatisticsWrapper(config.env)
     state = initialize(config, key)
-
-    def step(
-        config: DQNConfig,
-        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
-        log: StepLog | None,
-        seed: Array,
-        state: RunState,
-        index: Array,
-    ) -> tuple[RunState, StepMetrics]:
-        """Act, store, then learn and soft-update the target when due."""
-        del index
-        global_step = state.vector_step * config.num_envs
-        fraction = global_step.astype(jnp.float32) / (config.exploration_fraction * config.total_timesteps)
-        epsilon = jnp.maximum(config.start_e + (config.end_e - config.start_e) * fraction, config.end_e)
-        epsilon = epsilon.astype(jnp.float32)
-        actions, log_probabilities, key = choose_action(state.model, state.observations, epsilon, state.key)
-        keys: Array = jax.random.split(key, config.num_envs + 1)
-        transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
-            keys[1:], state.env_state, actions, env.default_params
-        )
-        # Insert: upstream discards the prefix of an oversized insertion before advancing its pointer.
-        batch = TransitionBatch(
-            state.observations,
-            actions,
-            transition.rewards,
-            transition.raw_observations,
-            transition.terminated,
-            log_probabilities,
-        )
-        capacity = state.replay.data.observations.shape[0]
-        count = min(config.num_envs, capacity)
-        indices = (state.replay.pointer + jnp.arange(count, dtype=jnp.int32)) % capacity
-        stored = zip(jax.tree.leaves(state.replay.data), jax.tree.leaves(batch), strict=True)
-        data = TransitionBatch(*[storage.at[indices].set(values[-count:]) for storage, values in stored])
-        replay = ReplayState(
-            data,
-            (state.replay.pointer + count) % capacity,
-            jnp.minimum(state.replay.size + count, capacity).astype(jnp.int32),
-        )
-        ready = global_step > config.learning_starts
-        should_learn = ready & (global_step % config.train_frequency < config.num_envs)
-        should_target = ready & (global_step % config.target_network_frequency < config.num_envs)
-        # Sampling outside the condition is safe after insertion. Advance its stream
-        # only on actual updates, so grouping steps into chunks cannot change samples.
-        sample_keys: Array = jax.random.split(keys[0])
-        rows = jax.random.randint(sample_keys[1], (config.batch_size,), 0, replay.size, dtype=jnp.int32)
-        sampled = TransitionBatch(*[array[rows] for array in jax.tree.leaves(replay.data)])
-        key = jnp.where(should_learn, sample_keys[0], keys[0])
-
-        def learn(
-            model: QNetwork,
-            target: QNetwork,
-            optimizer: nnx.Optimizer[QNetwork],
-            batch: TransitionBatch,
-            gamma: float,
-        ) -> Array:
-            # NNX transformation has a dynamic return signature; assert its loss/gradient boundary.
-            loss, gradients = cast(
-                tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
-                nnx.value_and_grad(dqn_loss)(model, target, batch, gamma),
-            )
-            optimizer.update(model, gradients)
-            return loss
-
-        def skip(
-            model: QNetwork,
-            target: QNetwork,
-            optimizer: nnx.Optimizer[QNetwork],
-            batch: TransitionBatch,
-            gamma: float,
-        ) -> Array:
-            del model, target, optimizer, batch, gamma
-            return jnp.asarray(0.0, jnp.float32)
-
-        loss = nnx.cond(should_learn, learn, skip, state.model, state.target, state.optimizer, sampled, config.gamma)
-
-        def soft_update(model: QNetwork, target: QNetwork, tau: float) -> None:
-            for source, destination in zip(model.mlp.layers, target.mlp.layers, strict=True):
-                destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
-                destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
-
-        nnx.cond(should_target, soft_update, lambda model, target, tau: None, state.model, state.target, config.tau)
-        next_state = RunState(
-            state.model,
-            state.target,
-            state.optimizer,
-            replay,
-            transition.observations,
-            transition.state,
-            state.vector_step + 1,
-            state.updates + should_learn.astype(jnp.int32),
-            state.target_updates + should_target.astype(jnp.int32),
-            key,
-        )
-        metrics = StepMetrics(
-            global_step,
-            epsilon,
-            loss,
-            should_learn,
-            should_target,
-            transition.episode_return,
-            transition.episode_length,
-            transition.completed,
-        )
-        if log is not None:
-            loss_due = should_learn & (global_step % LOG_STEPS < config.num_envs)
-            jax.lax.cond(
-                jnp.any(transition.completed) | loss_due,
-                partial(jax.debug.callback, log, ordered=True),
-                lambda seed, metrics: None,
-                seed,
-                metrics,
-            )
-        return next_state, metrics
-
     state, metrics = nnx.scan(partial(step, config, env, log, seed), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
         state, jnp.arange(config.vector_steps, dtype=jnp.int32)
     )
     if not config.eval_episodes:
         return state, metrics
     return evaluate(config, log_evaluation, state, seed), metrics
+
+
+def step(
+    config: DQNConfig,
+    env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+    log: StepLog | None,
+    seed: Array,
+    state: RunState,
+    index: Array,
+) -> tuple[RunState, StepMetrics]:
+    """One vector step: act, store, then learn and soft-update the target when due (`index` is unused)."""
+    del index
+    global_step = state.vector_step * config.num_envs
+    fraction = global_step.astype(jnp.float32) / (config.exploration_fraction * config.total_timesteps)
+    epsilon = jnp.maximum(config.start_e + (config.end_e - config.start_e) * fraction, config.end_e)
+    epsilon = epsilon.astype(jnp.float32)
+    actions, log_probabilities, key = choose_action(state.model, state.observations, epsilon, state.key)
+    keys: Array = jax.random.split(key, config.num_envs + 1)
+    transition = jax.vmap(partial(environment_step, env), in_axes=(0, 0, 0, None))(
+        keys[1:], state.env_state, actions, env.default_params
+    )
+    # Insert: upstream discards the prefix of an oversized insertion before advancing its pointer.
+    batch = TransitionBatch(
+        state.observations,
+        actions,
+        transition.rewards,
+        transition.raw_observations,
+        transition.terminated,
+        log_probabilities,
+    )
+    capacity = state.replay.data.observations.shape[0]
+    count = min(config.num_envs, capacity)
+    indices = (state.replay.pointer + jnp.arange(count, dtype=jnp.int32)) % capacity
+    stored = zip(jax.tree.leaves(state.replay.data), jax.tree.leaves(batch), strict=True)
+    data = TransitionBatch(*[storage.at[indices].set(values[-count:]) for storage, values in stored])
+    replay = ReplayState(
+        data,
+        (state.replay.pointer + count) % capacity,
+        jnp.minimum(state.replay.size + count, capacity).astype(jnp.int32),
+    )
+    ready = global_step > config.learning_starts
+    should_learn = ready & (global_step % config.train_frequency < config.num_envs)
+    should_target = ready & (global_step % config.target_network_frequency < config.num_envs)
+    # Sampling outside the condition is safe after insertion. Advance its stream
+    # only on actual updates, so grouping steps into chunks cannot change samples.
+    sample_keys: Array = jax.random.split(keys[0])
+    rows = jax.random.randint(sample_keys[1], (config.batch_size,), 0, replay.size, dtype=jnp.int32)
+    sampled = TransitionBatch(*[array[rows] for array in jax.tree.leaves(replay.data)])
+    key = jnp.where(should_learn, sample_keys[0], keys[0])
+
+    def learn(
+        model: QNetwork,
+        target: QNetwork,
+        optimizer: nnx.Optimizer[QNetwork],
+        batch: TransitionBatch,
+        gamma: float,
+    ) -> Array:
+        # NNX transformation has a dynamic return signature; assert its loss/gradient boundary.
+        loss, gradients = cast(
+            tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+            nnx.value_and_grad(dqn_loss)(model, target, batch, gamma),
+        )
+        optimizer.update(model, gradients)
+        return loss
+
+    def skip(
+        model: QNetwork,
+        target: QNetwork,
+        optimizer: nnx.Optimizer[QNetwork],
+        batch: TransitionBatch,
+        gamma: float,
+    ) -> Array:
+        del model, target, optimizer, batch, gamma
+        return jnp.asarray(0.0, jnp.float32)
+
+    loss = nnx.cond(should_learn, learn, skip, state.model, state.target, state.optimizer, sampled, config.gamma)
+
+    def soft_update(model: QNetwork, target: QNetwork, tau: float) -> None:
+        for source, destination in zip(model.mlp.layers, target.mlp.layers, strict=True):
+            destination.kernel[...] = tau * source.kernel[...] + (1 - tau) * destination.kernel[...]
+            destination.bias[...] = tau * source.bias[...] + (1 - tau) * destination.bias[...]
+
+    nnx.cond(should_target, soft_update, lambda model, target, tau: None, state.model, state.target, config.tau)
+    next_state = RunState(
+        state.model,
+        state.target,
+        state.optimizer,
+        replay,
+        transition.observations,
+        transition.state,
+        state.vector_step + 1,
+        state.updates + should_learn.astype(jnp.int32),
+        state.target_updates + should_target.astype(jnp.int32),
+        key,
+    )
+    metrics = StepMetrics(
+        global_step,
+        epsilon,
+        loss,
+        should_learn,
+        should_target,
+        transition.episode_return,
+        transition.episode_length,
+        transition.completed,
+    )
+    if log is not None:
+        loss_due = should_learn & (global_step % LOG_STEPS < config.num_envs)
+        jax.lax.cond(
+            jnp.any(transition.completed) | loss_due,
+            partial(jax.debug.callback, log, ordered=True),
+            lambda seed, metrics: None,
+            seed,
+            metrics,
+        )
+    return next_state, metrics
 
 
 def evaluate(config: DQNConfig, log: EvaluationLog | None, state: RunState, seed: Array) -> RunState:

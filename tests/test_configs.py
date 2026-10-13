@@ -1,8 +1,8 @@
 """Every registered experiment config loads, and every run script supplies what its config leaves open.
 
 Each `experiments/*.sh` runs with a stand-in `uv` that records its commands. Every recorded
-`new_jax_shapley.main` command must parse into a complete, valid experiment config: sweep
-scripts supply each of their config's MISSING fields (and only real fields).
+`new_jax_shapley.main` (or `.continual`) command must parse into a complete, valid config:
+sweep scripts supply each of their config's MISSING fields (and only real fields).
 """
 
 import dataclasses
@@ -15,14 +15,14 @@ from pathlib import Path
 import pytest
 import tyro
 
-from new_jax_shapley.experiment import load_configs
+from new_jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = sorted(path for path in (ROOT / "experiments").glob("*.sh") if path.name != "smoke.sh")
 
 
 def test_every_config_has_a_run_script() -> None:
-    assert {path.stem for path in SCRIPTS} == set(load_configs())
+    assert {path.stem for path in SCRIPTS} == set(load_configs(ExperimentConfig)) | set(load_configs(ContinualConfig))
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=[path.stem for path in SCRIPTS])
@@ -40,10 +40,14 @@ def test_run_scripts_complete_their_configs(script: Path, tmp_path: Path) -> Non
     subprocess.run([bash, str(script)], env=environment, check=True, cwd=ROOT)  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed local argv.
     commands = [shlex.split(line) for line in record.read_text().splitlines() if line.strip()]
     assert commands
-    configs = load_configs()
     for command in commands:
-        assert command[:4] == ["run", "python", "-m", "new_jax_shapley.main"], command
-        config = tyro.extras.overridable_config_cli(configs, args=command[4:])
+        assert command[:3] == ["run", "python", "-m"], command
+        if command[3] == "new_jax_shapley.main":
+            config: object = tyro.extras.overridable_config_cli(load_configs(ExperimentConfig), args=command[4:])
+        else:
+            assert command[3] == "new_jax_shapley.continual", command
+            config = tyro.extras.overridable_config_cli(load_configs(ContinualConfig), args=command[4:])
+        assert isinstance(config, ExperimentConfig | ContinualConfig)
         assert config.name == script.stem
         assert not _missing(config), _missing(config)
 

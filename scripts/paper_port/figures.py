@@ -32,7 +32,7 @@ import pandas as pd
 import tyro
 
 from new_jax_shapley import backends
-from new_jax_shapley.experiment import load_configs
+from new_jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
 
 type FloatArray = npt.NDArray[np.float64]
 type Run = tuple[FloatArray, FloatArray]
@@ -130,7 +130,12 @@ class MissingRunsError(Exception):
 
 
 def main(args: Args) -> None:
-    sources = Sources(args.track, args.project, args.entity, frozenset(load_configs()))
+    sources = Sources(
+        args.track,
+        args.project,
+        args.entity,
+        frozenset(load_configs(ExperimentConfig)) | frozenset(load_configs(ContinualConfig)),
+    )
     rows: list[tuple[str, str, float, float, float, int]] = []
     missing: list[str] = []
     for spec in figures():
@@ -323,16 +328,22 @@ def continual_figures() -> list[FigureSpec]:
     """parallel/plots: x is environment steps x 0.1; return and DQN loss come from one group."""
     specs = []
     for domain, environment in (("mastermind_222", "mastermind222"), ("gwb", "gridworld")):
+        experiment = f"continual_{environment}__sweep"
         for kind, name in (("behaviour", "policy"), ("prediction", "value"), ("outcome", "perf")):
             figure = f"app_{domain}_parallel_{name}_approx" + ("_behaviour" if kind == "outcome" else "")
+            stage = f"continual--{kind}"
             series = tuple(
-                Series(f"{ratio}:1", _tracked(f"continual_{environment}_{kind}_ratio{ratio}", "continual", _tag(kind)))
+                Series(
+                    f"{ratio}:1",
+                    _tracked(experiment, stage, "model/shapley_exact_loss", (stage, {"explain.update_ratio": ratio})),
+                )
                 for ratio in (1, 2, 10, 50)
             )
             specs.append(FigureSpec(figure, series, PARALLEL_SCALE))
         for tag, figure in (("agent/episodic_return", "return"), ("agent/DQN_loss", "dqn_loss")):
-            series = (Series("#1f77b4", _tracked(f"continual_{environment}_behaviour_ratio1", "continual", tag)),)
-            specs.append(FigureSpec(f"app_{domain}_parallel_{figure}", series, PARALLEL_SCALE))
+            stage = "continual--behaviour"
+            loader = _tracked(experiment, stage, tag, (stage, {"explain.update_ratio": 1}))
+            specs.append(FigureSpec(f"app_{domain}_parallel_{figure}", (Series("#1f77b4", loader),), PARALLEL_SCALE))
     specs.append(
         _renamed(specs, "app_mastermind_222_parallel_value_approx", "main_mastermind_222_parallel_value_approx")
     )
