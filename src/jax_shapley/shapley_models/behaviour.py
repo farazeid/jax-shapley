@@ -74,6 +74,9 @@ type Fit[Frozen] = Callable[
     tuple[TrainState[ShapleyModel], EpochMetrics],
 ]
 """A kind's compiled Shapley training: (config, max_unique, log, keys, agents, frozen, buffers)."""
+# Coalitions a learnt characteristic table evaluates at once (memory against speed; results are unchanged).
+COALITION_BATCH = 16
+
 type Contributions = Float[Array, "... features outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 type StateContributions = Float[Array, "unique features outputs"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
 
@@ -258,7 +261,7 @@ def stage[Frozen](
             state, metrics = program(keys, agents, frozen, inherited)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            runs[0].log_artifact(str(directory), name=artifact, type="shapley").wait()
+            backends.upload(runs[0], directory, artifact, "shapley")
             print(f"Shapley checkpoint: {artifact}:latest")
             return state, metrics
         finally:
@@ -336,7 +339,10 @@ def fit(
         values = (
             exact.at_states
             if config.with_exact_char
-            else masked_values(characteristic, exact.states[None], coalitions[:, None])
+            # A few coalitions at a time: every coalition at once holds coalitions x states activations.
+            else jax.lax.map(
+                partial(masked_values, characteristic, exact.states), coalitions, batch_size=COALITION_BATCH
+            )
         )
         return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 

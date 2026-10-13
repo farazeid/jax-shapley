@@ -37,6 +37,7 @@ from jax_shapley.characteristic_models import outcome as characteristic_outcome
 from jax_shapley.characteristic_models import prediction as characteristic_prediction
 from jax_shapley.common.supervised_learning import EpochMetrics, StateBuffers, TrainState, seed_slice, stack_seeds
 from jax_shapley.common.tabular import transition_model
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind
 from jax_shapley.experiment import ExperimentConfig, load_configs
 from jax_shapley.shapley_models import behaviour as shapley
 from jax_shapley.shapley_models import outcome as shapley_outcome
@@ -202,12 +203,20 @@ def compile_stages(config: ExperimentConfig) -> None:
             frozen,
         )
 
+    # Exact tables hold at most the exact buffer's rows, and at most the reachable observations:
+    # rollouts record only those. Small domains enumerate them in seconds; Mastermind-333 and
+    # larger take minutes, so they keep the buffer bound (a real run sizes the tables from its data).
+    env = stage.env
+    small = isinstance(env, Gridworld | Hypercube) or (
+        isinstance(env, Mastermind) and env.code_size * env.num_guesses <= 4
+    )
+    max_unique = min(stage.train.exact_size, transition_model(env).states.shape[0]) if small else stage.train.exact_size
     seeds = len(stage.seeds)
     inputs = nnx.eval_shape(partial(templates, seeds))
     keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
     replays = inputs.replays if stage.data == "replay" else None
     nnx.jit(partial(characteristic.collect, stage)).trace(keys, inputs.agents, replays).lower().compile()
-    program = nnx.jit(partial(characteristic.fit, stage, targets, head, stage.train.exact_size, lambda metrics: None))
+    program = nnx.jit(partial(characteristic.fit, stage, targets, head, max_unique, lambda metrics: None))
     program.trace(keys, inputs.agents, inputs.buffers).lower().compile()
 
     if outcome is not None:
@@ -234,9 +243,7 @@ def compile_stages(config: ExperimentConfig) -> None:
             )
             program.trace(keys, inputs.agents, inputs.outcomes, inputs.buffers).lower().compile()
             continue
-        program = nnx.jit(
-            partial(shapley.fit, stage, targets, head, shapley_config, stage.train.exact_size, lambda metrics: None)
-        )
+        program = nnx.jit(partial(shapley.fit, stage, targets, head, shapley_config, max_unique, lambda metrics: None))
         program.trace(keys, inputs.agents, inputs.models, inputs.buffers).lower().compile()
 
 

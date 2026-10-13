@@ -269,7 +269,7 @@ def stage(
             state, metrics = program(keys, agents, buffers)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            runs[0].log_artifact(str(directory), name=artifact, type="characteristic").wait()
+            backends.upload(runs[0], directory, artifact, "characteristic")
             print(f"Characteristic checkpoint: {artifact}:latest")
             return state, metrics
         finally:

@@ -14,12 +14,15 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol
 
+import trackio
 import wandb
+from wandb.sdk.wandb_run import Run as WandbRun
 
 type Track = Literal["wandb", "trackio"]
 type Scalars = dict[str, float]
@@ -38,10 +41,32 @@ class TrackedRun(NamedTuple):
     rows: list[Scalars]
 
 
+# Checkpoint upload attempts, and the wait before the first retry (doubling after each one).
+UPLOAD_ATTEMPTS = 5
+UPLOAD_BACKOFF_SECONDS = 30.0
+
 # wandb's local data, all redirected into the experiment's scratch folder.
 WANDB_DIRECTORIES = ("WANDB_DIR", "WANDB_CACHE_DIR", "WANDB_DATA_DIR", "WANDB_ARTIFACT_DIR")
 # Set while a session is open: nested sessions (a stage inside an experiment) reuse its folder.
 SESSION = "JAX_SHAPLEY_SESSION"
+
+
+def upload(run: WandbRun | trackio.Run, directory: Path, name: str, kind: str) -> None:
+    """Push a stage's checkpoint folder as an artifact, retrying transient backend failures.
+
+    A stage uploads its checkpoint only after training, so one busy or unreachable service
+    would otherwise discard hours of work. Other errors, and the last attempt's, propagate.
+    """
+    for attempt in range(UPLOAD_ATTEMPTS):
+        try:
+            run.log_artifact(str(directory), name=name, type=kind).wait()
+            return
+        except (wandb.errors.Error, OSError) as error:
+            if attempt == UPLOAD_ATTEMPTS - 1:
+                raise
+            delay = UPLOAD_BACKOFF_SECONDS * 2**attempt
+            print(f"Artifact {name} upload failed ({error}); retrying in {delay:.0f} s.", flush=True)
+            time.sleep(delay)
 
 
 @contextmanager
