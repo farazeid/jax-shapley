@@ -15,17 +15,17 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.characteristic_models import behaviour, prediction
-from new_jax_shapley.characteristic_models.behaviour import (
+from jax_shapley.algorithms import dqn
+from jax_shapley.characteristic_models import behaviour, prediction
+from jax_shapley.characteristic_models.behaviour import (
     EXACT_CHUNK,
     CharacteristicConfig,
     CharacteristicContext,
     CharacteristicModel,
     Kind,
 )
-from new_jax_shapley.common.coalitions import MASK, coalition_table, mask
-from new_jax_shapley.common.supervised_learning import (
+from jax_shapley.common.coalitions import MASK, coalition_table, mask
+from jax_shapley.common.supervised_learning import (
     ReplayBehaviour,
     StateBuffers,
     SupervisedConfig,

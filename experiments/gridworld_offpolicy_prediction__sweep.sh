@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the gridworld_offpolicy_prediction__sweep experiment (src/new_jax_shapley/configs/gridworld_offpolicy_prediction__sweep.py) for each of the paper's
+# Run the gridworld_offpolicy_prediction__sweep experiment (src/jax_shapley/configs/gridworld_offpolicy_prediction__sweep.py) for each of the paper's
 # off-policy groups (exact wo_weight unnormalised normalised clip_0.99 clip_0.995 clip_0.998), compiling each first.
 # Usage: bash experiments/gridworld_offpolicy_prediction__sweep.sh [--group GROUP] [-- overrides]
 set -euo pipefail
@@ -30,6 +30,6 @@ for group in "${groups[@]}"; do
         --characteristic.weighting "${swept[2]}"
         --characteristic.clip-coef "${swept[3]}"
     )
-    uv run python -m new_jax_shapley.main "$name" "${arguments[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
-    uv run python -m new_jax_shapley.main "$name" "${arguments[@]}" ${overrides[@]+"${overrides[@]}"}
+    uv run python -m jax_shapley.main "$name" "${arguments[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
+    uv run python -m jax_shapley.main "$name" "${arguments[@]}" ${overrides[@]+"${overrides[@]}"}
 done

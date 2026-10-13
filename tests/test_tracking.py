@@ -20,16 +20,16 @@ import trackio
 import wandb
 from flax import nnx
 
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.characteristic_models import behaviour as characteristic
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
-from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice, stack_seeds
-from new_jax_shapley.envs import Mastermind
-from new_jax_shapley.experiment import ExperimentConfig
-from new_jax_shapley.main import ExperimentResult, main, run
-from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
+from jax_shapley.algorithms import dqn
+from jax_shapley.characteristic_models import behaviour as characteristic
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig
+from jax_shapley.common import checkpoints
+from jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice, stack_seeds
+from jax_shapley.envs import Mastermind
+from jax_shapley.experiment import ExperimentConfig
+from jax_shapley.main import ExperimentResult, main, run
+from jax_shapley.shapley_models import behaviour as shapley
+from jax_shapley.shapley_models.behaviour import ShapleyConfig
 
 SEEDS = (1, 2)
 TRAINING = SupervisedConfig(epochs=3, batch_size=16, buffer_size=160, num_envs=4)
@@ -67,7 +67,7 @@ SMALL_RUN = [
 ]
 READ_GROUPS = """
 import json, sys
-from new_jax_shapley import backends
+from jax_shapley import backends
 track, project, entity = sys.argv[1], sys.argv[2], sys.argv[3] or None
 groups = backends.groups(track, project=project, entity=entity, prefix="mastermind222_behaviour")
 print(json.dumps({group: {name: run.rows for name, run in backends.runs(track, project=project, entity=entity, group=group).items()} for group in groups}))
@@ -222,7 +222,7 @@ def _record(items: list[dqn.StepMetrics], seed: jax.Array, metrics: dqn.StepMetr
 
 def _main(arguments: list[str], environment: dict[str, str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed local argv.
-        [sys.executable, "-m", "new_jax_shapley.main", *arguments],
+        [sys.executable, "-m", "jax_shapley.main", *arguments],
         env=environment,
         capture_output=True,
         text=True,

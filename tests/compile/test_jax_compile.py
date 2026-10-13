@@ -10,9 +10,9 @@ import jax.numpy as jnp
 import pytest
 from einops import rearrange
 
-from new_jax_shapley.envs import Gridworld, Hypercube, Mastermind, Mastermind222
-from new_jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo, StepInfo
-from new_jax_shapley.envs.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind, Mastermind222
+from jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo, StepInfo
+from jax_shapley.envs.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 
 class _BatchedStep[State, Params](Protocol):

@@ -16,10 +16,10 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms.dqn import Env, TransitionBatch
-from new_jax_shapley.characteristic_models import behaviour, outcome
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel
-from new_jax_shapley.characteristic_models.outcome import (
+from jax_shapley.algorithms.dqn import Env, TransitionBatch
+from jax_shapley.characteristic_models import behaviour, outcome
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel
+from jax_shapley.characteristic_models.outcome import (
     ExactOutcome,
     OutcomeConfig,
     OutcomeContext,
@@ -29,14 +29,14 @@ from new_jax_shapley.characteristic_models.outcome import (
     OutcomeTrainConfig,
     Variant,
 )
-from new_jax_shapley.common.coalitions import coalition_table
-from new_jax_shapley.common.networks import soft_update
-from new_jax_shapley.common.supervised_learning import StateBuffers, SupervisedConfig, gradient_step, seed_slice
-from new_jax_shapley.common.tabular import state_indices, transition_model
-from new_jax_shapley.envs import Gridworld, Mastermind
-from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models import outcome as outcome_shapley
-from new_jax_shapley.shapley_models.behaviour import ExactShapley, ShapleyConfig, ShapleyContext
+from jax_shapley.common.coalitions import coalition_table
+from jax_shapley.common.networks import soft_update
+from jax_shapley.common.supervised_learning import StateBuffers, SupervisedConfig, gradient_step, seed_slice
+from jax_shapley.common.tabular import state_indices, transition_model
+from jax_shapley.envs import Gridworld, Mastermind
+from jax_shapley.shapley_models import behaviour as shapley
+from jax_shapley.shapley_models import outcome as outcome_shapley
+from jax_shapley.shapley_models.behaviour import ExactShapley, ShapleyConfig, ShapleyContext
 from tests.fixture_support import (
     ATOL,
     RTOL,

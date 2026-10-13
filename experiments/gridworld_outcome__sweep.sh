@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the gridworld_outcome__sweep experiment (src/new_jax_shapley/configs/gridworld_outcome__sweep.py)
+# Run the gridworld_outcome__sweep experiment (src/jax_shapley/configs/gridworld_outcome__sweep.py)
 # for each outcome variant (off- and on-policy) with its exact values conditioned on the exact
 # and the learnt behaviour characteristic, compiling each first.
 # Usage: bash experiments/gridworld_outcome__sweep.sh [--variant off_policy|on_policy] [--with-exact-char True|False] [-- overrides]
@@ -19,7 +19,7 @@ done
 for variant in "${variants[@]}"; do
     for exact in "${choices[@]}"; do
         swept=(--outcome.variant "$variant" --outcome.with-exact-char "$exact")
-        uv run python -m new_jax_shapley.main "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
-        uv run python -m new_jax_shapley.main "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
+        uv run python -m jax_shapley.main "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
+        uv run python -m jax_shapley.main "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
     done
 done

@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from new_jax_shapley.envs import (
+from jax_shapley.envs import (
     Gridworld,
     GridworldState,
     Hypercube,
@@ -18,8 +18,8 @@ from new_jax_shapley.envs import (
     Mastermind222Params,
     Mastermind222State,
 )
-from new_jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo
-from new_jax_shapley.envs.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
+from jax_shapley.envs.contracts import EpisodeInfo, EpisodeStepInfo
+from jax_shapley.envs.wrappers import EnvironmentProtocol, EpisodeStatisticsState, EpisodeStatisticsWrapper
 
 
 class _BatchedStep(Protocol):

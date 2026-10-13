@@ -1,7 +1,7 @@
 """Every registered experiment config loads, and every run script supplies what its config leaves open.
 
 Each `experiments/*.sh` runs with a stand-in `uv` that records its commands. Every recorded
-`new_jax_shapley.main` (or `.continual`) command must parse into a complete, valid config:
+`jax_shapley.main` (or `.continual`) command must parse into a complete, valid config:
 sweep scripts supply each of their config's MISSING fields (and only real fields).
 """
 
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import tyro
 
-from new_jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
+from jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = sorted(path for path in (ROOT / "experiments").glob("*.sh") if path.name != "smoke.sh")
@@ -42,10 +42,10 @@ def test_run_scripts_complete_their_configs(script: Path, tmp_path: Path) -> Non
     assert commands
     for command in commands:
         assert command[:3] == ["run", "python", "-m"], command
-        if command[3] == "new_jax_shapley.main":
+        if command[3] == "jax_shapley.main":
             config: object = tyro.extras.overridable_config_cli(load_configs(ExperimentConfig), args=command[4:])
         else:
-            assert command[3] == "new_jax_shapley.continual", command
+            assert command[3] == "jax_shapley.continual", command
             config = tyro.extras.overridable_config_cli(load_configs(ContinualConfig), args=command[4:])
         assert isinstance(config, ExperimentConfig | ContinualConfig)
         assert config.name == script.stem

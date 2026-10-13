@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the continual_gridworld__sweep experiment (src/new_jax_shapley/configs/continual_gridworld__sweep.py) for each explanation
+# Run the continual_gridworld__sweep experiment (src/jax_shapley/configs/continual_gridworld__sweep.py) for each explanation
 # kind and update ratio (1, 2, 10, 50), compiling each first.
 # Usage: bash experiments/continual_gridworld__sweep.sh [--kind behaviour|prediction|outcome] [--ratio N] [-- overrides]
 set -euo pipefail
@@ -20,7 +20,7 @@ for kind in "${kinds[@]}"; do
     if [[ "$kind" == outcome ]]; then frequency=5000; fi
     for ratio in "${ratios[@]}"; do
         swept=(--explain.kind "$kind" --explain.update-ratio "$ratio" --explain.exact-frequency "$frequency")
-        uv run python -m new_jax_shapley.continual "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
-        uv run python -m new_jax_shapley.continual "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
+        uv run python -m jax_shapley.continual "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
+        uv run python -m jax_shapley.continual "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
     done
 done

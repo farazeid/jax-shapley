@@ -18,7 +18,7 @@ stage_overrides() {
 }
 
 # shellcheck disable=SC2046 # word splitting of the override lists is intended.
-exec uv run python -m new_jax_shapley.main "$name" \
+exec uv run python -m jax_shapley.main "$name" \
   --track trackio --project smoke \
   --algorithm.total-timesteps 320 --algorithm.learning-starts 160 --algorithm.buffer-size 320 --algorithm.batch-size 16 \
   $(stage_overrides characteristic) \

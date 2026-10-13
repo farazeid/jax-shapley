@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from new_jax_shapley.envs import (
+from jax_shapley.envs import (
     Gridworld,
     GridworldState,
     Hypercube,

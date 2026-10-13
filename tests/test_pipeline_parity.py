@@ -18,12 +18,12 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.characteristic_models import behaviour, prediction
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicContext, Kind
-from new_jax_shapley.common.coalitions import coalition_table
-from new_jax_shapley.common.rollouts import collect_observations
-from new_jax_shapley.common.supervised_learning import (
+from jax_shapley.algorithms import dqn
+from jax_shapley.characteristic_models import behaviour, prediction
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicContext, Kind
+from jax_shapley.common.coalitions import coalition_table
+from jax_shapley.common.rollouts import collect_observations
+from jax_shapley.common.supervised_learning import (
     EpochMetrics,
     ReplayBehaviour,
     StateBuffers,
@@ -32,10 +32,10 @@ from new_jax_shapley.common.supervised_learning import (
     stack_seeds,
     train,
 )
-from new_jax_shapley.envs import Hypercube, Mastermind
-from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
-from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models.behaviour import ExactShapley, ShapleyConfig, ShapleyContext
+from jax_shapley.envs import Hypercube, Mastermind
+from jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
+from jax_shapley.shapley_models import behaviour as shapley
+from jax_shapley.shapley_models.behaviour import ExactShapley, ShapleyConfig, ShapleyContext
 from tests.fixture_support import assert_parameters, assign
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_pipeline.npz"

@@ -39,17 +39,17 @@ import tyro
 import wandb
 from jaxtyping import Float
 
-from new_jax_shapley import backends
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS
-from new_jax_shapley.characteristic_models import behaviour as characteristic
-from new_jax_shapley.common import checkpoints
-from new_jax_shapley.common.supervised_learning import seed_slice, stack_seeds
-from new_jax_shapley.envs import Mastermind
-from new_jax_shapley.envs.mastermind import MastermindState
-from new_jax_shapley.experiment import ExperimentConfig, load_configs
-from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models.behaviour import ShapleyModel, explain, masked_null, masked_values
+from jax_shapley import backends
+from jax_shapley.algorithms import dqn
+from jax_shapley.algorithms.dqn import TRACKING_FIELDS
+from jax_shapley.characteristic_models import behaviour as characteristic
+from jax_shapley.common import checkpoints
+from jax_shapley.common.supervised_learning import seed_slice, stack_seeds
+from jax_shapley.envs import Mastermind
+from jax_shapley.envs.mastermind import MastermindState
+from jax_shapley.experiment import ExperimentConfig, load_configs
+from jax_shapley.shapley_models import behaviour as shapley
+from jax_shapley.shapley_models.behaviour import ShapleyModel, explain, masked_null, masked_values
 
 SIZES = ("443", "453", "463")  # code size, guesses, pegs
 SOURCE_BATCHES = (0.8 * 10_000) // 128

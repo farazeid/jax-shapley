@@ -5,9 +5,9 @@ from typing import Literal
 
 from flax import nnx
 
-from new_jax_shapley.algorithms.dqn import QNetwork
-from new_jax_shapley.algorithms.ppo import PPOActor, PPOCritic
-from new_jax_shapley.common.networks import LayerConfig, MLPConfig, OrthogonalInit
+from jax_shapley.algorithms.dqn import QNetwork
+from jax_shapley.algorithms.ppo import PPOActor, PPOCritic
+from jax_shapley.common.networks import LayerConfig, MLPConfig, OrthogonalInit
 
 type AgentNetwork = QNetwork | PPOActor | PPOCritic
 
