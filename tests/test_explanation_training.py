@@ -90,6 +90,17 @@ def test_exact_condition_and_track_batch_logging() -> None:
     assert _rows(metrics, "step").tolist() == [1, 2, 3] and np.isnan(_rows(metrics, "exact_loss")).all()
 
 
+def test_characteristics_without_exact_loss_never_enumerate_coalitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The coalition table has 2^features rows (2^36 for Mastermind-463): only the exact loss may build it."""
+
+    def refuse(features: int) -> np.ndarray:
+        raise AssertionError(f"enumerated all 2^{features} coalitions without an exact loss")
+
+    monkeypatch.setattr(behaviour, "coalition_table", refuse)
+    _, metrics = _characteristic(replace(SMALL, exact_loss=False))
+    assert np.isnan(_rows(metrics, "exact_loss")).all()
+
+
 def test_shapley_run_reuses_characteristic_buffers_and_trains() -> None:
     explained = CharacteristicConfig(ENV, kind="prediction", hidden_widths=(4,), train=SMALL)
     agents = stack_seeds([_agent()])
