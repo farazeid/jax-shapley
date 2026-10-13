@@ -15,7 +15,9 @@ import numpy as np
 import pytest
 from flax import nnx
 from jax import Array
+from jax.errors import JaxRuntimeError
 
+from jax_shapley.algorithms import dqn
 from jax_shapley.algorithms.dqn import Env, TransitionBatch
 from jax_shapley.characteristic_models import behaviour, outcome
 from jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel
@@ -218,6 +220,24 @@ def test_config_and_network_shapes() -> None:
             OutcomeConfig(env, **invalid)  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
     with pytest.raises(ValueError):
         OutcomeConfig(env, variant="outcome")  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
+
+
+def test_exact_outcome_fails_when_the_conditioned_policy_can_loop_forever() -> None:
+    """A greedy agent that always takes one action never reaches Gridworld's goal: with gamma = 1
+    upstream's value iteration hangs, and the port stops the run."""
+    env = Gridworld()
+    tabular = transition_model(env)
+    model = dqn.initialize(dqn.DQNConfig(env=env, hidden_widths=()), jax.random.key(0)).model
+    model.mlp.layers[0].kernel[...] = jnp.zeros((2, 4), jnp.float32)
+    model.mlp.layers[0].bias[...] = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+    explained = CharacteristicConfig(env, hidden_widths=())
+    characteristic: CharacteristicModel = seed_slice(behaviour.initialize(explained, behaviour.head), 0).model
+    frozen = OutcomeFrozen(dqn.Agent(model, jnp.asarray(0.0, jnp.float32)), characteristic)
+    with pytest.raises(ValueError, match="non-finite"):
+        outcome.exact_outcome(tabular, tabular.states, frozen, explained, True, 1.0)
+    compiled = nnx.jit(partial(outcome.exact_outcome, tabular, explained=explained, with_exact_char=False, gamma=1.0))
+    with pytest.raises(JaxRuntimeError, match="non-finite"):
+        jax.block_until_ready(compiled(tabular.states, frozen))
 
 
 def _exact(shape: CaseLayout) -> tuple[dict[str, ExactOutcome], Array]:

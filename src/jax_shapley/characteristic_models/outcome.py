@@ -26,6 +26,7 @@ from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import trackio
 import tyro
@@ -999,4 +1000,22 @@ def exact_outcome(
         return jax.vmap(partial(per_state, tabular, agent, gamma))(rows, chosen)
 
     exact_values = jax.lax.map(partial(per_coalition, tabular, agent, gamma, rows), conditioned)
-    return ExactOutcome(states, present & modelled, exact_values)
+    valid = present & modelled
+    # Stop the run here, before any training, rather than learn against non-finite targets.
+    jax.debug.callback(require_finite, exact_values, valid, ordered=True)
+    return ExactOutcome(states, valid, exact_values)
+
+
+def require_finite(values: np.ndarray, valid: np.ndarray) -> None:
+    """Raise when any exact outcome value at a valid state is non-finite (a host callback).
+
+    With gamma = 1 the values diverge when the conditioned policy can loop forever without
+    reaching a terminal state; upstream's value iteration then never terminates.
+    """
+    finite = np.isfinite(values) | ~valid[..., None, :]
+    if not finite.all():
+        raise ValueError(
+            f"{int((~finite).sum())} exact outcome values are non-finite: with gamma = 1 the conditioned "
+            "policy can loop forever without reaching a terminal state (upstream's value iteration hangs here). "
+            "Train the agent longer or explain a policy that always terminates."
+        )
