@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 from time import time_ns
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -34,7 +35,7 @@ from new_jax_shapley.algorithms import dqn
 from new_jax_shapley.characteristic_models import behaviour as characteristic
 from new_jax_shapley.characteristic_models import outcome as characteristic_outcome
 from new_jax_shapley.characteristic_models import prediction as characteristic_prediction
-from new_jax_shapley.common.supervised_learning import EpochMetrics, TrainState, seed_slice, stack_seeds
+from new_jax_shapley.common.supervised_learning import EpochMetrics, StateBuffers, TrainState, seed_slice, stack_seeds
 from new_jax_shapley.common.tabular import transition_model
 from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.shapley_models import behaviour as shapley
@@ -53,6 +54,17 @@ class ExperimentResult:
         None
     )
     outcome_metrics: EpochMetrics | None = None
+
+
+class CompileInputs(NamedTuple):
+    """Abstract stage inputs over some seeds: agents, their replays, characteristic models, their
+    buffers, and outcome characteristics as Shapley models explain them."""
+
+    agents: dqn.Agent
+    replays: dqn.TransitionBatch
+    models: characteristic.CharacteristicModel
+    buffers: StateBuffers
+    outcomes: characteristic_outcome.OutcomeExplained | None
 
 
 def main(args: list[str] | None = None) -> str:
@@ -154,71 +166,78 @@ def run(config: ExperimentConfig, group: str | None = None) -> ExperimentResult:
 
 def compile_stages(config: ExperimentConfig) -> None:
     """Trace, lower and compile every stage's programs at the configured shapes, with live-logging
-    callbacks; nothing runs and nothing is tracked.
+    callbacks; nothing runs, nothing is tracked, and inputs are abstract (no replay is allocated).
 
     Exact tables are sized by an upper bound on unique states (the exact buffer's rows), so
     the compiled shapes can exceed a real run's, which sizes them from its buffers.
     """
     key = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
-    algorithm, stage = config.algorithm, config.characteristic
+    algorithm, stage, outcome = config.algorithm, config.characteristic, config.outcome
     program = nnx.jit(partial(dqn.train, algorithm, lambda seed, metrics: None, lambda seed, metrics: None))
     program.trace(key, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile()
 
-    targets, head = (
-        (characteristic.targets, characteristic.head)
-        if stage.kind == "behaviour"
-        else (characteristic_prediction.targets, characteristic_prediction.head)
-    )
-    seeds = len(stage.seeds)
-    keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
-    agent_state = dqn.initialize(algorithm, jax.random.key(0))
-    agent = dqn.trained_agent(algorithm, agent_state)
-    agents = stack_seeds([agent] * seeds)
-    replays = stack_seeds([agent_state.replay.data] * seeds) if stage.data == "replay" else None
-    template = characteristic.initialize(stage, head)
-    nnx.jit(partial(characteristic.collect, stage)).trace(keys, agents, replays).lower().compile()
-    program = nnx.jit(partial(characteristic.fit, stage, targets, head, stage.train.exact_size, lambda metrics: None))
-    program.trace(keys, agents, template.buffers).lower().compile()
+    head = characteristic.head if stage.kind == "behaviour" else characteristic_prediction.head
+    targets = characteristic.targets if stage.kind == "behaviour" else characteristic_prediction.targets
 
-    explained = seed_slice(template, 0)
-    outcome = config.outcome
-    if outcome is not None:
-        count = len(outcome.seeds)
-        tabular = transition_model(outcome.env) if outcome.train.exact_loss else None
-        program = nnx.jit(partial(characteristic_outcome.fit, outcome, stage, tabular, lambda metrics: None))
-        program.trace(
-            jax.ShapeDtypeStruct((count,), key.dtype),
+    def templates(count: int) -> CompileInputs:
+        """Every stage's inputs, repeated over `count` seeds (built abstractly by nnx.eval_shape)."""
+        agent_state = dqn.initialize(algorithm, jax.random.key(0))
+        agent = dqn.trained_agent(algorithm, agent_state)
+        explained = seed_slice(characteristic.initialize(stage, head), 0)
+        frozen = None
+        if outcome is not None:
+            initial = (
+                characteristic_outcome.initialize(outcome, stage)
+                if outcome.variant == "off_policy"
+                else characteristic_outcome.initialize_on_policy(outcome, stage)
+            )
+            networks = initial.networks if isinstance(initial, characteristic_outcome.OnPolicyState) else initial.model
+            outcomes = characteristic_outcome.OutcomeExplained(agent, explained.model, seed_slice(networks, 0))
+            frozen = stack_seeds([outcomes] * count)
+        return CompileInputs(
             stack_seeds([agent] * count),
+            stack_seeds([agent_state.replay.data] * count),
             stack_seeds([explained.model] * count),
             stack_seeds([explained.buffers] * count),
-            stack_seeds([agent_state.replay.data] * count),
-        ).lower().compile()
-        outcomes = seed_slice(characteristic_outcome.initialize(outcome, stage), 0).model
-        frozen = characteristic_outcome.OutcomeExplained(agent, explained.model, outcomes)
-        for shapley_config in config.shapley:
-            count = len(shapley_config.seeds)
+            frozen,
+        )
+
+    seeds = len(stage.seeds)
+    inputs = nnx.eval_shape(partial(templates, seeds))
+    keys = jax.ShapeDtypeStruct((seeds,), key.dtype)
+    replays = inputs.replays if stage.data == "replay" else None
+    nnx.jit(partial(characteristic.collect, stage)).trace(keys, inputs.agents, replays).lower().compile()
+    program = nnx.jit(partial(characteristic.fit, stage, targets, head, stage.train.exact_size, lambda metrics: None))
+    program.trace(keys, inputs.agents, inputs.buffers).lower().compile()
+
+    if outcome is not None:
+        count = len(outcome.seeds)
+        inputs = nnx.eval_shape(partial(templates, count))
+        keys = jax.ShapeDtypeStruct((count,), key.dtype)
+        tabular = transition_model(outcome.env) if outcome.train.exact_loss else None
+        if outcome.variant == "off_policy":
+            program = nnx.jit(partial(characteristic_outcome.fit, outcome, stage, tabular, lambda metrics: None))
+            program.trace(keys, inputs.agents, inputs.models, inputs.buffers, inputs.replays).lower().compile()
+        else:
+            program = nnx.jit(
+                partial(characteristic_outcome.fit_on_policy, outcome, stage, tabular, lambda metrics: None)
+            )
+            program.trace(keys, inputs.agents, inputs.models, inputs.buffers).lower().compile()
+    for shapley_config in config.shapley:
+        count = len(shapley_config.seeds)
+        inputs = nnx.eval_shape(partial(templates, count))
+        keys = jax.ShapeDtypeStruct((count,), key.dtype)
+        if outcome is not None and inputs.outcomes is not None:
             tabular = transition_model(outcome.env) if shapley_config.train.exact_loss else None
             program = nnx.jit(
                 partial(shapley_outcome.fit, stage, outcome, tabular, shapley_config, 0, lambda metrics: None)
             )
-            program.trace(
-                jax.ShapeDtypeStruct((count,), key.dtype),
-                stack_seeds([agent] * count),
-                stack_seeds([frozen] * count),
-                stack_seeds([explained.buffers] * count),
-            ).lower().compile()
-        return
-    for shapley_config in config.shapley:
-        count = len(shapley_config.seeds)
+            program.trace(keys, inputs.agents, inputs.outcomes, inputs.buffers).lower().compile()
+            continue
         program = nnx.jit(
             partial(shapley.fit, stage, targets, head, shapley_config, stage.train.exact_size, lambda metrics: None)
         )
-        program.trace(
-            jax.ShapeDtypeStruct((count,), key.dtype),
-            stack_seeds([agent] * count),
-            stack_seeds([explained.model] * count),
-            stack_seeds([explained.buffers] * count),
-        ).lower().compile()
+        program.trace(keys, inputs.agents, inputs.models, inputs.buffers).lower().compile()
 
 
 if __name__ == "__main__":
