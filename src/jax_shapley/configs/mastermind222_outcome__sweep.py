@@ -15,6 +15,8 @@ stage's `variant` and `with-exact-char`, which conditions the exact outcome valu
 exact or the learnt behaviour characteristic.
 """
 
+from dataclasses import replace
+
 import tyro
 
 from jax_shapley.algorithms.dqn import DQNConfig
@@ -95,7 +97,8 @@ CONFIG = ExperimentConfig(
             with_exact_char=exact,
             buffers="fresh",
             seeds=SEEDS,
-            train=explanation_training(100),
+            # Source shapleys/dqn_performance_mastermind.py: patience = epochs.
+            train=replace(explanation_training(100), patience=None),
         )
         for exact in (True, False)
     ),
