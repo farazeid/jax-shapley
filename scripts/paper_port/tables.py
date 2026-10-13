@@ -26,9 +26,10 @@ from __future__ import annotations
 import csv
 import math
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from html import escape
 from pathlib import Path
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -50,7 +51,7 @@ from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.shapley_models import behaviour as shapley
 from new_jax_shapley.shapley_models.behaviour import ShapleyModel, explain, masked_null, masked_values
 
-SIZES = ("443", "453", "463")
+SIZES = ("443", "453", "463")  # code size, guesses, pegs
 SOURCE_BATCHES = (0.8 * 10_000) // 128
 """62.0: the n_batches the source's large-scale table scripts pass."""
 LETTERS = {-1: "", 1: "A", 2: "B", 3: "C"}
@@ -64,7 +65,7 @@ TABLE_2_BOARD = (
     (-1, -1, -1, -1, -1, -1),
 )
 TABLE_2_ACTION = "CCCB"
-TABLE_2_EXPERIMENT = "mastermind463_behaviour"
+TABLE_2_EXPERIMENT = "mastermind_large_behaviour__sweep"
 TABLE_2_SHAPLEY_SEED = 1
 
 type BoardValues = Float[np.ndarray, "guesses columns"]  # ruff: ignore[forward-annotation-syntax-error] -- jaxtyping shape grammar.
@@ -134,9 +135,9 @@ def main(args: Args) -> None:
         domains, labels, groups = [], [], []
         try:
             for size in SIZES:
-                experiment = f"mastermind{size}_{kind}"
-                group = _group(args, configs, experiment)
-                history = backends.history(args.track, project=args.project, entity=args.entity, group=group)
+                experiment = f"mastermind_large_{kind}__sweep"
+                group = _group(args, configs, experiment, int(size[1]))
+                tracked = backends.runs(args.track, project=args.project, entity=args.entity, group=group)
                 for model in models:
                     domains.append(f"Mastermind-{size}")
                     labels.append(model)
@@ -146,8 +147,8 @@ def main(args: Args) -> None:
                     exactness = "with-exact" if shapley_config.with_exact_char else "without-exact"
                     stage = f"characteristic--{kind}" if model == "Characteristic" else f"shapley--{kind}--{exactness}"
                     prefix = f"{experiment}--{stage}--"
-                    runs = [rows for name, rows in sorted(history.items()) if name.startswith(prefix)]
-                    explained = "Policy" if kind == "behaviour" else "Value"
+                    runs = [run.rows for name, run in sorted(tracked.items()) if name.startswith(prefix)]
+                    explained = {"behaviour": "Policy", "prediction": "Value", "outcome": "Performance"}[kind]
                     tag = f"model/{explained}{'CharacteristicModel' if model == 'Characteristic' else 'Shapley'}_epoch_loss"
                     # Source calculate_final_stats: each run's last logged epoch of the training loss.
                     finals = [
@@ -196,8 +197,16 @@ def main(args: Args) -> None:
 
 def load_explainer(args: Args, configs: dict[str, ExperimentConfig]) -> Explainer:
     """The Mastermind-463 agent, behaviour characteristic and Shapley seed 1 behind Table 2."""
-    group = _group(args, configs, TABLE_2_EXPERIMENT)
-    config = configs[TABLE_2_EXPERIMENT]
+    group = _group(args, configs, TABLE_2_EXPERIMENT, len(TABLE_2_BOARD))
+    # The sweep config leaves the guesses open: Mastermind-463, as its run script set them.
+    sweep = configs[TABLE_2_EXPERIMENT]
+    board = replace(sweep.algorithm.env, num_guesses=len(TABLE_2_BOARD))
+    config = replace(
+        sweep,
+        algorithm=replace(sweep.algorithm, env=board),
+        characteristic=replace(sweep.characteristic, env=board),
+        shapley=tuple(replace(stage, env=board) for stage in sweep.shapley),
+    )
     env = config.algorithm.env
     if not isinstance(env, Mastermind) or env.num_guesses != len(TABLE_2_BOARD):
         raise ValueError("Table 2 explains a Mastermind-463 agent")
@@ -378,13 +387,19 @@ def standard_error(values: RunValues) -> float:
     return float(np.std(values, ddof=1) / np.sqrt(values.shape[0]))
 
 
-def _group(args: Args, configs: dict[str, ExperimentConfig], experiment: str) -> str:
+def _group(args: Args, configs: dict[str, ExperimentConfig], experiment: str, guesses: int) -> str:
+    """The latest run group of a large-Mastermind sweep at `guesses` guesses (its agent's env)."""
     if experiment not in configs:
         raise MissingRunsError(f"experiment {experiment} is not ported")
     found = backends.groups(args.track, project=args.project, entity=args.entity, prefix=f"{experiment}-")
-    if not found:
-        raise MissingRunsError(f"no tracked runs of {experiment} in {args.track} project {args.project}")
-    return found[-1]
+    for group in reversed(found):
+        tracked = backends.runs(args.track, project=args.project, entity=args.entity, group=group)
+        for name, run in tracked.items():
+            env = run.config.get("env")
+            dqn_run = name.startswith(f"{experiment}--algorithm--dqn") and isinstance(env, dict)
+            if dqn_run and cast(dict[str, object], env).get("num_guesses") == guesses:
+                return group
+    raise MissingRunsError(f"no tracked runs of {experiment} with {guesses} guesses in {args.track} {args.project}")
 
 
 def _write_table(output: Path, table: str, domains: list[str], models: list[str], groups: list[GroupStats]) -> None:

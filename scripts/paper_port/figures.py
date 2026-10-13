@@ -8,9 +8,11 @@ interpolated, then summarised by the mean and standard error over runs. Hypercub
 port `barcharts`: each run's last logged exact-loss step, mean and standard error.
 
 Runs come only from the tracking backend: each series names a registered experiment
-(`new_jax_shapley/configs/NAME.py`), a stage's runs within it and an upstream tag, read
-from that experiment's latest run group. Figures whose experiments are not ported yet, or
-have no tracked runs, are listed as missing.
+(`new_jax_shapley/configs/NAME.py`), a stage's runs within it (`NAME--STAGE--...--seed-N`)
+and an upstream tag, read from the experiment's latest run group, or for a sweep the latest
+group whose matching run was configured with the series' settings (e.g. a Hypercube's side
+and dimension). Figures whose experiments are not ported yet, or have no tracked runs, are
+listed as missing.
 
 Usage: uv run --group benchmark python scripts/paper_port/figures.py --track wandb|trackio [--output docs/data]
 """
@@ -20,7 +22,9 @@ from __future__ import annotations
 import csv
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import isclose
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -33,6 +37,8 @@ from new_jax_shapley.experiment import load_configs
 type FloatArray = npt.NDArray[np.float64]
 type Run = tuple[FloatArray, FloatArray]
 type Loader = Callable[[Sources], list[Run]]
+type Where = tuple[str, dict[str, object]]
+"""A sweep point: a stage whose run in the group was configured with these (dotted) settings."""
 
 # Batches per epoch in the source's plot scripts: (train fraction x buffer) // batch size.
 BATCHES = (0.8 * 10_000) // 128
@@ -44,6 +50,7 @@ CUBES = tuple((side, dimension) for dimension in (2, 3, 4, 5) for side in (2, 3,
 # Shapley stages by the source's series labels: its "Exact characteristic" runs set with_exact_char=False.
 EXACT_CHARACTERISTIC = "without-exact"
 APPROX_CHARACTERISTIC = "with-exact"
+LARGE = (("443", 4), ("453", 5), ("463", 6))
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,31 +93,36 @@ class Sources:
     project: str
     entity: str | None
     ported: frozenset[str]
-    _histories: dict[str, dict[str, list[backends.Scalars]]] = field(default_factory=dict, repr=False)
+    _groups: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    _runs: dict[str, dict[str, backends.TrackedRun]] = field(default_factory=dict, repr=False)
 
-    def runs(self, experiment: str, stage: str, tag: str) -> list[Run]:
+    def runs(self, experiment: str, stage: str, tag: str, where: Where | None = None) -> list[Run]:
         """Every seed's run of `stage` (`algorithm--dqn`, `characteristic--behaviour`,
-        `shapley--behaviour--with-exact`, ...), in seed order."""
-        history = self._history(experiment)
-        prefix = f"{experiment}--{stage}"
-        names = sorted((name for name in history if name == prefix or name.startswith(f"{prefix}--")), key=_seed)
-        runs = []
-        for name in names:
-            logged = [(row["_step"], row[tag]) for row in history[name] if tag in row and "_step" in row]
-            runs.append((_floats([step for step, _ in logged]), _floats([value for _, value in logged])))
-        return _required(runs, f"{experiment} {stage} {tag}")
-
-    def _history(self, experiment: str) -> dict[str, list[backends.Scalars]]:
+        `shapley--behaviour--with-exact`, ...), in seed order, from the experiment's latest group
+        (with `where`, the latest group holding a run of that stage with those settings)."""
         if experiment not in self.ported:
             raise MissingRunsError(f"experiment {experiment} is not ported")
-        if experiment not in self._histories:
-            found = backends.groups(self.track, project=self.project, entity=self.entity, prefix=f"{experiment}-")
-            if not found:
-                raise MissingRunsError(f"no tracked runs of {experiment} in {self.track} project {self.project}")
-            self._histories[experiment] = backends.history(
-                self.track, project=self.project, entity=self.entity, group=found[-1]
+        if experiment not in self._groups:
+            self._groups[experiment] = backends.groups(
+                self.track, project=self.project, entity=self.entity, prefix=f"{experiment}-"
             )
-        return self._histories[experiment]
+        for group in reversed(self._groups[experiment]):
+            if group not in self._runs:
+                self._runs[group] = backends.runs(self.track, project=self.project, entity=self.entity, group=group)
+            tracked = self._runs[group]
+            if where is not None and not any(
+                name.startswith(f"{experiment}--{where[0]}") and _matches(run.config, where[1])
+                for name, run in tracked.items()
+            ):
+                continue
+            prefix = f"{experiment}--{stage}"
+            names = sorted((name for name in tracked if name == prefix or name.startswith(f"{prefix}--")), key=_seed)
+            runs = []
+            for name in names:
+                logged = [(row["_step"], row[tag]) for row in tracked[name].rows if tag in row and "_step" in row]
+                runs.append((_floats([step for step, _ in logged]), _floats([value for _, value in logged])))
+            return _required(runs, f"{experiment} {stage} {tag}")
+        raise MissingRunsError(f"no tracked runs of {experiment}{'' if where is None else f' with {where}'}")
 
 
 class MissingRunsError(Exception):
@@ -153,64 +165,46 @@ def figures() -> list[FigureSpec]:
     for domain, environment in (("mastermind_222", "mastermind222"), ("gwb", "gridworld")):
         for kind, name in (("behaviour", "policy"), ("prediction", "value")):
             experiment = f"{environment}_{kind}"
-            specs.append(
-                FigureSpec(
-                    f"app_{domain}_{name}_char",
-                    (Series("#1f77b4", _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))),),
-                    BATCHES,
-                )
-            )
+            characteristic = _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))
+            specs.append(FigureSpec(f"app_{domain}_{name}_char", (Series("#1f77b4", characteristic),), BATCHES))
+            exact = _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind))
+            approx = _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind))
             specs.append(
                 FigureSpec(
                     f"app_{domain}_{name}_shapley",
-                    (
-                        Series(
-                            "Exact characteristic",
-                            _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind)),
-                        ),
-                        Series(
-                            "Approx characteristic",
-                            _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind)),
-                        ),
-                    ),
+                    (Series("Exact characteristic", exact), Series("Approx characteristic", approx)),
                     BATCHES,
                 )
             )
-        outcome = f"{environment}_outcome"
-        tag = _tag("outcome", "characteristic")
-        specs.append(
-            FigureSpec(
-                f"app_{domain}_perf_char",
-                (
-                    Series("On-policy, approx behaviour", _tracked(f"{outcome}_on_policy", "outcome-with-policy", tag)),
-                    Series("On-policy, exact behaviour", _tracked(f"{outcome}_on_policy", "outcome-exact-policy", tag)),
-                    Series(
-                        "Off-policy, approx behaviour", _tracked(f"{outcome}_off_policy", "outcome-with-policy", tag)
-                    ),
-                    Series(
-                        "Off-policy, exact behaviour", _tracked(f"{outcome}_off_policy", "outcome-exact-policy", tag)
-                    ),
+        # Outcome: "approx behaviour" runs set with_exact_char (as the source's groups do).
+        outcome = f"{environment}_outcome__sweep"
+        series = []
+        for variant, label in (("on-policy", "On-policy"), ("off-policy", "Off-policy")):
+            tag = f"model/PerformanceCharacteristic{'OnPolicy' if variant == 'on-policy' else 'OffPolicy'}_exact_loss"
+            for exactness, behaviour in (("with-exact", "approx"), ("without-exact", "exact")):
+                loader = _tracked(outcome, f"outcome--{variant}--{exactness}", tag)
+                series.append(Series(f"{label}, {behaviour} behaviour", loader))
+        specs.append(FigureSpec(f"app_{domain}_perf_char", tuple(series)))
+        # The source's Shapley groups: w_policy, wo_policy and wo_perf of the paper's outcome variant.
+        variant = "off-policy" if environment == "mastermind222" else "on-policy"
+        groups = (
+            ("Approx outcome, approx behaviour", "with-exact", "with-exact"),
+            ("Approx outcome, exact behaviour", "with-exact", "without-exact"),
+            ("Exact outcome, exact behaviour", "without-exact", "without-exact"),
+        )
+        series = [
+            Series(
+                label,
+                _tracked(
+                    outcome,
+                    f"shapley--outcome--{shapley}",
+                    "model/PerformanceShapley_exact_loss",
+                    (f"outcome--{variant}--{characteristic}", {}),
                 ),
             )
-        )
-        variant = f"{outcome}_off_policy" if environment == "mastermind222" else f"{outcome}_on_policy"
-        specs.append(
-            FigureSpec(
-                f"app_{domain}_perf_shapley",
-                (
-                    Series(
-                        "Approx outcome, approx behaviour", _tracked(variant, "shapley-with-policy", _tag("outcome"))
-                    ),
-                    Series(
-                        "Approx outcome, exact behaviour", _tracked(variant, "shapley-exact-policy", _tag("outcome"))
-                    ),
-                    Series(
-                        "Exact outcome, exact behaviour", _tracked(variant, "shapley-exact-outcome", _tag("outcome"))
-                    ),
-                ),
-                BATCHES,
-            )
-        )
+            for label, shapley, characteristic in groups
+        ]
+        specs.append(FigureSpec(f"app_{domain}_perf_shapley", tuple(series), BATCHES))
     specs += [
         _renamed(specs, "app_mastermind_222_policy_char", "main_mastermind_222_policy_char"),
         _renamed(specs, "app_mastermind_222_perf_char", "main_mastermind_222_perf_char"),
@@ -218,90 +212,92 @@ def figures() -> list[FigureSpec]:
     ]
     for kind, name in (("behaviour", "policy"), ("prediction", "value")):
         experiment = f"mastermind333_{kind}"
-        specs.append(
-            FigureSpec(
-                f"app_mastermind_333_{name}_char",
-                (Series("#1f77b4", _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))),),
-                BATCHES,
-            )
-        )
+        characteristic = _tracked(experiment, f"characteristic--{kind}", _tag(kind, "characteristic"))
+        specs.append(FigureSpec(f"app_mastermind_333_{name}_char", (Series("#1f77b4", characteristic),), BATCHES))
+        exact = _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind))
+        approx = _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind))
         specs.append(
             FigureSpec(
                 f"app_mastermind_333_{name}_shapley",
-                (
-                    Series(
-                        "Exact characteristic",
-                        _tracked(experiment, f"shapley--{kind}--{EXACT_CHARACTERISTIC}", _tag(kind)),
-                    ),
-                    Series(
-                        "Approx characteristic",
-                        _tracked(experiment, f"shapley--{kind}--{APPROX_CHARACTERISTIC}", _tag(kind)),
-                    ),
-                ),
+                (Series("Exact characteristic", exact), Series("Approx characteristic", approx)),
                 BATCHES,
             )
         )
-        specs.append(
-            FigureSpec(
-                f"app_large_{name}_char",
-                tuple(
-                    Series(
-                        f"Mastermind-{size}",
-                        _tracked(
-                            f"mastermind{size}_{kind}", f"characteristic--{kind}", _tag(kind, "characteristic", "epoch")
-                        ),
-                    )
-                    for size in ("443", "453", "463")
+        large = f"mastermind_large_{kind}__sweep"
+        characteristics = tuple(
+            Series(
+                f"Mastermind-{size}",
+                _tracked(
+                    large,
+                    f"characteristic--{kind}",
+                    _tag(kind, "characteristic", "epoch"),
+                    ("algorithm--dqn", {"env.num_guesses": guesses}),
                 ),
             )
+            for size, guesses in LARGE
         )
-        specs.append(
-            FigureSpec(
-                f"app_large_{name}_shapley",
-                tuple(
-                    Series(
-                        f"Mastermind-{size}",
-                        _tracked(
-                            f"mastermind{size}_{kind}",
-                            f"shapley--{kind}--{APPROX_CHARACTERISTIC}",
-                            _tag(kind, loss="epoch"),
-                        ),
-                    )
-                    for size in ("443", "453", "463")
+        specs.append(FigureSpec(f"app_large_{name}_char", characteristics))
+        shapleys = tuple(
+            Series(
+                f"Mastermind-{size}",
+                _tracked(
+                    large,
+                    f"shapley--{kind}--without-exact",
+                    _tag(kind, loss="epoch"),
+                    ("algorithm--dqn", {"env.num_guesses": guesses}),
                 ),
-                BATCHES,
             )
+            for size, guesses in LARGE
         )
-    specs.append(
-        FigureSpec(
-            "app_large_perf_offpolicy_shapley",
-            tuple(
-                Series(
-                    f"Mastermind-{size}",
-                    _tracked(f"mastermind{size}_outcome", "shapley-with-policy", _tag("outcome", loss="epoch")),
-                )
-                for size in ("443", "453", "463")
+        specs.append(FigureSpec(f"app_large_{name}_shapley", shapleys, BATCHES))
+    outcome_shapleys = tuple(
+        Series(
+            f"Mastermind-{size}",
+            _tracked(
+                "mastermind_large_outcome__sweep",
+                "shapley--outcome--without-exact",
+                "model/PerformanceShapley_epoch_loss",
+                ("algorithm--dqn", {"env.num_guesses": guesses}),
             ),
-            BATCHES,
         )
+        for size, guesses in LARGE
     )
+    specs.append(FigureSpec("app_large_perf_offpolicy_shapley", outcome_shapleys, BATCHES))
     specs += offpolicy_figures() + continual_figures() + sampling_figures()
     return specs
 
 
 def offpolicy_figures() -> list[FigureSpec]:
-    """offpolicy/plots: every figure uses sem_correction."""
+    """offpolicy/plots: characteristics' exact losses; every figure uses sem_correction."""
+    inf = float("inf")
+    settings: dict[str, dict[str, object]] = {
+        "exact": {"data": "rollouts"},
+        "wo_weight": {"data": "replay", "off_policy": False},
+        "w_weight": {"data": "replay", "off_policy": True, "weighting": True, "clip_coef": inf},
+        "normalised": {"data": "replay", "off_policy": True, "weighting": True, "clip_coef": inf},
+        "unnormalised": {"data": "replay", "off_policy": True, "weighting": False, "clip_coef": inf},
+        **{
+            f"clip_{coef}": {"data": "replay", "off_policy": True, "weighting": True, "clip_coef": coef}
+            for coef in (0.99, 0.995, 0.998)
+        },
+    }
     specs = []
     for kind, name in (("behaviour", "policy"), ("prediction", "value")):
-        experiment = f"offpolicy_mastermind222_{kind}"
+        tag = _tag(kind, "characteristic")
+        stage = f"characteristic--{kind}"
+
+        def series(experiment: str, groups: tuple[tuple[str, str], ...], stage: str, tag: str) -> tuple[Series, ...]:
+            return tuple(
+                Series(label, _tracked(experiment, stage, tag, (stage, settings[group]))) for label, group in groups
+            )
+
         groups = (
             ("Off-policy (without IS)", "wo_weight"),
             ("Off-policy (with IS)", "w_weight"),
             ("On-policy", "exact"),
         )
-        series = tuple(Series(label, _tracked(experiment, group, _tag(kind))) for label, group in groups)
-        specs.append(FigureSpec(f"app_mastermind_222_offpolicy_{name}", series, OFFPOLICY_MASTERMIND_BATCHES, True))
-        experiment = f"offpolicy_gridworld_{kind}"
+        mastermind = series(f"mastermind222_offpolicy_{kind}__sweep", groups, stage, tag)
+        specs.append(FigureSpec(f"app_mastermind_222_offpolicy_{name}", mastermind, OFFPOLICY_MASTERMIND_BATCHES, True))
         clipping = (
             ("Without IS", "wo_weight"),
             ("With IS (clip = 0.99)", "clip_0.99"),
@@ -317,8 +313,8 @@ def offpolicy_figures() -> list[FigureSpec]:
             ("On-policy", "exact"),
         )
         for figure, groups in (("clipping", clipping), ("weighting", weighting)):
-            series = tuple(Series(label, _tracked(experiment, group, _tag(kind))) for label, group in groups)
-            specs.append(FigureSpec(f"app_gwb_offpolicy_{figure}_{name}", series, OFFPOLICY_GRIDWORLD_BATCHES, True))
+            gridworld = series(f"gridworld_offpolicy_{kind}__sweep", groups, stage, tag)
+            specs.append(FigureSpec(f"app_gwb_offpolicy_{figure}_{name}", gridworld, OFFPOLICY_GRIDWORLD_BATCHES, True))
     specs.append(_renamed(specs, "app_mastermind_222_offpolicy_policy", "main_mastermind_222_offpolicy_policy"))
     return specs
 
@@ -344,7 +340,12 @@ def continual_figures() -> list[FigureSpec]:
 
 
 def sampling_figures() -> list[FigureSpec]:
-    """sampling/plots: the model group starts after its characteristic's epochs (start_epoch)."""
+    """sampling/plots: the model group starts after its characteristic's epochs (start_epoch).
+
+    Exact: Shapley models against a learnt characteristic's exact values (wo_exact_model);
+    Sample: against a sampled characteristic (w_exact_sampling); Model: against the exact
+    characteristic (w_exact_model). Outcome groups compare outcome characteristics.
+    """
     specs = []
     offsets = {
         ("mastermind222", "behaviour"): 50,
@@ -356,20 +357,21 @@ def sampling_figures() -> list[FigureSpec]:
     }
     names = {"mastermind222": "mastermind_222", "mastermind333": "mastermind_333", "gridworld": "gwb"}
     for (domain, kind), offset in offsets.items():
-        experiment = f"sampling_{domain}_{kind}"
+        learnt, sampled = f"{domain}_sampling_{kind}", f"{domain}_sampled_{kind}"
         series = (
-            Series("Exact", _tracked(experiment, "wo_exact_model", _tag(kind))),
-            Series("Sample", _tracked(experiment, "w_exact_sampling", _tag(kind))),
-            Series("Model", _tracked(experiment, "w_exact_model", _tag(kind)), float(offset)),
+            Series("Exact", _tracked(learnt, f"shapley--{kind}--without-exact", _tag(kind))),
+            Series("Sample", _tracked(sampled, f"shapley--{kind}--with-exact", _tag(kind))),
+            Series("Model", _tracked(learnt, f"shapley--{kind}--with-exact", _tag(kind)), float(offset)),
         )
         name = "policy" if kind == "behaviour" else "value"
         specs.append(FigureSpec(f"app_{names[domain]}_{name}_sampling", series, BATCHES))
+    tag = "model/PerformanceCharacteristicOnPolicy_exact_loss"
     for domain in ("mastermind222", "gridworld"):
-        experiment = f"sampling_{domain}_outcome"
+        learnt, sampled = f"{domain}_sampling_outcome__sweep", f"{domain}_sampled_outcome"
         series = (
-            Series("Exact", _tracked(experiment, "wo_exact_model", _tag("outcome"))),
-            Series("Sample", _tracked(experiment, "w_exact_sampling", _tag("outcome"))),
-            Series("Model", _tracked(experiment, "w_exact_model", _tag("outcome")), 50 * (0.8 * 10_000) // 128),
+            Series("Exact", _tracked(learnt, "outcome--on-policy--without-exact", tag)),
+            Series("Sample", _tracked(sampled, "outcome--on-policy--with-exact", tag)),
+            Series("Model", _tracked(learnt, "outcome--on-policy--with-exact", tag), 50 * (0.8 * 10_000) // 128),
         )
         specs.append(FigureSpec(f"app_{names[domain]}_perf_sampling", series))
     specs.append(_renamed(specs, "app_mastermind_222_policy_sampling", "main_mastermind_222_policy_sampling"))
@@ -410,13 +412,13 @@ def hypercube_bars(sources: Sources) -> tuple[list[tuple[object, ...]], list[str
     missing: list[str] = []
     for kind, figure in (("behaviour", "hypercube_policy"), ("prediction", "hypercube_value")):
         for side, dimension in CUBES:
-            experiment = f"hypercube{side}x{dimension}_{kind}"
+            cube: Where = ("algorithm--dqn", {"env.side_length": side, "env.dimension": dimension})
             for stage, model, tag in (
                 (f"characteristic--{kind}", "Characteristic", _tag(kind, "characteristic")),
-                (f"shapley--{kind}--{APPROX_CHARACTERISTIC}", "Shapley", _tag(kind)),
+                (f"shapley--{kind}--without-exact", "Shapley", _tag(kind)),
             ):
                 try:
-                    runs = sources.runs(experiment, stage, tag)
+                    runs = sources.runs(f"hypercube_{kind}__sweep", stage, tag, cube)
                 except MissingRunsError as error:
                     missing.append(f"{figure} {side}x{dimension} {model}: {error}")
                     continue
@@ -427,17 +429,34 @@ def hypercube_bars(sources: Sources) -> tuple[list[tuple[object, ...]], list[str
     return bars, missing
 
 
-def _tracked(experiment: str, stage: str, tag: str) -> Loader:
+def _tracked(experiment: str, stage: str, tag: str, where: Where | None = None) -> Loader:
     def load(sources: Sources) -> list[Run]:
-        return sources.runs(experiment, stage, tag)
+        return sources.runs(experiment, stage, tag, where)
 
     return load
 
 
 def _tag(kind: str, model: str = "shapley", loss: str = "exact") -> str:
-    """The source's `model/{ModelClass}_{exact,epoch}_loss` tag."""
+    """The source's `model/{ModelClass}_{exact,epoch}_loss` tag for behaviour and prediction models."""
     explained = "Policy" if kind == "behaviour" else "Value"
     return f"model/{explained}{'CharacteristicModel' if model == 'characteristic' else 'Shapley'}_{loss}_loss"
+
+
+def _matches(config: dict[str, object], settings: dict[str, object]) -> bool:
+    """Whether a logged (nested) run config has every dotted setting; floats compare as floats
+    (backends may log infinity as text)."""
+    for path, expected in settings.items():
+        value: object = config
+        for key in path.split("."):
+            if not isinstance(value, dict):
+                return False
+            value = cast(dict[str, object], value).get(key)
+        if isinstance(expected, float) and not isinstance(expected, bool):
+            if not isinstance(value, int | float | str) or not isclose(float(value), expected):
+                return False
+        elif value != expected:
+            return False
+    return True
 
 
 def _renamed(specs: list[FigureSpec], source: str, name: str) -> FigureSpec:

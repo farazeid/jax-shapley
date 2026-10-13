@@ -70,7 +70,7 @@ import json, sys
 from new_jax_shapley import backends
 track, project, entity = sys.argv[1], sys.argv[2], sys.argv[3] or None
 groups = backends.groups(track, project=project, entity=entity, prefix="mastermind222_behaviour")
-print(json.dumps({group: backends.history(track, project=project, entity=entity, group=group) for group in groups}))
+print(json.dumps({group: {name: run.rows for name, run in backends.runs(track, project=project, entity=entity, group=group).items()} for group in groups}))
 """
 
 
@@ -99,6 +99,7 @@ def test_live_logs_equal_the_returned_metrics() -> None:
         partial(characteristic.fit, stage, characteristic.targets, characteristic.head, max_unique, epochs.append)
     )(keys, agents, buffers)
     jax.effects_barrier()
+    assert returned is not None
     active = np.asarray(returned.active).any(axis=1)
     assert len(epochs) == int(active.sum())
     for index, epoch in enumerate(epochs):

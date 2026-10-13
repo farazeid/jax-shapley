@@ -17,12 +17,20 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import wandb
 
 type Track = Literal["wandb", "trackio"]
 type Scalars = dict[str, float]
+
+
+class TrackedRun(NamedTuple):
+    """A tracked run read back: its logged config (stage settings, nested) and its logged rows."""
+
+    config: dict[str, object]
+    rows: list[Scalars]
+
 
 # wandb's local data, all redirected into the experiment's scratch folder.
 WANDB_DIRECTORIES = ("WANDB_DIR", "WANDB_CACHE_DIR", "WANDB_DATA_DIR", "WANDB_ARTIFACT_DIR")
@@ -65,17 +73,18 @@ def session(track: Track, entity: str | None) -> Iterator[Path]:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def history(track: Track, *, project: str, entity: str | None, group: str) -> dict[str, list[Scalars]]:
-    """Every run of an experiment group by run name: its logged numbers, each row with `_step`."""
-    rows: dict[str, list[Scalars]] = {}
+def runs(track: Track, *, project: str, entity: str | None, group: str) -> dict[str, TrackedRun]:
+    """Every run of an experiment group by run name: its config and its logged numbers, each row with `_step`."""
+    found: dict[str, TrackedRun] = {}
     if track == "wandb":
         path = f"{entity}/{project}" if entity else project
         for run in wandb.Api().runs(path, filters={"group": group}):
-            rows[run.name] = [
+            rows = [
                 {key: float(value) for key, value in row.items() if isinstance(value, int | float)}
                 for row in run.scan_history()
             ]
-        return rows
+            found[run.name] = TrackedRun(dict(run.config), rows)
+        return found
     from trackio.sqlite_storage import SQLiteStorage
 
     # trackio run names need not be unique within a project; run ids are.
@@ -83,9 +92,10 @@ def history(track: Track, *, project: str, entity: str | None, group: str) -> di
         run_id, name = record["id"], record["name"]
         if run_id is None or name is None:
             continue
-        if (SQLiteStorage.get_run_config(project, run_id=run_id) or {}).get("_Group") != group:
+        config = SQLiteStorage.get_run_config(project, run_id=run_id) or {}
+        if config.get("_Group") != group:
             continue
-        rows[name] = [
+        rows = [
             {
                 "_step" if key == "step" else key: float(value)
                 for key, value in log.items()
@@ -93,7 +103,8 @@ def history(track: Track, *, project: str, entity: str | None, group: str) -> di
             }
             for log in SQLiteStorage.get_logs(project, run_id=run_id)
         ]
-    return rows
+        found[name] = TrackedRun(config, rows)
+    return found
 
 
 def groups(track: Track, *, project: str, entity: str | None, prefix: str) -> list[str]:
