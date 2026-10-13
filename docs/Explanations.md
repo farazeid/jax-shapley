@@ -110,7 +110,7 @@ The paper's Figures 3c and 11 compare Shapley models trained against a learnt ch
 - **One coalition per call.** Upstream matches on `Cs[0]`, which is correct because every Shapley batch shares one coalition. `SampledCharacteristic.values` accepts only a single coalition.
 - **Exact-loss normalisation.** The grand coalition matches only identical rows, and every exact state is in the pool, so upstream's sampled `v(s, F)` is exactly `v_F(s)`. The port precomputes it instead of matching each exact state against the pool every epoch.
 
-`tests/fixtures/fastsverl_sampling.npz` (`scripts/explanations_port/collect_fastsverl_sampling.py`) runs the unchanged `get_val` and `null` with recorded pool permutations and `torch.rand` scores, including rows with no match. For every matched row, `tests/test_sampling.py` selects the same pool row as upstream.
+`tests/fixtures/fastsverl_sampling.npz` (`scripts/fixtures/collect_fastsverl_sampling.py`) runs the unchanged `get_val` and `null` with recorded pool permutations and `torch.rand` scores, including rows with no match. For every matched row, `tests/test_sampling.py` selects the same pool row as upstream.
 
 ## Continual learning
 
@@ -154,7 +154,7 @@ The exact loss is the mean squared error over all valid `(C, e)` pairs.
 - Exact values use the behaviour characteristic's exact buffer.
 - `with_exact_char` explains the exact outcome values, conditioned as the outcome run chose. Otherwise it explains the learnt outcome characteristic.
 
-**Parity.** `scripts/explanations_port/collect_fastsverl_outcome.py` runs the unchanged upstream classes on fixed batches and coalitions, recording the off-policy target's sampled next actions. `tests/fixtures/fastsverl_outcome.npz` holds:
+**Parity.** `scripts/fixtures/collect_fastsverl_outcome.py` runs the unchanged upstream classes on fixed batches and coalitions, recording the off-policy target's sampled next actions. `tests/fixtures/fastsverl_outcome.npz` holds:
 
 - the transition tables and value-iteration Q tables
 - per variant: three updates' losses, step-0 gradients, final and target weights, `get_val` and `null`
@@ -229,7 +229,7 @@ Each Shapley stage trains against the characteristic in its final, trained state
 
 ## Pipeline parity fixture
 
-`tests/fixtures/fastsverl_pipeline.npz` is captured by running upstream's unchanged `fill_buffer`, `get_data` and `train_models` (`scripts/explanations_port/collect_fastsverl_pipeline.py`). It records every random draw: buffer rows, by reissuing `Buffer.sample`'s own `np.random.choice` call on the same global stream, and coalitions. `tests/test_pipeline_parity.py` replays those draws through the JAX loop's injectable `train_draw`/`validation_draw` and checks:
+`tests/fixtures/fastsverl_pipeline.npz` is captured by running upstream's unchanged `fill_buffer`, `get_data` and `train_models` (`scripts/fixtures/collect_fastsverl_pipeline.py`). It records every random draw: buffer rows, by reissuing `Buffer.sample`'s own `np.random.choice` call on the same global stream, and coalitions. `tests/test_pipeline_parity.py` replays those draws through the JAX loop's injectable `train_draw`/`validation_draw` and checks:
 
 - **Buffer collection.** 16 vector Hypercube(3, 5) environments and a hand-built, tie-free greedy agent that reaches the goal every 10 steps. The 640 recorded observations, including 48 auto-resets, match exactly.
 - **Training loop.**
@@ -240,7 +240,7 @@ Each Shapley stage trains against the characteristic in its final, trained state
 - **Reloaded ε.** It follows upstream's save rule, `linear_schedule((steps − 1) · num_envs)`.
 
 ```bash
-uv run --script scripts/explanations_port/collect_fastsverl_pipeline.py \
+uv run --script scripts/fixtures/collect_fastsverl_pipeline.py \
   /path/to/fastsverl tests/fixtures/fastsverl_pipeline.npz
 ```
 
@@ -279,20 +279,20 @@ The models reuse `MLP` and `LayerConfig` from `networks.py`, including the softm
 Use a clean checkout of the pinned source. The script installs PyTorch in its own isolated environment and never adds it to the project:
 
 ```bash
-uv run --script scripts/explanations_port/collect_fastsverl_explanations.py \
+uv run --script scripts/fixtures/collect_fastsverl_explanations.py \
   /path/to/fastsverl tests/fixtures/fastsverl_explanations.npz
 ```
 
 The collector verifies the source commit, the committed bytes of every source file it executes, and the transition-fixture hash. Two runs produce identical files. The sampled-characteristic fixture needs only the source checkout:
 
 ```bash
-uv run --script scripts/explanations_port/collect_fastsverl_sampling.py \
+uv run --script scripts/fixtures/collect_fastsverl_sampling.py \
   /path/to/fastsverl tests/fixtures/fastsverl_sampling.npz
 ```
 
 The outcome fixture is regenerated the same way, after the explanation fixture it reads:
 
 ```bash
-uv run --script scripts/explanations_port/collect_fastsverl_outcome.py \
+uv run --script scripts/fixtures/collect_fastsverl_outcome.py \
   /path/to/fastsverl tests/fixtures/fastsverl_outcome.npz
 ```

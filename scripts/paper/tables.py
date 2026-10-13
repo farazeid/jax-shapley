@@ -18,7 +18,7 @@ and Table 2 restores the agent, characteristic and Shapley checkpoints from that
 artifacts (as a `table-2` run that records their use). Tables whose experiments are not
 ported yet, or have no tracked runs, are reported missing.
 
-Usage: uv run python scripts/paper_port/tables.py --track wandb|trackio [--output docs/data]
+Usage: uv run python scripts/paper/tables.py --track wandb|trackio [--output docs/data]
 """
 
 from __future__ import annotations

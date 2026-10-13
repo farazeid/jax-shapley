@@ -14,7 +14,7 @@ Inputs come from `figures.py` (`paper--jax-curves.csv`, `paper--jax-bars.csv`) a
 `paper--comparison.csv`, `paper--claims-results.csv` and overlay plots under
 `docs/figures/paper/`.
 
-Usage: uv run --group benchmark python scripts/paper_port/compare.py [--data docs/data]
+Usage: uv run --group benchmark python scripts/paper/compare.py [--data docs/data]
 """
 
 from __future__ import annotations

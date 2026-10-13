@@ -188,4 +188,4 @@ uv run python -m new_jax_shapley.main mastermind222_behaviour --shapley.1.train.
   - The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
   - **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.
   - **trackio:** the source of truth is its local store, `TRACKIO_DIR`.
-  - `scripts/paper_port/figures.py` and `tables.py` read results from the same backend, selecting each sweep point by its runs' configs.
+  - `scripts/paper/figures.py` and `tables.py` read results from the same backend, selecting each sweep point by its runs' configs.
