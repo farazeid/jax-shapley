@@ -19,40 +19,53 @@ from flax import nnx
 
 STATE = "state"
 METADATA = "metadata.json"
-SCHEMA = 1
+SCHEMA = 2
 
 
 def save(directory: Path, state: object, settings: Mapping[str, object]) -> None:
-    """Write `state` and its settings into a new folder, the content of one artifact."""
+    """Write `state` and its settings into a new folder, the content of one artifact.
+
+    Each key's PRNG implementation is recorded, so it restores as saved whatever the
+    loading process's default implementation is.
+    """
     directory.mkdir(parents=True)
     _, tree = nnx.split(state)
     leaves, structure = jax.tree.flatten(nnx.to_pure_dict(tree))
-    stored = [
-        jax.random.key_data(leaf) if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key) else leaf for leaf in leaves
-    ]
+    is_key = [jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key) for leaf in leaves]
+    stored = [jax.random.key_data(leaf) if key else leaf for leaf, key in zip(leaves, is_key, strict=True)]
     checkpointer = ocp.StandardCheckpointer()
     checkpointer.save((directory / STATE).resolve(), jax.tree.unflatten(structure, stored))
     checkpointer.wait_until_finished()
-    (directory / METADATA).write_text(json.dumps({"schema": SCHEMA, **settings}, indent=2, default=str))
+    implementations = [str(jax.random.key_impl(leaf)) for leaf, key in zip(leaves, is_key, strict=True) if key]
+    metadata = {"schema": SCHEMA, "keys": implementations, "settings": settings}
+    (directory / METADATA).write_text(json.dumps(metadata, indent=2, default=str))
 
 
 def load[State](directory: Path, template: State, settings: Mapping[str, object]) -> State:
-    """Restore a state saved by `save`; `settings` must equal the saved ones."""
+    """Restore a state saved by `save` onto the template's devices; `settings` must equal the saved ones."""
     saved = json.loads((directory / METADATA).read_text())
-    expected = json.loads(json.dumps({"schema": SCHEMA, **settings}, default=str))
-    if saved != expected:
+    if saved.get("schema") != SCHEMA or saved["settings"] != json.loads(json.dumps(settings, default=str)):
         raise ValueError(f"checkpoint {directory} was saved with different settings")
     graph, tree = nnx.split(template)
     leaves, structure = jax.tree.flatten(nnx.to_pure_dict(tree))
-    keys = [jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key) for leaf in leaves]
-    shapes: list[jax.ShapeDtypeStruct] = []
-    for leaf, is_key in zip(leaves, keys, strict=True):
-        data: jax.ShapeDtypeStruct = jax.eval_shape(jax.random.key_data, leaf) if is_key else leaf
-        shapes.append(jax.ShapeDtypeStruct(data.shape, data.dtype))
-    restored = ocp.StandardCheckpointer().restore((directory / STATE).resolve(), jax.tree.unflatten(structure, shapes))
+    implementations = iter(saved["keys"])
+    targets: list[jax.ShapeDtypeStruct] = []
+    restored_keys: list[str | None] = []
+    for leaf in leaves:
+        if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key):
+            implementation = next(implementations)
+            restored_keys.append(implementation)
+            # Raw key data: the key's shape, then the saved implementation's data shape.
+            data = jax.random.key_data(jax.random.key(0, impl=implementation))
+            sharding = jax.random.key_data(leaf).sharding
+            targets.append(jax.ShapeDtypeStruct((*leaf.shape, *data.shape), data.dtype, sharding=sharding))
+        else:
+            restored_keys.append(None)
+            targets.append(jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=leaf.sharding))
+    restored = ocp.StandardCheckpointer().restore((directory / STATE).resolve(), jax.tree.unflatten(structure, targets))
     values: list[jax.Array] = []
-    for value, leaf, is_key in zip(jax.tree.leaves(restored), leaves, keys, strict=True):
-        wrapped: jax.Array = jax.random.wrap_key_data(value, impl=jax.random.key_impl(leaf)) if is_key else value
+    for value, implementation in zip(jax.tree.leaves(restored), restored_keys, strict=True):
+        wrapped: jax.Array = value if implementation is None else jax.random.wrap_key_data(value, impl=implementation)
         values.append(wrapped)
     nnx.replace_by_pure_dict(tree, jax.tree.unflatten(structure, values))
     return nnx.merge(graph, tree)
