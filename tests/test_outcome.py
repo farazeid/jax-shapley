@@ -1,59 +1,43 @@
-"""Outcome characteristic and outcome Shapley parity with the pinned FastSVERL source."""
+"""Outcome characteristic and outcome Shapley parity with the pinned FastSVERL source.
 
-from collections.abc import Callable
+The off-policy and Shapley losses draw their own rows, explained states, coalitions and
+next actions; the fixture records them, so these tests replace the draws with the fixture's.
+"""
+
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
 from jax import Array
 
-from jax_shapley.characteristics import (
-    CharacteristicConfig,
-    CharacteristicModel,
-    LossMetrics,
-    characteristic_network,
-    exact_characteristic,
-)
-from jax_shapley.coalitions import all_coalitions
-from jax_shapley.outcome import (
-    AgentPolicy,
-    ConditionedPolicy,
+from new_jax_shapley.algorithms.dqn import Env, TransitionBatch
+from new_jax_shapley.characteristic_models import behaviour, outcome
+from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel
+from new_jax_shapley.characteristic_models.outcome import (
     ExactOutcome,
-    OutcomeCharacteristic,
     OutcomeConfig,
+    OutcomeContext,
+    OutcomeExplained,
+    OutcomeFrozen,
     OutcomeNetworks,
-    Transitions,
+    OutcomeTrainConfig,
     Variant,
-    exact_behaviour_table,
-    exact_outcome,
-    exact_outcome_loss,
-    learnt_behaviour_table,
-    off_policy_loss,
-    on_policy_loss,
-    outcome_network,
-    outcome_value,
-    soft_update,
-    update_off_policy,
-    update_on_policy,
 )
-from jax_shapley.shapley import (
-    MaskedCharacteristic,
-    ShapleyLayout,
-    ShapleyModel,
-    characteristic_table,
-    exact_shapley,
-    exact_shapley_loss,
-    explain,
-    shapley_loss,
-    shapley_network,
-    update_shapley,
-)
-from jax_shapley.tabular import state_indices, transition_model
-from jax_shapley.train_dqn import AdamConfig, EnvironmentConfig, GridworldConfig, Mastermind222Config, make_adam
-from tests.explanation_support import (
+from new_jax_shapley.common.coalitions import coalition_table
+from new_jax_shapley.common.networks import soft_update
+from new_jax_shapley.common.supervised_learning import StateBuffers, SupervisedConfig, gradient_step, seed_slice
+from new_jax_shapley.common.tabular import state_indices, transition_model
+from new_jax_shapley.envs import Gridworld, Mastermind
+from new_jax_shapley.shapley_models import behaviour as shapley
+from new_jax_shapley.shapley_models import outcome as outcome_shapley
+from new_jax_shapley.shapley_models.behaviour import ExactShapley, ShapleyConfig, ShapleyContext
+from tests.fixture_support import (
     ATOL,
     RTOL,
     STEPS,
@@ -68,7 +52,7 @@ from tests.explanation_support import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_outcome.npz"
-CONFIGS: dict[str, EnvironmentConfig] = {"gridworld": GridworldConfig(), "mastermind222": Mastermind222Config()}
+ENVIRONMENTS: dict[str, Env] = {"gridworld": Gridworld(), "mastermind222": Mastermind(2, 2, 2)}
 VARIANTS: dict[str, Variant] = {"off": "off_policy", "on": "on_policy"}
 LABELS = ("with_exact_char", "without_exact_char")
 TAU = 0.01
@@ -76,62 +60,76 @@ TAU = 0.01
 EXACT_RTOL, EXACT_ATOL = 1e-5, 1e-4
 
 
-@pytest.mark.parametrize("case", tuple(CONFIGS))
+@pytest.mark.parametrize("case", tuple(ENVIRONMENTS))
 @pytest.mark.parametrize("prefix", tuple(VARIANTS))
-def test_updates_match_source(case: str, prefix: str) -> None:
+def test_updates_match_source(case: str, prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
     fixture, shape = _fixture(), layout(case)
     variant = VARIANTS[prefix]
-    networks = _networks(fixture, shape, variant, f"{case}_{prefix}_initial")
-    optimizer = make_adam(networks, shape.learning_rate, AdamConfig())
-    config = OutcomeConfig(variant, tau=TAU, hidden_widths=(shape.width,) * 2)
-    batch, explained = _batch(fixture, case)
-    first = jnp.asarray(fixture[f"{case}_off_coalitions_0"])
-    first_actions = jnp.asarray(fixture[f"{case}_off_next_actions_0"])
-    if prefix == "off":
-        _assert_gradients(
-            lambda model: off_policy_loss(model, networks.target, batch, explained, first, first_actions, config.gamma),
-            networks.model,
-            fixture,
-            f"{case}_off_gradient",
-        )
-    else:
-        _assert_gradients(
-            lambda model: on_policy_loss(model, networks.target, batch, explained, first, config.gamma),
-            networks.model,
-            fixture,
-            f"{case}_on_gradient",
-        )
+    batch, explained_rows = _batch(fixture, case)
+    rows = batch.observations.shape[0]
+    training = OutcomeTrainConfig(batch_size=rows, train_size=2 * rows, validation_size=rows)
+    config = OutcomeConfig(shape.env, variant=variant, tau=TAU, hidden_widths=(shape.width,) * 2, train=training)
+    explained = CharacteristicConfig(shape.env, policy="explore")
+    state = seed_slice(outcome.initialize(config, explained), 0)
+    networks, optimizer = state.model, state.optimizer
+    assign(networks.model.mlp, fixture, f"{case}_{prefix}_initial")
+    assign(networks.target.mlp, fixture, f"{case}_{prefix}_initial")  # The source copies the model into its target.
+    frozen = _frozen(shape)
+    # Batch rows come first in the train prefix, the explained states after them.
+    stacked = TransitionBatch(*[jnp.concatenate((leaf, leaf)) for leaf in jax.tree.leaves(batch)])
+    context = OutcomeContext(
+        replace(stacked, observations=jnp.concatenate((batch.observations, explained_rows))), stacked, None
+    )
+    loss = partial(outcome.loss, config, explained)
     for step in range(STEPS):
         # Both variants use the same fixed coalitions per step.
         coalitions = jnp.asarray(fixture[f"{case}_off_coalitions_{step}"])
         if prefix == "off":
-            next_actions = jnp.asarray(fixture[f"{case}_off_next_actions_{step}"])
-            metrics = update_off_policy(networks, optimizer, batch, explained, coalitions, next_actions, config)
+            _fix_draws(monkeypatch, rows, coalitions, jnp.asarray(fixture[f"{case}_off_next_actions_{step}"]))
+            arguments = (networks, frozen, context, training, shape.features, jax.random.key(0))
+            value, gradients = cast(
+                tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+                nnx.value_and_grad(loss)(*arguments, "train"),
+            )
+            if step == 0:
+                assert_gradients(_model_gradients(gradients), fixture, f"{case}_off_gradient")
+            value = outcome.update(
+                config, explained, networks, optimizer, frozen, context, training, shape.features, jax.random.key(0)
+            )
         else:
-            metrics = update_on_policy(networks, optimizer, batch, explained, coalitions, config)
-            soft_update(networks, config.tau)  # The collector follows each update with update_target.
-        np.testing.assert_allclose(metrics.loss, fixture[f"{case}_{prefix}_loss_{step}"], rtol=RTOL, atol=ATOL)
+            value, gradients = cast(
+                tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+                nnx.value_and_grad(outcome.on_policy_loss)(networks, batch, explained_rows, coalitions, config.gamma),
+            )
+            if step == 0:
+                assert_gradients(_model_gradients(gradients), fixture, f"{case}_on_gradient")
+            optimizer.update(networks, gradients)
+            soft_update(networks.model.mlp, networks.target.mlp, config.tau)  # The collector's update_target.
+        np.testing.assert_allclose(value, fixture[f"{case}_{prefix}_loss_{step}"], rtol=RTOL, atol=ATOL)
     assert_parameters(networks.model.mlp, fixture, f"{case}_{prefix}_final")
     assert_parameters(networks.target.mlp, fixture, f"{case}_{prefix}_target")
 
 
-@pytest.mark.parametrize("case", tuple(CONFIGS))
+@pytest.mark.parametrize("case", tuple(ENVIRONMENTS))
 @pytest.mark.parametrize("prefix", tuple(VARIANTS))
 def test_values_and_null_match_source(case: str, prefix: str) -> None:
     fixture, shape = _fixture(), layout(case)
-    characteristic = _characteristic(fixture, shape, VARIANTS[prefix], f"{case}_{prefix}_final")
+    config, explained, characteristic = _characteristic(fixture, shape, VARIANTS[prefix], f"{case}_{prefix}_final")
     unique = jnp.asarray(load_fixture()[f"{case}_unique"])
     probe = jnp.asarray(fixture[f"{case}_probe_coalitions"])
-    np.testing.assert_allclose(
-        characteristic.values(unique, probe), fixture[f"{case}_{prefix}_get_val"], rtol=RTOL, atol=ATOL
-    )
-    np.testing.assert_allclose(characteristic.null(unique), fixture[f"{case}_{prefix}_null"], rtol=RTOL, atol=ATOL)
     # get_val is the source's sum over the conditioned policy (off-policy) or V at e (on-policy).
-    direct = outcome_value(characteristic.networks.model, characteristic.policy, unique, probe, characteristic.variant)
-    np.testing.assert_allclose(direct, fixture[f"{case}_{prefix}_get_val"], rtol=RTOL, atol=ATOL)
+    np.testing.assert_allclose(
+        outcome.values(config, explained, characteristic, unique, probe),
+        fixture[f"{case}_{prefix}_get_val"],
+        rtol=RTOL,
+        atol=ATOL,
+    )
+    np.testing.assert_allclose(
+        outcome.null(config, characteristic, unique), fixture[f"{case}_{prefix}_null"], rtol=RTOL, atol=ATOL
+    )
 
 
-@pytest.mark.parametrize("case", tuple(CONFIGS))
+@pytest.mark.parametrize("case", tuple(ENVIRONMENTS))
 def test_exact_values_and_losses_match_source(case: str) -> None:
     fixture, shape = _fixture(), layout(case)
     exact, columns = _exact(shape)
@@ -140,142 +138,183 @@ def test_exact_values_and_losses_match_source(case: str) -> None:
             exact[label].values[:, columns], fixture[f"{case}_exact_{label}"], rtol=EXACT_RTOL, atol=EXACT_ATOL
         )
         for prefix, variant in VARIANTS.items():
-            characteristic = _characteristic(fixture, shape, variant, f"{case}_{prefix}_final")
-            loss = exact_outcome_loss(characteristic, exact[label], all_coalitions(shape.features))
+            config, explained, characteristic = _characteristic(fixture, shape, variant, f"{case}_{prefix}_final")
             np.testing.assert_allclose(
-                loss, fixture[f"{case}_{prefix}_exact_loss_{label}"], rtol=EXACT_RTOL, atol=EXACT_ATOL
+                outcome.exact_values_loss(config, explained, characteristic, exact[label]),
+                fixture[f"{case}_{prefix}_exact_loss_{label}"],
+                rtol=EXACT_RTOL,
+                atol=EXACT_ATOL,
             )
 
 
-@pytest.mark.parametrize("case", tuple(CONFIGS))
-def test_outcome_shapley_matches_source(case: str) -> None:
+@pytest.mark.parametrize("case", tuple(ENVIRONMENTS))
+def test_outcome_shapley_matches_source(case: str, monkeypatch: pytest.MonkeyPatch) -> None:
     fixture, shape = _fixture(), layout(case)
-    characteristic = _characteristic(fixture, shape, "off_policy", f"{case}_off_final")
-    shapley_layout = ShapleyLayout(shape.features, 1)
-    model = ShapleyModel(shapley_network(shapley_layout, (shape.width,) * 2), shapley_layout, rngs=nnx.Rngs(0))
-    assign(model.mlp, fixture, f"{case}_shapley_initial")
-    optimizer = make_adam(model, shape.learning_rate, AdamConfig())
+    config, explained, characteristic = _characteristic(fixture, shape, "off_policy", f"{case}_off_final")
     observations = _batch(fixture, case)[0].observations
-    first = jnp.asarray(fixture[f"{case}_shapley_coalition_0"])
-    _assert_gradients(
-        lambda shapley: shapley_loss(shapley, characteristic, observations, first),
-        model,
-        fixture,
-        f"{case}_shapley_gradient",
-    )
+    rows = observations.shape[0]
+    training = SupervisedConfig(batch_size=rows, buffer_size=rows * 5 // 4, num_envs=1)
+    shapley_config = ShapleyConfig(shape.env, hidden_widths=(shape.width,) * 2, train=training)
+    state = seed_slice(shapley.initialize(shapley_config, explained, outcome_shapley.head), 0)
+    model, optimizer = state.model, state.optimizer
+    assign(model.mlp, fixture, f"{case}_shapley_initial")
+    values, null = partial(outcome.values, config, explained), partial(outcome.null, config)
+    loss = partial(shapley.loss, values, null)
+    context = ShapleyContext(StateBuffers(observations, observations, observations), None)
     for step in range(STEPS):
         coalition = jnp.asarray(fixture[f"{case}_shapley_coalition_{step}"])
-        metrics = update_shapley(model, optimizer, characteristic, observations, coalition)
-        np.testing.assert_allclose(metrics.loss, fixture[f"{case}_shapley_loss_{step}"], rtol=RTOL, atol=ATOL)
+        _fix_shapley_draws(monkeypatch, coalition)
+        if step == 0:
+            _, gradients = cast(
+                tuple[Array, nnx.State[str | int, nnx.Param[Array]]],
+                nnx.value_and_grad(loss)(
+                    model, characteristic, context, training, shape.features, jax.random.key(0), "train"
+                ),
+            )
+            assert_gradients(gradients, fixture, f"{case}_shapley_gradient")
+        value = gradient_step(
+            loss, model, optimizer, characteristic, context, training, shape.features, jax.random.key(0)
+        )
+        np.testing.assert_allclose(value, fixture[f"{case}_shapley_loss_{step}"], rtol=RTOL, atol=ATOL)
     assert_parameters(model.mlp, fixture, f"{case}_shapley_final")
     states = jnp.asarray(load_fixture()[f"{case}_unique"])
     np.testing.assert_allclose(
-        explain(model, characteristic, states), fixture[f"{case}_shapley_sv_unique"], rtol=RTOL, atol=ATOL
+        shapley.explain(values, null, model, characteristic, states),
+        fixture[f"{case}_shapley_sv_unique"],
+        rtol=RTOL,
+        atol=ATOL,
     )
     exact, columns = _exact(shape)
-    coalitions = all_coalitions(shape.features)
+    coalitions = jnp.asarray(coalition_table(shape.features))
     tables = {
         "with_exact_char": exact["with_exact_char"].values[:, columns, None],
-        "without_exact_char": characteristic_table(characteristic, states, coalitions),
+        "without_exact_char": values(characteristic, states[None], coalitions[:, None]),
     }
-    valid = jnp.ones(states.shape[0], jnp.bool_)
     for label, table in tables.items():
-        solved = exact_shapley(table)
+        solved = shapley.exact_shapley(table)
         tolerance = (EXACT_RTOL, EXACT_ATOL) if label == "with_exact_char" else (RTOL, ATOL)
         np.testing.assert_allclose(
             solved, fixture[f"{case}_shapley_exact_{label}"], rtol=tolerance[0], atol=tolerance[1]
         )
-        loss = exact_shapley_loss(model, characteristic, states, valid, solved)
+        solved_context = ShapleyContext(
+            context.buffers, ExactShapley(states, jnp.ones(states.shape[0], jnp.bool_), solved)
+        )
+        exact_loss = loss(model, characteristic, solved_context, training, shape.features, jax.random.key(0), "exact")
         np.testing.assert_allclose(
-            loss, fixture[f"{case}_shapley_exact_loss_{label}"], rtol=tolerance[0], atol=tolerance[1]
+            exact_loss, fixture[f"{case}_shapley_exact_loss_{label}"], rtol=tolerance[0], atol=tolerance[1]
         )
 
 
 def test_config_and_network_shapes() -> None:
-    off = outcome_network(3, 4, OutcomeConfig("off_policy", hidden_widths=(5,)))
-    on = outcome_network(3, 4, OutcomeConfig("on_policy", hidden_widths=(5,)))
-    assert off.input_features == on.input_features == 9
-    assert off.output_features == 4 and on.output_features == 1
+    env = Mastermind(2, 2, 2)
+    explained = CharacteristicConfig(env)
+    for variant, outputs in (("off_policy", 4), ("on_policy", 1)):
+        config = OutcomeConfig(env, variant=variant, hidden_widths=(5,))
+        networks = seed_slice(outcome.initialize(config, explained), 0).model
+        assert networks.model.mlp.config.input_features == 3 * 8
+        assert networks.model.mlp.config.output_features == outputs
     for invalid in ({"tau": 0.0}, {"gamma": 1.5}, {"hidden_widths": (0,)}):
         with pytest.raises(ValueError):
-            OutcomeConfig(**invalid)  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
+            OutcomeConfig(env, **invalid)  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
     with pytest.raises(ValueError):
-        OutcomeConfig("outcome")  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
-
-
-def _assert_gradients[Model: nnx.Module](
-    loss: Callable[[Model], tuple[Array, LossMetrics]], model: Model, fixture: FixtureArrays, prefix: str
-) -> None:
-    # NNX transformation has a dynamic return signature; assert its known loss/state boundary.
-    result = cast(
-        tuple[tuple[Array, LossMetrics], nnx.State[str | int, nnx.Param[Array]]],
-        nnx.value_and_grad(loss, has_aux=True)(model),
-    )
-    assert_gradients(result[1], fixture, prefix)
+        OutcomeConfig(env, variant="outcome")  # ty: ignore[invalid-argument-type] -- runtime validation of untyped input.
 
 
 def _exact(shape: CaseLayout) -> tuple[dict[str, ExactOutcome], Array]:
-    """Production exact outcome values (at every modelled state), and the columns of upstream's unique states.
-
-    The exact behaviour characteristic evaluated at modelled states must agree with
-    exact_characteristic at the buffer's unique states.
-    """
+    """Production exact outcome values (at every modelled state), and the columns of upstream's unique states."""
     explanations = load_fixture()
-    policy = _policy(shape)
-    tabular = transition_model(CONFIGS[shape.name])
+    tabular = transition_model(ENVIRONMENTS[shape.name])
     observations = jnp.asarray(explanations[f"{shape.name}_exact_buffer"])
     unique = jnp.asarray(explanations[f"{shape.name}_unique"])
-    coalitions = all_coalitions(shape.features)
-    targets = policy.agent(observations)
-    behaviour = exact_characteristic(observations, targets, coalitions, max_unique=int(unique.shape[0]))
-    np.testing.assert_array_equal(behaviour.states, unique)
-    exact_table, present = exact_behaviour_table(observations, targets, tabular.states, coalitions)
-    columns, modelled = state_indices(tabular, unique)
-    assert bool(modelled.all()) and int(present.sum()) == unique.shape[0] and bool(present[columns].all())
-    np.testing.assert_allclose(exact_table[:, columns], behaviour.at_states, rtol=1e-6, atol=1e-7)
-    agent = policy.agent(tabular.states)
-    conditioned = {
-        "with_exact_char": exact_table,
-        "without_exact_char": learnt_behaviour_table(policy.behaviour, tabular.states, coalitions),
-    }
+    explained = CharacteristicConfig(shape.env, policy="explore")
+    frozen = _frozen(shape)
     exact = {
-        label: exact_outcome(tabular, tabular.states, present, table, agent, 1.0)
-        for label, table in conditioned.items()
+        label: outcome.exact_outcome(tabular, observations, frozen, explained, label == "with_exact_char", 1.0)
+        for label in LABELS
     }
+    columns, modelled = state_indices(tabular, unique)
+    present = exact["with_exact_char"].state_valid
+    assert bool(modelled.all()) and int(present.sum()) == unique.shape[0] and bool(present[columns].all())
     return exact, columns
 
 
-def _characteristic(fixture: FixtureArrays, shape: CaseLayout, variant: Variant, prefix: str) -> OutcomeCharacteristic:
-    networks = _networks(fixture, shape, variant, prefix)
-    return OutcomeCharacteristic(networks, _policy(shape), variant)
-
-
-def _networks(fixture: FixtureArrays, shape: CaseLayout, variant: Variant, prefix: str) -> OutcomeNetworks:
-    config = OutcomeConfig(variant, tau=TAU, hidden_widths=(shape.width,) * 2)
-    networks = OutcomeNetworks(outcome_network(shape.features, shape.actions, config), rngs=nnx.Rngs(0))
+def _characteristic(
+    fixture: FixtureArrays, shape: CaseLayout, variant: Variant, prefix: str
+) -> tuple[OutcomeConfig, CharacteristicConfig, OutcomeExplained]:
+    config = OutcomeConfig(shape.env, variant=variant, tau=TAU, hidden_widths=(shape.width,) * 2)
+    explained = CharacteristicConfig(shape.env, policy="explore")
+    networks: OutcomeNetworks = seed_slice(outcome.initialize(config, explained), 0).model
     assign(networks.model.mlp, fixture, prefix)
-    assign(networks.target.mlp, fixture, prefix)  # The source copies the model into its target critic.
-    return networks
+    assign(networks.target.mlp, fixture, prefix)
+    frozen = _frozen(shape)
+    return config, explained, OutcomeExplained(frozen.agent, frozen.behaviour, networks)
 
 
-def _policy(shape: CaseLayout) -> ConditionedPolicy:
+def _frozen(shape: CaseLayout) -> OutcomeFrozen:
+    """The fixture's explore agent and its trained behaviour characteristic."""
     explanations = load_fixture()
-    config = CharacteristicConfig("behaviour", hidden_widths=(shape.width,) * 2)
-    behaviour = CharacteristicModel(characteristic_network(shape.features, shape.actions, config), rngs=nnx.Rngs(0))
-    assign(behaviour.mlp, explanations, f"{shape.name}_char_behaviour_final")
-    agent = AgentPolicy(load_agent(explanations, shape), "explore", jnp.asarray(shape.epsilon, jnp.float32))
-    return ConditionedPolicy(MaskedCharacteristic(behaviour), agent)
+    config = CharacteristicConfig(shape.env, hidden_widths=(shape.width,) * 2)
+    model: CharacteristicModel = seed_slice(behaviour.initialize(config, behaviour.head), 0).model
+    assign(model.mlp, explanations, f"{shape.name}_char_behaviour_final")
+    return OutcomeFrozen(load_agent(explanations, shape), model)
 
 
-def _batch(fixture: FixtureArrays, case: str) -> tuple[Transitions, Array]:
-    batch = Transitions(
+def _model_gradients(gradients: nnx.State[str | int, nnx.Param[Array]]) -> nnx.State[str | int, nnx.Param[Array]]:
+    return cast(nnx.State[str | int, nnx.Param[Array]], gradients["model"])
+
+
+def _batch(fixture: FixtureArrays, case: str) -> tuple[TransitionBatch, Array]:
+    batch = TransitionBatch(
         jnp.asarray(fixture[f"{case}_batch_obs"], jnp.int32),
         jnp.asarray(fixture[f"{case}_batch_action"], jnp.int32),
         jnp.asarray(fixture[f"{case}_batch_reward"], jnp.float32),
         jnp.asarray(fixture[f"{case}_batch_next_obs"], jnp.int32),
         jnp.asarray(fixture[f"{case}_batch_terminated"]) > 0,
+        jnp.zeros(fixture[f"{case}_batch_obs"].shape[0], jnp.float32),
     )
     return batch, jnp.asarray(fixture[f"{case}_batch_e_obs"], jnp.int32)
+
+
+def _fix_draws(monkeypatch: pytest.MonkeyPatch, rows: int, coalitions: Array, next_actions: Array) -> None:
+    """The off-policy loss's draws: the batch rows in order, then the explained states after them,
+    the fixture's coalitions, and its next actions."""
+    indices: list[Array] = [jnp.arange(rows, dtype=jnp.int32), rows + jnp.arange(rows, dtype=jnp.int32)]
+
+    def randint(key: Array, shape: tuple[int, ...], minval: int, maxval: int) -> Array:
+        del key, shape, minval, maxval
+        return indices.pop(0)
+
+    def bernoulli(key: Array, p: float, shape: tuple[int, ...]) -> Array:
+        del key, p
+        assert shape == coalitions.shape
+        return coalitions
+
+    def categorical(key: Array, logits: Array, axis: int) -> Array:
+        del key, axis
+        assert logits.shape[0] == next_actions.shape[0]
+        return next_actions
+
+    # The loss is traced twice per step: once for gradients, once inside the update.
+    indices.extend(indices.copy())
+    monkeypatch.setattr(jax.random, "randint", randint)
+    monkeypatch.setattr(jax.random, "bernoulli", bernoulli)
+    monkeypatch.setattr(jax.random, "categorical", categorical)
+
+
+def _fix_shapley_draws(monkeypatch: pytest.MonkeyPatch, coalition: Array) -> None:
+    """The Shapley loss's draws: the batch rows in order and the fixture's kernel coalition."""
+
+    def randint(key: Array, shape: tuple[int, ...], minval: int, maxval: int) -> Array:
+        del key, minval, maxval
+        return jnp.arange(shape[0], dtype=jnp.int32)
+
+    def kernel_coalitions(key: Array, batch: int, features: int) -> Array:
+        del key
+        assert (batch, features) == (1, coalition.shape[0])
+        return coalition[None]
+
+    monkeypatch.setattr(jax.random, "randint", randint)
+    monkeypatch.setattr(shapley, "kernel_coalitions", kernel_coalitions)
 
 
 def _fixture() -> FixtureArrays:

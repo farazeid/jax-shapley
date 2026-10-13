@@ -24,7 +24,7 @@ seed-stacked final state (agents and explanation models) is pushed as a checkpoi
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from functools import partial
 from math import isnan
@@ -62,7 +62,7 @@ from new_jax_shapley.common.coalitions import (
     kernel_coalitions,
     mask,
 )
-from new_jax_shapley.common.networks import LayerConfig, MLPConfig
+from new_jax_shapley.common.networks import LayerConfig, MLPConfig, soft_update
 from new_jax_shapley.common.rollouts import collect_observations
 from new_jax_shapley.common.tabular import TabularModel, transition_model
 from new_jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
@@ -365,10 +365,7 @@ def characteristic_update(
     ties = q_values == jnp.max(q_values, axis=-1, keepdims=True)
     greedy = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
     probabilities = agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * greedy
-    probabilities = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
-    clamp = jnp.finfo(jnp.float32).eps
-    logits = jnp.log(jnp.clip(probabilities, clamp, 1 - clamp))
-    explore = jnp.take_along_axis(logits, batch.actions[..., None], axis=-1)[..., 0]
+    explore = dqn.log_probabilities(probabilities, batch.actions)
     weights = jnp.exp(explore - batch.log_probabilities)
     if explain.weighting:
         weights = weights / jnp.sum(weights)
@@ -431,10 +428,7 @@ def outcome_update(
         nnx.value_and_grad(loss)(networks, batch, explained_rows, coalitions, next_actions, explain.gamma),
     )
     optimizer.update(networks, gradients)
-    tau = explain.tau
-    for source, target in zip(networks.model.mlp.layers, networks.target.mlp.layers, strict=True):
-        target.kernel[...] = tau * source.kernel[...] + (1 - tau) * target.kernel[...]
-        target.bias[...] = tau * source.bias[...] + (1 - tau) * target.bias[...]
+    soft_update(networks.model.mlp, networks.target.mlp, explain.tau)
     return carry, value
 
 
@@ -586,7 +580,7 @@ def sample(replay: dqn.ReplayState, size: int, key: Array) -> dqn.TransitionBatc
     return dqn.TransitionBatch(*[leaf[rows] for leaf in jax.tree.leaves(replay.data)])
 
 
-def log(runs: tuple[wandb.Run | trackio.Run, ...], num_envs: int, metrics: ContinualMetrics) -> None:
+def log(runs: Sequence[backends.Logger], num_envs: int, metrics: ContinualMetrics) -> None:
     """Each seed's step into its run: the agent's source scalars, and on logged and exact steps the
     explanation models' losses (a host callback)."""
     agent = metrics.agent

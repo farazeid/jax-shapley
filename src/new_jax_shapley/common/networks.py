@@ -135,3 +135,10 @@ class Linear(nnx.Module):
             bias = jax.random.uniform(bias_key, (config.features,), jnp.float32, minval=-bound, maxval=bound)
         self.kernel: nnx.Param[Array] = nnx.Param(kernel)
         self.bias: nnx.Param[Array] = nnx.Param(bias)
+
+
+def soft_update(source: MLP, target: MLP, tau: float) -> None:
+    """The source's DQN_Super.update_target: target <- tau * source + (1 - tau) * target, per layer."""
+    for layer, destination in zip(source.layers, target.layers, strict=True):
+        destination.kernel[...] = tau * layer.kernel[...] + (1 - tau) * destination.kernel[...]
+        destination.bias[...] = tau * layer.bias[...] + (1 - tau) * destination.bias[...]

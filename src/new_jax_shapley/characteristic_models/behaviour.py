@@ -31,6 +31,7 @@ from jax import Array
 from jaxtyping import Bool, Float, Int
 
 from new_jax_shapley import backends
+from new_jax_shapley.algorithms import dqn
 from new_jax_shapley.algorithms.dqn import TRACKING_FIELDS, Agent, Env, EnvParams, EnvState, TransitionBatch
 from new_jax_shapley.backends import Track
 from new_jax_shapley.common import checkpoints
@@ -374,10 +375,7 @@ def fit(
             probabilities = ties.astype(jnp.float32) / jnp.sum(ties, axis=-1, keepdims=True)
             if config.policy == "explore":
                 probabilities = agent.epsilon / q_values.shape[-1] + (1 - agent.epsilon) * probabilities
-            probabilities = probabilities / jnp.sum(probabilities, axis=-1, keepdims=True)
-            clamp = jnp.finfo(jnp.float32).eps
-            logits = jnp.log(jnp.clip(probabilities, clamp, 1 - clamp))
-            log_probabilities.append(jnp.take_along_axis(logits, actions[..., None], axis=-1)[..., 0])
+            log_probabilities.append(dqn.log_probabilities(probabilities, actions))
         return CharacteristicContext(
             buffers, train_targets, validation_targets, exact, log_probabilities[0], log_probabilities[1]
         )
