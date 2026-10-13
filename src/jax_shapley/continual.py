@@ -68,6 +68,7 @@ from jax_shapley.common.tabular import TabularModel, transition_model
 from jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 from jax_shapley.experiment import ContinualConfig, load_configs
 from jax_shapley.shapley_models.behaviour import (
+    COALITION_BATCH,
     CharacteristicNull,
     CharacteristicValues,
     ShapleyModel,
@@ -161,7 +162,7 @@ def main(args: list[str] | None = None) -> str:
             state, _ = nnx.jit(partial(fit, config, tabular, partial(log, runs, config.algorithm.num_envs)))(keys)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            runs[0].log_artifact(str(directory), name=artifact, type="continual").wait()
+            backends.upload(runs[0], directory, artifact, "continual")
             print(f"Continual checkpoint: {artifact}:latest")
         finally:
             for run in runs:
@@ -484,7 +485,9 @@ def exact_losses(
         table = (
             exact.at_states
             if explain.with_exact_char
-            else masked_values(explainers.characteristic, exact.states[None], coalitions[:, None])
+            else jax.lax.map(
+                partial(masked_values, explainers.characteristic, exact.states), coalitions, batch_size=COALITION_BATCH
+            )
         )
         states, valid, outcome_exact = exact.states, exact.state_valid, jnp.asarray(jnp.nan, jnp.float32)
     else:
@@ -502,7 +505,11 @@ def exact_losses(
         table = (
             exact_outcome.values[..., None]
             if explain.with_exact_char
-            else outcome.values(outcome_config, explained, frozen, exact_outcome.states[None], coalitions[:, None])
+            else jax.lax.map(
+                partial(outcome.values, outcome_config, explained, frozen, exact_outcome.states),
+                coalitions,
+                batch_size=COALITION_BATCH,
+            )
         )
         states, valid = exact_outcome.states, exact_outcome.state_valid
     errors = jnp.square(explain_values(values, null, explainers.shapley, frozen, states) - exact_shapley(table))

@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from functools import partial
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax import Array
@@ -30,6 +31,7 @@ from jax_shapley.common.supervised_learning import EpochMetrics, StateBuffers, T
 from jax_shapley.common.tabular import TabularModel, transition_model
 from jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 from jax_shapley.shapley_models.behaviour import (
+    COALITION_BATCH,
     ExactShapley,
     ShapleyConfig,
     ShapleyContext,
@@ -133,7 +135,11 @@ def fit(
         values = (
             exact.values[..., None]
             if config.with_exact_char
-            else outcome.values(characteristic, explained, outcome_explained, exact.states[None], coalitions[:, None])
+            else jax.lax.map(
+                partial(outcome.values, characteristic, explained, outcome_explained, exact.states),
+                coalitions,
+                batch_size=COALITION_BATCH,
+            )
         )
         return ShapleyContext(buffers, ExactShapley(exact.states, exact.state_valid, exact_shapley(values)))
 

@@ -20,6 +20,7 @@ import trackio
 import wandb
 from flax import nnx
 
+from jax_shapley import backends
 from jax_shapley.algorithms import dqn
 from jax_shapley.characteristic_models import behaviour as characteristic
 from jax_shapley.characteristic_models.behaviour import CharacteristicConfig
@@ -197,6 +198,36 @@ def test_compile_only_runs_and_tracks_nothing(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(wandb, "init", refuse)
     monkeypatch.setattr(trackio, "init", refuse)
     assert main([*SMALL_RUN, "--compile-only"]) == ""
+
+
+def test_checkpoint_uploads_retry_transient_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A busy backend at upload time must not discard a finished stage: transient errors retry."""
+    monkeypatch.setenv("TRACKIO_DIR", str(tmp_path / "trackio"))
+    run = trackio.init(project="upload-retry", name="stage")
+    attempts: list[int] = []
+    original = run.log_artifact
+
+    def flaky(artifact_or_path: str, name: str | None = None, type: str | None = None) -> trackio.Artifact:
+        attempts.append(len(attempts))
+        if len(attempts) < 3:
+            raise wandb.errors.CommError("the service process is busy and did not respond in time")
+        return original(artifact_or_path, name=name, type=type)
+
+    monkeypatch.setattr(run, "log_artifact", flaky)
+    monkeypatch.setattr(backends.time, "sleep", lambda seconds: None)
+    folder = tmp_path / "checkpoint"
+    folder.mkdir()
+    (folder / "metadata.json").write_text("{}")
+    backends.upload(run, folder, "group--stage", "agent")
+    assert len(attempts) == 3
+
+    def down(artifact_or_path: str, name: str | None = None, type: str | None = None) -> trackio.Artifact:
+        raise OSError("down")
+
+    monkeypatch.setattr(run, "log_artifact", down)
+    with pytest.raises(OSError, match="down"):
+        backends.upload(run, folder, "group--stage", "agent")
+    run.finish()
 
 
 @pytest.mark.skipif(os.environ.get("JAX_SHAPLEY_WANDB_TEST") != "1", reason="writes to the wandb cloud")

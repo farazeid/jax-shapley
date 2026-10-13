@@ -368,7 +368,7 @@ def main(
                 state, metrics = program(keys, agents, behaviours, behaviour_buffers)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            runs[0].log_artifact(str(directory), name=artifact, type="outcome").wait()
+            backends.upload(runs[0], directory, artifact, "outcome")
             print(f"Outcome checkpoint: {artifact}:latest")
             return state, metrics
         finally:

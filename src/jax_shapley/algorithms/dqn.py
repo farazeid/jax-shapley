@@ -268,7 +268,7 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
             metrics = stack_seeds([metrics for _, metrics in results])
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
-            runs[0].log_artifact(str(directory), name=artifact, type="agent").wait()
+            backends.upload(runs[0], directory, artifact, "agent")
             print(f"Agent checkpoint: {artifact}:latest")
             return state, metrics, trained_agent(config, state)
         finally:
