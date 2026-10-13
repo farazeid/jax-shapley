@@ -483,38 +483,12 @@ def loss(
     Batches draw rows with replacement and uniform coalitions per row (the source's
     sample_rand); validation resamples the whole validation size. Off-policy replay rows
     weigh each squared error by the explained-to-behaviour policy ratio (the source's
-    ImportanceWeightedMSELoss), normalised over the draw and clipped. The exact loss is
-    the MSE over every valid unique masked observation of every coalition, equally
-    weighted; only the chunks holding valid entries are evaluated, as their number
-    varies at run time while the padded arrays keep static shapes.
+    ImportanceWeightedMSELoss), normalised over the draw and clipped.
     """
     del frozen
     if partition == "exact":
-        exact = context.exact
-        assert exact is not None
-        outputs = exact.compact_values.shape[-1]
-        chunks = (exact.count + EXACT_CHUNK - 1) // EXACT_CHUNK
-
-        def body(
-            exact: ExactCharacteristic, model: CharacteristicModel, carry: tuple[Array, Array]
-        ) -> tuple[Array, Array]:
-            index, total = carry
-            start = index * EXACT_CHUNK
-            keys = jax.lax.dynamic_slice_in_dim(exact.compact_keys, start, EXACT_CHUNK)
-            values = jax.lax.dynamic_slice_in_dim(exact.compact_values, start, EXACT_CHUNK)
-            valid = (start + jnp.arange(EXACT_CHUNK)) < exact.count
-            errors = jnp.square(model(keys).values - values)
-            return index + 1, total + jnp.sum(jnp.where(valid[:, None], errors, 0.0))
-
-        def running(chunks: Array, carry: tuple[Array, Array]) -> Array:
-            return carry[0] < chunks
-
-        _, total = jax.lax.while_loop(
-            partial(running, chunks),
-            partial(body, exact, model),
-            (jnp.asarray(0, jnp.int32), jnp.asarray(0.0, jnp.float32)),
-        )
-        return total / (exact.count.astype(jnp.float32) * outputs)
+        assert context.exact is not None
+        return exact_loss(model, context.exact)
     index_key, coalition_key = jax.random.split(key)
     behaviour = context.buffers.behaviour
     if partition == "train":
@@ -540,6 +514,35 @@ def loss(
         weights = weights / jnp.sum(weights)
     weights = jnp.clip(weights, 1 - characteristic.clip_coef, 1 + characteristic.clip_coef)
     return jnp.mean(jax.lax.stop_gradient(weights)[:, None] * errors)
+
+
+def exact_loss(model: CharacteristicModel, exact: ExactCharacteristic) -> Array:
+    """MSE over every valid unique masked observation of every coalition, equally weighted.
+
+    Only the chunks holding valid entries are evaluated: their number varies at run time,
+    while the padded arrays keep static shapes.
+    """
+    outputs = exact.compact_values.shape[-1]
+    chunks = (exact.count + EXACT_CHUNK - 1) // EXACT_CHUNK
+
+    def body(exact: ExactCharacteristic, model: CharacteristicModel, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        index, total = carry
+        start = index * EXACT_CHUNK
+        keys = jax.lax.dynamic_slice_in_dim(exact.compact_keys, start, EXACT_CHUNK)
+        values = jax.lax.dynamic_slice_in_dim(exact.compact_values, start, EXACT_CHUNK)
+        valid = (start + jnp.arange(EXACT_CHUNK)) < exact.count
+        errors = jnp.square(model(keys).values - values)
+        return index + 1, total + jnp.sum(jnp.where(valid[:, None], errors, 0.0))
+
+    def running(chunks: Array, carry: tuple[Array, Array]) -> Array:
+        return carry[0] < chunks
+
+    _, total = jax.lax.while_loop(
+        partial(running, chunks),
+        partial(body, exact, model),
+        (jnp.asarray(0, jnp.int32), jnp.asarray(0.0, jnp.float32)),
+    )
+    return total / (exact.count.astype(jnp.float32) * outputs)
 
 
 def exact_characteristic(

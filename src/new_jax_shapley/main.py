@@ -69,7 +69,7 @@ class CompileInputs(NamedTuple):
 
 def main(args: list[str] | None = None) -> str:
     """Run the named experiment, tracked; returns its run group (empty when only compiling)."""
-    config = tyro.extras.overridable_config_cli(load_configs(), args=args)
+    config = tyro.extras.overridable_config_cli(load_configs(ExperimentConfig), args=args)
     if config.compile_only:
         compile_stages(config)
         print(f"Compiled {config.name}.")

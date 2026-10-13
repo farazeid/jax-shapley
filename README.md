@@ -161,20 +161,31 @@ bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --char
 
 ## Tracked experiments (`new_jax_shapley`)
 
-`new_jax_shapley` runs a whole experiment (DQN agent, then characteristic models, then Shapley models) from one config in `src/new_jax_shapley/configs/NAME.py`. Every run is tracked with trackio (the default) or wandb:
+`new_jax_shapley` runs each paper experiment from one config in `src/new_jax_shapley/configs/NAME.py`, through `experiments/NAME.sh`. Every run is tracked with trackio (the default) or wandb:
 
 ```bash
-uv run python -m new_jax_shapley.main mastermind222_behaviour
-uv run python -m new_jax_shapley.main mastermind222_behaviour --track wandb --shapley.1.train.epochs 9
+bash experiments/mastermind222_behaviour.sh
+bash experiments/hypercube_behaviour__sweep.sh --side-length 3 --dimension 4 -- --track wandb
+uv run python -m new_jax_shapley.main mastermind222_behaviour --shapley.1.train.epochs 9
 ```
 
-`experiments/NAME.sh` runs one experiment, compiling every stage first (`--compile-only`); `experiments/smoke.sh NAME` runs it shrunk to a few updates per stage. Explanation kinds live in one module each (`characteristic_models/` and `shapley_models/`: `behaviour.py`, `prediction.py`), the behaviour module holding the stage the other kinds share.
-
-- Each stage takes only its config and tracks itself. Its runs are named `NAME--STAGE--VARIANT`, with `--seed-N` per explanation seed: `NAME--algorithm--dqn--seed-1`, `NAME--characteristic--behaviour--seed-1`, `NAME--shapley--behaviour--with-exact--seed-1`. One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
-- The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
-- Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.
-- A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.
-- **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.
-- **trackio:** the source of truth is its local store, `TRACKIO_DIR`.
-- `--compile-only` traces, lowers and compiles every stage at the configured shapes and exits, without running or tracking anything; run it before a long experiment.
-- `scripts/paper_port/figures.py` and `tables.py` read results from the same backend.
+- **Pipeline experiments** (`python -m new_jax_shapley.main NAME`) run the agent, then characteristic models, optionally an outcome characteristic, then Shapley models. Variants are config fields:
+  - explanation kind (behaviour, prediction, outcome);
+  - off-policy replay data with importance weighting and clipping;
+  - sampled characteristics;
+  - Shapley buffers;
+  - per-seed agents and paired seeds (`explained_seed=None`).
+- **Continual experiments** (`python -m new_jax_shapley.continual NAME`) train explanation models alongside the agent (paper Figures 3b and 10).
+- **Kinds** live in one module each (`characteristic_models/` and `shapley_models/`: `behaviour.py`, `prediction.py`, `outcome.py`). The behaviour module holds the stage the other kinds share.
+- **Sweeps** are `configs/NAME__sweep.py`. They leave their swept fields `MISSING`, which `experiments/NAME__sweep.sh` supplies for each sweep point; each sweep point is its own run group.
+- **Compile first.** Every script runs `--compile-only` before it trains: every stage is traced, lowered and compiled at the configured shapes, with nothing run or tracked. `experiments/smoke.sh NAME` runs an experiment shrunk to a few updates per stage.
+- **Runs and artifacts.**
+  - Each stage tracks itself. Its runs are named `NAME--STAGE--VARIANT--seed-N`, for example `NAME--algorithm--dqn--seed-1` or `NAME--shapley--behaviour--with-exact--seed-1`.
+  - One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
+  - Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.
+  - A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.
+- **Where results live.**
+  - The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
+  - **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.
+  - **trackio:** the source of truth is its local store, `TRACKIO_DIR`.
+  - `scripts/paper_port/figures.py` and `tables.py` read results from the same backend, selecting each sweep point by its runs' configs.

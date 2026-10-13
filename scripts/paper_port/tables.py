@@ -122,7 +122,7 @@ class MissingRunsError(Exception):
 
 def main(args: Args) -> None:
     args.output.mkdir(parents=True, exist_ok=True)
-    configs = {name: config for name, (_, config) in load_configs().items()}
+    configs = {name: config for name, (_, config) in load_configs(ExperimentConfig).items()}
     for table, kind, models in (
         ()
         if not args.tables

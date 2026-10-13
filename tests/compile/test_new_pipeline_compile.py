@@ -7,12 +7,14 @@ swept fields MISSING: their run scripts compile each sweep point before running 
 
 import pytest
 
-from new_jax_shapley.experiment import load_configs
+from new_jax_shapley.experiment import ExperimentConfig, load_configs
 from new_jax_shapley.main import compile_stages
 
 
 @pytest.mark.compile
-@pytest.mark.parametrize("name", sorted(name for name in load_configs() if not name.endswith("__sweep")))
+@pytest.mark.parametrize(
+    "name", sorted(name for name in load_configs(ExperimentConfig) if not name.endswith("__sweep"))
+)
 def test_registered_experiments_compile(name: str) -> None:
-    _, config = load_configs()[name]
+    _, config = load_configs(ExperimentConfig)[name]
     compile_stages(config)
