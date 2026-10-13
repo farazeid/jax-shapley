@@ -112,14 +112,16 @@ class DQNConfig:
             ("batch_size", self.batch_size, 1),
             ("train_frequency", self.train_frequency, 1),
             ("target_network_frequency", self.target_network_frequency, 1),
-            ("vector steps (total_timesteps // num_envs)", self.vector_steps, 1),
             ("learning_starts", self.learning_starts, 0),
             ("eval_episodes", self.eval_episodes, 0),
         ):
-            if value < minimum:
-                raise ValueError(f"{name} must be at least {minimum}")
-        if not self.seeds or len(set(self.seeds)) != len(self.seeds):
-            raise ValueError("seeds must be distinct and nonempty")
+            # Counters, replay indices and steps are int32 inside the compiled run.
+            if not minimum <= value < 2**31:
+                raise ValueError(f"{name} must be at least {minimum} and fit in int32")
+        if self.vector_steps < 1:
+            raise ValueError("total_timesteps must cover at least one vector step (total_timesteps // num_envs)")
+        if not self.seeds or len(set(self.seeds)) != len(self.seeds) or min(self.hidden_widths, default=1) < 1:
+            raise ValueError("seeds must be distinct and nonempty, and hidden widths positive")
         for name, value in (("gamma", self.gamma), ("tau", self.tau), ("start_e", self.start_e), ("end_e", self.end_e)):
             if not 0 <= value <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
