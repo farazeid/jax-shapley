@@ -88,7 +88,7 @@ class DQNConfig:
     learning_starts: int = 10_000
     train_frequency: int = 10
     eval_episodes: int = 0
-    """Greedy evaluation episodes after training, logged as `eval/episodic_return`."""
+    """Greedy evaluation episodes after training, logged as `agent/eval_episodic_return`."""
     adam: AdamConfig = field(default_factory=AdamConfig)
     checkpoint: str | None = None
     """An agent artifact to load instead of training, e.g. `GROUP--algorithm--dqn:latest`."""
