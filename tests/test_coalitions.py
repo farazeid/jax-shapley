@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from new_jax_shapley.common.coalitions import MASK, coalition_table, kernel_coalitions, mask
+from jax_shapley.common.coalitions import MASK, coalition_table, kernel_coalitions, mask
 from tests.fixture_support import CASES, layout, load_fixture
 
 

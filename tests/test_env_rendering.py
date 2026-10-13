@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from new_jax_shapley.envs import (
+from jax_shapley.envs import (
     Gridworld,
     GridworldState,
     Hypercube,
@@ -90,8 +90,8 @@ def test_traced_render_is_rejected() -> None:
 
 def test_base_package_import_does_not_import_renderer_modules() -> None:
     code = (
-        "import sys, new_jax_shapley.envs; "
-        'assert not any(name.startswith("new_jax_shapley.envs.render.") '
+        "import sys, jax_shapley.envs; "
+        'assert not any(name.startswith("jax_shapley.envs.render.") '
         'and not name.endswith(".common") for name in sys.modules)'
     )
     result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]

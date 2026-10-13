@@ -1,4 +1,4 @@
-"""Load the pinned explanation fixture into new_jax_shapley models; shared by parity tests."""
+"""Load the pinned explanation fixture into jax_shapley models; shared by parity tests."""
 
 import json
 from dataclasses import dataclass
@@ -11,9 +11,9 @@ import numpy as np
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.common.networks import MLP
-from new_jax_shapley.envs import Gridworld, Hypercube, Mastermind
+from jax_shapley.algorithms import dqn
+from jax_shapley.common.networks import MLP
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_explanations.npz"
 CASES = ("gridworld", "mastermind222", "hypercube")

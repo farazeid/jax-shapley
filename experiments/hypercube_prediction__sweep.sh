@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the hypercube_prediction__sweep experiment (src/new_jax_shapley/configs/hypercube_prediction__sweep.py) for
+# Run the hypercube_prediction__sweep experiment (src/jax_shapley/configs/hypercube_prediction__sweep.py) for
 # each of the paper's 20 cubes (side length x dimension, agent timesteps), compiling each first.
 # Usage: bash experiments/hypercube_prediction__sweep.sh [--side-length N] [--dimension N] [-- overrides]
 set -euo pipefail
@@ -28,8 +28,8 @@ while read -r side dimension timesteps; do
     for stage in algorithm characteristic shapley.0; do
         swept+=(--"$stage".env.side-length "$side" --"$stage".env.dimension "$dimension")
     done
-    uv run python -m new_jax_shapley.main "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
-    uv run python -m new_jax_shapley.main "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
+    uv run python -m jax_shapley.main "$name" "${swept[@]}" --compile-only ${overrides[@]+"${overrides[@]}"}
+    uv run python -m jax_shapley.main "$name" "${swept[@]}" ${overrides[@]+"${overrides[@]}"}
 done <<'TABLE'
 2 2 100000
 3 2 50000

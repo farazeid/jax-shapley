@@ -14,9 +14,9 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms.dqn import QNetwork
-from new_jax_shapley.algorithms.ppo import PPOActor, PPOCritic
-from new_jax_shapley.common.networks import MLP, LayerConfig, Linear, MLPConfig, OrthogonalInit
+from jax_shapley.algorithms.dqn import QNetwork
+from jax_shapley.algorithms.ppo import PPOActor, PPOCritic
+from jax_shapley.common.networks import MLP, LayerConfig, Linear, MLPConfig, OrthogonalInit
 from tests.network_cases import NETWORK_CASES, AgentNetwork, NetworkCase, make_network
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_networks.npz"

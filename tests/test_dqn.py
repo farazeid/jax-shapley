@@ -11,11 +11,11 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.characteristic_models import behaviour
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
-from new_jax_shapley.common.networks import soft_update
-from new_jax_shapley.envs import Gridworld, Hypercube, Mastermind
+from jax_shapley.algorithms import dqn
+from jax_shapley.characteristic_models import behaviour
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig
+from jax_shapley.common.networks import soft_update
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_dqn.npz"
 ENVIRONMENTS = {"gridworld": Gridworld(), "mastermind222": Mastermind(2, 2, 2), "hypercube": Hypercube(2, 5)}

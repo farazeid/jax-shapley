@@ -1,6 +1,6 @@
 # jax-shapley
 
-End-to-end JAX/Gymnax ports of the reinforcement-learning environments used by [FastSVERL](https://github.com/djeb20/fastsverl): Gridworld, all 20 obstacle-free paper Hypercubes, and Mastermind-222.
+End-to-end JAX/Gymnax ports of the reinforcement-learning environments used by [FastSVERL](https://github.com/djeb20/fastsverl): Gridworld, all 20 obstacle-free paper Hypercubes, and Mastermind (222 and the larger paper boards).
 
 ## Install
 
@@ -13,9 +13,8 @@ uv sync --all-groups --extra cuda    # NVIDIA CUDA 13
 
 ```python
 import jax
-from PIL import Image
-from jax_shapley import EpisodeStatisticsWrapper
-from jax_shapley.envs import Gridworld, Hypercube, Mastermind222
+from jax_shapley.envs import Hypercube
+from jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
 env = EpisodeStatisticsWrapper(Hypercube(side_length=6, dimension=5))
 params = env.default_params
@@ -86,20 +85,21 @@ CPU and GPU each match all **143,136** source transitions with zero differences.
 Typed Flax NNX networks provide DQN Q-values and independent PPO actor probabilities and critic values. Inputs have a final feature axis with optional leading batch/rollout axes. The model boundary converts int32 observations to float32; parameters and outputs use float32.
 
 ```python
+import jax
 import jax.numpy as jnp
-from flax import nnx
-from jax_shapley import QNetwork, dqn_config
+from jax_shapley.algorithms import dqn
+from jax_shapley.envs import Mastermind
 
-network = QNetwork(dqn_config(input_features=8, num_actions=4), rngs=nnx.Rngs(0))
-observations = jnp.full((16, 8), -1, dtype=jnp.int32)
-q_values = nnx.jit(lambda model, obs: model(obs).q_values)(network, observations)
+config = dqn.DQNConfig(env=Mastermind(2, 2, 2), hidden_widths=(64, 64))
+network = dqn.initialize(config, jax.random.key(0)).model
+q_values = network(jnp.full((16, 8), -1, dtype=jnp.int32)).q_values
 ```
 
-The default DQN hidden widths are `(64, 64)` for Gridworld and Mastermind-222. Pass `hidden_widths=(128, 128)` for the upstream Hypercube/larger-Mastermind architectures. PPO architectures are explicit `MLPConfig` values; upstream does not supply paper-specific PPO presets. Initialization follows PyTorch Linear's uniform kernel/bias distribution unless a layer explicitly selects FastSVERL's orthogonal override. JAX and PyTorch seeds do not generate identical weights.
+Networks are `MLPConfig` values (`jax_shapley.common.networks`); a DQN's input and output sizes come from its environment. The experiment configs use `(64, 64)` hidden widths for Gridworld and Mastermind-222 and `(128, 128)` for the upstream Hypercube/larger-Mastermind architectures. PPO actor and critic networks live in `jax_shapley.algorithms.ppo`. PPO architectures are explicit `MLPConfig` values; upstream does not supply paper-specific PPO presets. Initialization follows PyTorch Linear's uniform kernel/bias distribution unless a layer explicitly selects FastSVERL's orthogonal override. JAX and PyTorch seeds do not generate identical weights.
 
 Offline matched-weight tests compare outputs and input/parameter gradients against the pinned source builder, in eager and compiled execution. Abstract NNX compilation tests cover single observations, batches, rollout axes, int32/float32 inputs, gradients, `vmap`, and `scan`; GPU coverage skips explicitly when unavailable.
 
-See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training, replay, typed CLI settings, and shell recipes are implemented; see the [DQN training guide](docs/DQN%20Training.md). Behaviour, prediction and outcome explanations (characteristic and Shapley models) are implemented, with the paper's off-policy, sampled-characteristic and continual-learning variants; see the [explanations guide](docs/Explanations.md). PPO training is not ported: the paper reports DQN agents only.
+See the [network port guide](docs/Agent%20Networks.md) for configurations, output contracts, and fixture reproduction. DQN training is described in the [DQN training guide](docs/DQN%20Training.md). Behaviour, prediction and outcome explanations (characteristic and Shapley models) are implemented, with the paper's off-policy, sampled-characteristic and continual-learning variants; see the [explanations guide](docs/Explanations.md). PPO training is not ported: the paper reports DQN agents only.
 
 ## Typed contracts and compile-first checks
 
@@ -133,49 +133,23 @@ Quick alias:
 ./check.sh
 ```
 
-## DQN experiments
+## Experiments
 
-Experiment settings live in shell recipes, parsed by Tyro into validated Python dataclasses. The experiment flow, configuration and learning code live together in [train_dqn.py](src/jax_shapley/train_dqn.py); [replay.py](src/jax_shapley/replay.py) defines the buffer; [networks.py](src/jax_shapley/networks.py) defines the models and [run_io.py](src/jax_shapley/run_io.py) handles callbacks, CSV and Orbax recovery.
-
-```bash
-bash experiments/dqn/gridworld.sh --validate-only
-bash experiments/dqn/mastermind222.sh --compile-only
-bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
-```
-
-`main()` handles parsing, restoration, compilation, writers and finalization. `run()` constructs the environment, initializes or accepts restored state, then trains, evaluates and emits checkpoints.
-
-Normal recipes run the required gates, compile initialization/training/evaluation into one numerical invocation, and save selective CSV metrics plus Orbax checkpoints. Every run saves full-state checkpoints; resume with `uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>`. See the [DQN training guide](docs/DQN%20Training.md) for upstream settings, overrides, artifact loading, and device validation.
-
-## Explanation experiments
-
-Characteristic and Shapley runs explain a completed DQN run; recipes in `experiments/explanations/` hold the upstream settings:
-
-```bash
-bash experiments/explanations/smoke.sh
-bash experiments/explanations/gridworld.sh characteristic --kind behaviour --agent runs/<dqn-run>
-bash experiments/explanations/gridworld.sh shapley --agent runs/<dqn-run> --characteristic runs/<characteristic-run>
-```
-
-`--seeds 1 2 …` trains many seeds as one compiled sweep, with one ordinary run folder per seed. Runs compile before creating artifacts, checkpoint complete state, and resume exactly with `uv run python -m jax_shapley.train_explanations resume --run runs/<run>`. See the [explanations guide](docs/Explanations.md). Against the unchanged PyTorch code, outcomes match statistically and steady-state CPU training epochs are 2.7–4.7× faster; see the [explanation port report](docs/Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md).
-
-## Tracked experiments (`new_jax_shapley`)
-
-`new_jax_shapley` runs each paper experiment from one config in `src/new_jax_shapley/configs/NAME.py`, through `experiments/NAME.sh`. Every run is tracked with trackio (the default) or wandb:
+`jax_shapley` runs each paper experiment from one config in `src/jax_shapley/configs/NAME.py`, through `experiments/NAME.sh`. Every run is tracked with trackio (the default) or wandb:
 
 ```bash
 bash experiments/mastermind222_behaviour.sh
 bash experiments/hypercube_behaviour__sweep.sh --side-length 3 --dimension 4 -- --track wandb
-uv run python -m new_jax_shapley.main mastermind222_behaviour --shapley.1.train.epochs 9
+uv run python -m jax_shapley.main mastermind222_behaviour --shapley.1.train.epochs 9
 ```
 
-- **Pipeline experiments** (`python -m new_jax_shapley.main NAME`) run the agent, then characteristic models, optionally an outcome characteristic, then Shapley models. Variants are config fields:
+- **Pipeline experiments** (`python -m jax_shapley.main NAME`) run the agent, then characteristic models, optionally an outcome characteristic, then Shapley models. Variants are config fields:
   - explanation kind (behaviour, prediction, outcome);
   - off-policy replay data with importance weighting and clipping;
   - sampled characteristics;
   - Shapley buffers;
   - per-seed agents and paired seeds (`explained_seed=None`).
-- **Continual experiments** (`python -m new_jax_shapley.continual NAME`) train explanation models alongside the agent (paper Figures 3b and 10).
+- **Continual experiments** (`python -m jax_shapley.continual NAME`) train explanation models alongside the agent (paper Figures 3b and 10).
 - **Kinds** live in one module each (`characteristic_models/` and `shapley_models/`: `behaviour.py`, `prediction.py`, `outcome.py`). The behaviour module holds the stage the other kinds share.
 - **Sweeps** are `configs/NAME__sweep.py`. They leave their swept fields `MISSING`, which `experiments/NAME__sweep.sh` supplies for each sweep point; each sweep point is its own run group.
 - **Compile first.** Every script runs `--compile-only` before it trains: every stage is traced, lowered and compiled at the configured shapes, with nothing run or tracked. `experiments/smoke.sh NAME` runs an experiment shrunk to a few updates per stage.
@@ -184,6 +158,7 @@ uv run python -m new_jax_shapley.main mastermind222_behaviour --shapley.1.train.
   - One experiment is one run group, `NAME-TIMESTAMP`. Metrics are logged live, under upstream's tag names.
   - Every stage pushes its whole final state as an Orbax checkpoint artifact named `GROUP--STAGE--VARIANT`.
   - A stage given a checkpoint loads it instead of training, for example `--algorithm.checkpoint GROUP--algorithm--dqn:latest`. The checkpoint must have been saved with the same settings.
+- **Fidelity.** Against the unchanged PyTorch code, explanation outcomes match statistically and steady-state CPU training epochs are 2.7–4.7× faster; see the [explanation port report](docs/Quantitative%20Comparison%20between%20PyTorch%20and%20JAX%20explanations%20of%20FastSVERL.md).
 - **Where results live.**
   - The experiment's `--track`, `--project` (default `dev-jax`) and `--entity` (default `fastsverl`) are copied into every stage.
   - **wandb:** the cloud is the source of truth. Local wandb files live in one scratch folder per experiment, which is deleted when the experiment ends.

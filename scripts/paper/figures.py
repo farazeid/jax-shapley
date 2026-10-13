@@ -8,7 +8,7 @@ interpolated, then summarised by the mean and standard error over runs. Hypercub
 port `barcharts`: each run's last logged exact-loss step, mean and standard error.
 
 Runs come only from the tracking backend: each series names a registered experiment
-(`new_jax_shapley/configs/NAME.py`), a stage's runs within it (`NAME--STAGE--...--seed-N`)
+(`jax_shapley/configs/NAME.py`), a stage's runs within it (`NAME--STAGE--...--seed-N`)
 and an upstream tag, read from the experiment's latest run group, or for a sweep the latest
 group whose matching run was configured with the series' settings (e.g. a Hypercube's side
 and dimension). Figures whose experiments are not ported yet, or have no tracked runs, are
@@ -31,8 +31,8 @@ import numpy.typing as npt
 import pandas as pd
 import tyro
 
-from new_jax_shapley import backends
-from new_jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
+from jax_shapley import backends
+from jax_shapley.experiment import ContinualConfig, ExperimentConfig, load_configs
 
 type FloatArray = npt.NDArray[np.float64]
 type Run = tuple[FloatArray, FloatArray]

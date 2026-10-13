@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from new_jax_shapley import continual
-from new_jax_shapley.algorithms import dqn
-from new_jax_shapley.common.tabular import transition_model
-from new_jax_shapley.envs import Gridworld
-from new_jax_shapley.experiment import ContinualConfig, ContinualExplainConfig, ContinualKind
+from jax_shapley import continual
+from jax_shapley.algorithms import dqn
+from jax_shapley.common.tabular import transition_model
+from jax_shapley.envs import Gridworld
+from jax_shapley.experiment import ContinualConfig, ContinualExplainConfig, ContinualKind
 
 NUM_ENVS, STEPS, EXACT_FREQUENCY = 4, 640, 80
 AGENT = dqn.DQNConfig(

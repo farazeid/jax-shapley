@@ -7,11 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from new_jax_shapley.algorithms.dqn import Env
-from new_jax_shapley.characteristic_models import behaviour
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig
-from new_jax_shapley.common.tabular import TabularModel, policy_q_values, state_indices, transition_model
-from new_jax_shapley.envs import Gridworld, Hypercube, Mastermind
+from jax_shapley.algorithms.dqn import Env
+from jax_shapley.characteristic_models import behaviour
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig
+from jax_shapley.common.tabular import TabularModel, policy_q_values, state_indices, transition_model
+from jax_shapley.envs import Gridworld, Hypercube, Mastermind
 from tests.fixture_support import layout, load_agent
 from tests.fixture_support import load_fixture as load_explanations
 

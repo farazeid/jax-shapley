@@ -9,14 +9,14 @@ import numpy as np
 import pytest
 from jax import Array
 
-from new_jax_shapley.algorithms.dqn import DQNConfig
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, SampledPool, sampled_values
-from new_jax_shapley.characteristic_models.outcome import OutcomeConfig, OutcomeTrainConfig
-from new_jax_shapley.common.supervised_learning import SupervisedConfig
-from new_jax_shapley.envs import Mastermind
-from new_jax_shapley.experiment import ExperimentConfig
-from new_jax_shapley.main import run
-from new_jax_shapley.shapley_models.behaviour import ShapleyConfig
+from jax_shapley.algorithms.dqn import DQNConfig
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig, SampledPool, sampled_values
+from jax_shapley.characteristic_models.outcome import OutcomeConfig, OutcomeTrainConfig
+from jax_shapley.common.supervised_learning import SupervisedConfig
+from jax_shapley.envs import Mastermind
+from jax_shapley.experiment import ExperimentConfig
+from jax_shapley.main import run
+from jax_shapley.shapley_models.behaviour import ShapleyConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fastsverl_sampling.npz"
 ENV = Mastermind(2, 2, 2)  # Episodes end within the guess limit, so exact values are finite.

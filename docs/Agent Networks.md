@@ -1,6 +1,6 @@
 # Agent networks
 
-The behavioural reference is FastSVERL commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`, particularly `models.py`, `dqn.py`, and `ppo.py`. This stage implements networks; action selection, optimizers, replay, and training follow separately.
+The behavioural reference is FastSVERL commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`, particularly `models.py`, `dqn.py`, and `ppo.py`. `jax_shapley.common.networks` holds the layers and MLP; `jax_shapley.algorithms.dqn` the Q-network and `jax_shapley.algorithms.ppo` the PPO actor and critic.
 
 The Flax minimum is 0.12.8, the version validated for the NNX graph containers, parameter access, and abstract tracing APIs used by this implementation. `uv.lock` fixes the tested dependency resolution.
 
@@ -16,13 +16,14 @@ The Flax minimum is 0.12.8, the version validated for the NNX graph containers, 
 
 The PPO actor emits probabilities, as expected by the source's `Categorical(probs=...)` calls. Actor and critic are independent NNX modules so later PPO can preserve separate optimizers. Q-values are unreduced; greedy policies, tie handling and value reductions belong to the later agent implementation.
 
-`dqn_config` reproduces the ReLU MLP architecture from the supplied experiment scripts. Gridworld and Mastermind-222 use two hidden layers of width 64; Hypercube and larger Mastermind use width 128. Larger Mastermind network dimensions are tested here even though their environments are not yet ported.
+`dqn.initialize` builds the ReLU MLP architecture of the supplied experiment scripts from a `DQNConfig`: the environment fixes the input and output sizes and `hidden_widths` the hidden layers. Gridworld and Mastermind-222 use two hidden layers of width 64; Hypercube and larger Mastermind use width 128.
 
 Upstream exposes configurable PPO networks but does not provide paper-specific PPO architecture presets. For example, a supported representative actor configuration is:
 
 ```python
 from flax import nnx
-from jax_shapley import LayerConfig, MLPConfig, OrthogonalInit, PPOActor
+from jax_shapley.algorithms.ppo import PPOActor
+from jax_shapley.common.networks import LayerConfig, MLPConfig, OrthogonalInit
 
 config = MLPConfig(
     input_features=8,
@@ -60,13 +61,7 @@ Run `./check.sh` for the complete gates. Network compilation tests trace abstrac
 ## Training configuration
 
 `MLPConfig` remains a network architecture contract. DQN training settings live in
-`DQNTrainConfig`, Adam settings in `AdamConfig`, and environment/seed/output controls
-in `DQNRunConfig`. The Tyro CLI derives network dimensions from the environment and
-uses the selected hidden widths to construct `MLPConfig`. Experiments supply values
-through shell recipes, not YAML or Python preset files. See [DQN Training](DQN%20Training.md).
+`DQNConfig` and Adam settings in `AdamConfig`; experiments supply them through the
+Python configs in `src/jax_shapley/configs/`. See [DQN Training](DQN%20Training.md).
 
-DQN runs compile initialization, training and greedy evaluation together. Orbax
-composite checkpoints support partial agent/replay loading and full-state resume;
-network dimensions and saved architecture are validated before restoration.
-
-PPO actor/critic networks remain available; PPO configuration and training are deferred.
+PPO actor/critic networks remain available; PPO training is not ported, as the paper reports DQN agents only.

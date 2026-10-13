@@ -14,19 +14,19 @@ import pytest
 from flax import nnx
 from jax import Array
 
-from new_jax_shapley.characteristic_models import behaviour, prediction
-from new_jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel, Kind
-from new_jax_shapley.common.coalitions import coalition_table
-from new_jax_shapley.common.networks import LayerConfig, MLPConfig
-from new_jax_shapley.common.supervised_learning import (
+from jax_shapley.characteristic_models import behaviour, prediction
+from jax_shapley.characteristic_models.behaviour import CharacteristicConfig, CharacteristicModel, Kind
+from jax_shapley.common.coalitions import coalition_table
+from jax_shapley.common.networks import LayerConfig, MLPConfig
+from jax_shapley.common.supervised_learning import (
     StateBuffers,
     SupervisedConfig,
     TrainState,
     gradient_step,
     seed_slice,
 )
-from new_jax_shapley.shapley_models import behaviour as shapley
-from new_jax_shapley.shapley_models.behaviour import (
+from jax_shapley.shapley_models import behaviour as shapley
+from jax_shapley.shapley_models.behaviour import (
     ExactShapley,
     ShapleyConfig,
     ShapleyContext,

@@ -7,132 +7,71 @@ small-function organization; FastSVERL supplies the algorithm and settings.
 
 ## Source layout and reading order
 
-The DQN experiment is implemented in one script with separate replay, network and host-I/O modules:
+`src/jax_shapley/algorithms/dqn.py` holds the whole algorithm: `DQNConfig`, the
+numerical state (`RunState`, `ReplayState`, `TransitionBatch`), metrics, `QNetwork`
+and the functions, in reading order:
 
-| File | Responsibility |
-| --- | --- |
-| `src/jax_shapley/train_dqn.py` | Validated configuration, numerical state, CLI orchestration, policies, learning, training and evaluation |
-| `src/jax_shapley/replay.py` | Transition batches, fixed-capacity storage, insertion and sampling |
-| `src/jax_shapley/networks.py` | Network configuration, layer initialization and forward passes |
-| `src/jax_shapley/run_io.py` | Callback contracts/router, `RunWriter`, saved-settings parsing, selective CSV records, Orbax checkpoints and recovery |
+- `main(config)` trains (or loads) one agent per seed, tracked by `config.track`,
+  and returns the seed-stacked final state, metrics and the explained `Agent`.
+- `train` initializes a run and scans `step` over every vector step, then runs
+  `evaluate` when `eval_episodes > 0`.
+- `step` is one vector step in execution order: action selection, environment
+  interaction, replay insertion, online learning and the soft target update.
+  The continual-learning experiment reuses it unchanged.
+- `log_step` and `log_evaluation` are the host callbacks that log the source's
+  selected scalars.
+- `initialize`, `trained_agent`, `choose_action`, `log_probabilities`,
+  `environment_step` and `dqn_loss` are the lower-level operations.
 
-Environment implementations and their episode-statistics wrapper remain shared components.
-Read `main()` first: it parses settings, restores saved state when requested, compiles
-before creating artifacts, binds a host writer, executes once, synchronizes and writes
-the summary. Then read `run()`: it constructs the environment, initializes a fresh
-run or accepts restored state, trains, evaluates and emits checkpoint events.
-The environment factory and configuration are static compilation inputs; environment
-construction happens during tracing. Resume also constructs a host-side template to
-validate and restore checkpoint arrays before compilation. `training_step()` exposes
-action selection, environment interaction, replay insertion, online learning and
-target updating in their execution order. Secondary numerical helpers follow the
-primary operations. `run_chunk()` and `evaluate_dqn()` remain standalone numerical
-operations used by compilation and equivalence tests; the CLI uses the whole-run path.
+Each seed is one compiled program: `nnx.jit(partial(train, ...))` compiles it at
+the call site. Environments are frozen dataclasses and static compilation inputs.
 
-Host operations are imported at their boundaries after the trainer's declarations
-exist. `run_io.py` shares those typed contracts, and module execution delegates to
-the canonical trainer module so CLI and restored configurations have the same
-Python class identities. Importing either module starts no writer or experiment.
+## Running agents
 
-The former `config` and `algorithms.dqn` modules have been removed; import
-their contracts and numerical functions from `jax_shapley.train_dqn`. Replay
-contracts and operations live in `jax_shapley.replay`. The former
-`artifacts`, `execution`, `logging`, `checkpoints` and `settings` modules have also
-been removed; import their host APIs from `jax_shapley.run_io`. The host writer is
-now named `RunWriter`. The former `run_experiment()`, `whole_run()`,
-`continue_run()` and `compile_program()` entry points have been replaced by
-`main()` and `run()`. The numerical checkpoint schema remains compatible with earlier full-run
-snapshots. Checkpointing is now unconditional; the CLI no longer accepts a
-checkpoint-mode selector.
-
-## Shell experiments and CLI
-
-Experiment values live in `experiments/dqn/*.sh`, not YAML or Python preset files.
-Python dataclasses define their typed schema and validation. Tyro parses once,
-then environment metadata and hidden widths resolve the existing `MLPConfig`.
+A DQN agent is the first stage of every experiment (see the README's Experiments
+section). Its settings are the `algorithm` field of a config in
+`src/jax_shapley/configs/`, and override on the command line:
 
 ```bash
-uv sync --all-groups
-bash experiments/dqn/gridworld.sh --validate-only
-bash experiments/dqn/mastermind222.sh --compile-only
-bash experiments/dqn/smoke.sh --output /tmp/jax-shapley-smoke
+uv run python -m jax_shapley.main mastermind222_behaviour --compile-only
+uv run python -m jax_shapley.main mastermind222_behaviour --algorithm.total-timesteps 320 --algorithm.learning-starts 160
+bash experiments/smoke.sh mastermind222_behaviour
 ```
 
-Normal recipes run `./check.sh` before starting their jobs. Inspection modes skip
-those gates because they launch no training. Every normal CLI invocation traces,
-lowers, and compiles initialization, training, and enabled evaluation together from
-abstract inputs before creating a run directory or starting writers. Resume validates
-and restores the saved arrays before compiling its continuation. Compilation failure
-stops execution; there is no eager fallback.
-
-Run an individual experiment directly, or inspect its generated help:
-
-```bash
-uv run python -m jax_shapley.train_dqn gridworld --help
-uv run python -m jax_shapley.train_dqn mastermind222 \
-    --train.num-envs 2 \
-    --train.total-timesteps 32 \
-    --train.buffer-size 7 \
-    --train.batch-size 3 \
-    --train.learning-starts 0 \
-    --train.train-frequency 1 \
-    --hidden-widths 4 \
-    --chunk-steps 4 \
-    --train.eval-episodes 2
-```
-
-Recipes append extra arguments, so repeated scalar flags use the last value.
-The Hypercube recipe defaults to all 20 paper configurations and seeds 1–20,
-executed sequentially. Its seed and environment selectors reduce the sweep:
-
-```bash
-bash experiments/dqn/hypercube.sh \
-    --env.side-length 6 --env.dimension 5 --seed 3 --validate-only
-```
-
-The Hypercube recipe reproduces only the agent-training part of the upstream
-combined agent/characteristic/Shapley experiment. Larger Mastermind environments,
-PPO training, explanation models, tracking services, and paper-length performance
-validation remain separate work.
+`--compile-only` traces, lowers and compiles every stage and exits without
+running or tracking anything. Compilation failure stops execution; there is no
+eager fallback. `--algorithm.checkpoint GROUP--algorithm--dqn:latest` loads a
+previously tracked agent instead of training one; its saved settings must match.
 
 ## Settings and units
 
-`AdamConfig`, `DQNTrainConfig`, and `DQNRunConfig[EnvConfig]` are frozen, slotted
-dataclasses. The three environment subcommands expose only their own parameters.
-Network dimensions come from the environment, not user-supplied feature counts.
+`DQNConfig` and `AdamConfig` are frozen, slotted dataclasses, validated on
+construction. Network dimensions come from the environment.
 
-| Option | Gridworld baseline | Meaning |
+| Field | Gridworld baseline | Meaning |
 | --- | --- | --- |
-| `--train.num-envs` | 1 | Parallel environments per vector step |
-| `--train.total-timesteps` | 50,000 | Requested transitions across all environments |
-| `--train.learning-rate` | 0.00025 | Constant Adam learning rate |
-| `--train.gamma` | 1 | Discount, including the paper's undiscounted setting |
-| `--train.buffer-size` | 50,000 | Replay transition capacity |
-| `--train.batch-size` | 64 | Samples per learning update, with replacement |
-| `--train.learning-starts` | 10,000 | Strict warmup threshold in transition units |
-| `--train.train-frequency` | 10 | Upstream modulo condition in transition units |
-| `--train.target-network-frequency` | 1 | Independent target-update modulo condition |
-| `--train.tau` | 0.01 | Soft target update coefficient |
-| `--train.start-e`, `--train.end-e` | 1, 0.01 | Epsilon schedule endpoints |
-| `--train.exploration-fraction` | 0.5 | Decay duration relative to requested total transitions |
-| `--train.adam.beta1`, `--train.adam.beta2` | 0.9, 0.999 | Adam moment decay coefficients |
-| `--train.adam.epsilon` | 1e-8 | Epsilon outside the square root; root epsilon is zero |
-| `--train.eval-episodes` | 0 | Optional greedy evaluation; zero disables it |
-| `--hidden-widths` | 64 64 | ReLU hidden layers; use 128 128 for Hypercube |
-| `--seed` | 1 | Explicit JAX PRNG seed |
-| `--chunk-steps` | 64 | Vector steps per internal scan block and pending metrics buffer |
-| `--output` | `runs` | Parent directory for uniquely named runs |
-
-There is no PPO-style rollout length in DQN. `chunk_steps` groups execution and
-bounded event buffering without changing learning timing, random streams, or replay
-data. The outer loop and each internal block execute inside the same compiled call.
-Inactive tail steps neither update state nor consume keys. Logging and checkpoint
-events do not split execution into Python training-loop calls.
+| `seeds` | (1,) | One agent per seed |
+| `num_envs` | 1 | Parallel environments per vector step |
+| `total_timesteps` | 50,000 | Requested transitions across all environments |
+| `learning_rate` | 0.00025 | Constant Adam learning rate |
+| `gamma` | 1 | Discount, including the paper's undiscounted setting |
+| `buffer_size` | 50,000 | Replay transition capacity |
+| `batch_size` | 64 | Samples per learning update, with replacement |
+| `learning_starts` | 10,000 | Strict warmup threshold in transition units |
+| `train_frequency` | 10 | Upstream modulo condition in transition units |
+| `target_network_frequency` | 1 | Independent target-update modulo condition |
+| `tau` | 0.01 | Soft target update coefficient |
+| `start_e`, `end_e` | 1, 0.01 | Epsilon schedule endpoints |
+| `exploration_fraction` | 0.5 | Decay duration relative to requested total transitions |
+| `adam.beta1`, `adam.beta2` | 0.9, 0.999 | Adam moment decay coefficients |
+| `adam.epsilon` | 1e-8 | Epsilon outside the square root; root epsilon is zero |
+| `eval_episodes` | 0 | Optional greedy evaluation; zero disables it |
+| `hidden_widths` | (64, 64) | ReLU hidden layers; (128, 128) for Hypercube |
 
 Mastermind-222 uses 16 environments, 100,000 transitions, and exploration fraction
 0.25. Hypercube uses 16 environments, width 128, end epsilon 0.05, and learning
-starts at `total_timesteps // 50`; its shell table preserves upstream's varying
-training budgets. Shell recipes explicitly state the learning and Adam settings.
+starts at `total_timesteps // 50`; `experiments/hypercube_*__sweep.sh` preserves
+upstream's varying training budgets.
 
 ## Behavioral contracts
 
@@ -161,141 +100,38 @@ training budgets. Shell recipes explicitly state the learning and Adam settings.
 Evaluation has the source's unbounded wait for completed episodes. A greedy agent
 can fail to terminate in Gridworld/Hypercube; evaluation is disabled by default.
 
-## Execution and host boundaries
-
-Fresh runs use one ahead-of-time compiled invocation for model/optimizer creation,
-replay allocation, environment reset, all training blocks, greedy evaluation and
-final event emission. Resume uses one compiled continuation and does not recreate
-the restored numerical state. The runtime never retraces inside either loop.
-Different static configurations require new preflight specializations.
-
-CLI parsing, saved-settings validation, compilation, run-folder creation, CSV/Orbax
-writers, final synchronization and summary writing remain on the host. Ordered
-`jax.experimental.io_callback` adapters transfer numerical payloads at explicit
-boundaries. They stay outside differentiated losses. Compilation invokes no
-callbacks and creates no run artifacts, writers or worker threads. There is no eager
-fallback. Orbax owns its asynchronous writer; callbacks serialize requests, wait
-for the previous save and copy an owned snapshot. Only one save is in flight.
-
-## Selective logging
+## Tracking and logging
 
 The pinned trainer selects every completed training episode's return, length and
-epsilon, and logs loss/SPS only when an update occurs and
-`global_step % 100 < num_envs`. Evaluation records each collected return, including
-the final vector-step overshoot. CSV preserves those selected events and their
-order; it does not add averaging or drop buffered events. Update rows have loss
-and SPS; epsilon belongs to episode rows. TensorBoard/WandB integrations remain
-deferred.
+epsilon, and logs the loss only when an update occurs and
+`global_step % 100 < num_envs`. Each seed logs into its own run, named
+`NAME--algorithm--dqn--seed-N`, under the source's tags: `agent/episodic_return`,
+`agent/episodic_length`, `agent/epsilon` and `agent/DQN_loss`. A tracking backend
+holds one value per tag and step, so episodes finishing in the same vector step log
+their mean. Evaluation logs each return as `agent/eval_episodic_return`, by episode
+number. SPS is not logged: it is not an experiment result.
 
-Selection is lossy relative to the full training history, as upstream is. Delivery
-of the selected records is lossless. Pending storage is bounded by `chunk_steps`
-and `num_envs`, independent of total training duration. It flushes on capacity,
-selected loss/SPS events, checkpoint boundaries and completion. Evaluation streams
-completed returns through a vector-sized buffer rather than retaining all returns.
+The callbacks run on the host through `jax.debug.callback` and stay outside
+differentiated losses. Compilation invokes no callbacks and opens no runs.
 
-SPS is the integer `global_step / elapsed_seconds`, measured on the host. Elapsed
-training time includes compiled initialization and host callback/checkpoint time.
-Resume accumulates committed elapsed time and excludes preflight/downtime.
-Clock values cannot match PyTorch timings and are excluded from numerical parity.
+## Checkpoints
 
-## Local artifacts and Orbax recovery
-
-Each run creates `<output>/<environment>-<seed>-<timestamp>/` with:
-
-- `config.json`: resolved typed settings, architecture and pinned reference.
-- `metrics.csv`: episode, selected loss/SPS and optional evaluation records.
-- `summary.json`: executed transitions, update/evaluation counts, backend and
-  elapsed training time through the pre-evaluation boundary. Written only after
-  JAX effects and required checkpoint writes finish successfully.
-- `checkpoints/`: atomic Orbax composite snapshots, retaining the latest committed
-  sequence. Agent, replay, run-state and metadata are separate items.
-- `.writer.lock`: a POSIX advisory lock preventing concurrent writers in one folder.
-
-Every run saves a complete snapshot: online/target parameters, epsilon, replay,
-optimizer, PRNG key, observations, environment/episode state, counters and execution
-phase. Checkpointing cannot be disabled or restricted to agent/replay components.
-All four Orbax composite items are saved atomically. Partial loading still lets
-subsequent FastSVERL stages extract an agent or replay from a complete snapshot;
-it does not create another checkpoint format.
-
-Periodic saves keep upstream's modulo cadence. Tiny runs guard its division by
-zero with an interval of at least one transition. A post-training save covers
-floor-division boundary misses and commits the state before evaluation. A final
-completion save can occur at the same vector step, using a separate monotonically
-increasing checkpoint sequence. The previous committed snapshot survives until
-its replacement commits. Required callback or asynchronous write failures abort
-execution and prevent a success summary.
-
-NPZ checkpoint loading has been removed; offline numerical NPZ fixtures remain.
-Loaders validate the schema/reference, saved settings, architecture, original
-shapes/dtypes, finite values, phase/counters and replay invariants before use.
-Arrays preserve the destination template's sharding. Select a local device with
-`jax.default_device(device)` when loading agents/replay or constructing a run
-restoration template. Full restoration preserves that template's placement even
-when called outside the device context, including replay and PRNG data. Loading
-agent or replay items does not read unrelated numerical items.
-
-```python
-from pathlib import Path
-from jax_shapley.run_io import load_agent, load_replay
-from jax_shapley.networks import dqn_config
-
-folder = Path("runs/<run-name>")
-agent = load_agent(
-    folder,
-    dqn_config(input_features=8, num_actions=4, hidden_widths=(64, 64)),
-    load_replay=False,
-)
-replay = load_replay(folder)  # Extract replay from the complete snapshot.
-q_values = agent.model(observations).q_values
-```
-
-Full snapshots support downstream portable agent/replay loading and exact
-continuation on the same backend. Cross-device loading is supported; CPU/GPU
-floating-point trajectories need not be bitwise identical. Use the saved lockfile
-and compatible checkpoint schema when loading state.
-
-Snapshots record the key's PRNG implementation (`threefry2x32`, `rbg` or
-`unsafe_rbg`) alongside its raw data. Restoration uses that saved implementation,
-even when the destination's current JAX default differs. Existing Threefry
-checkpoints remain compatible; older RBG snapshots incorrectly labelled as
-Threefry are rejected rather than silently reinterpreted.
-
-```bash
-uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --validate-only
-uv run python -m jax_shapley.train_dqn resume --run runs/<run-name> --compile-only
-uv run python -m jax_shapley.train_dqn resume --run runs/<run-name>
-```
-
-Older full-run settings containing `checkpoint_mode: "run"` are normalized on
-read; their numerical arrays and committed logs remain recoverable. Legacy
-agent-only, agent/replay-only and disabled-checkpoint settings are rejected.
-New `config.json` records contain no checkpoint selector.
-
-Resume uses immutable saved settings, without algorithm overrides or duration
-extensions, and writes into the same folder. Each committed snapshot records a CSV
-byte boundary and SHA-256 prefix digest. Preflight verifies/restores before taking
-the writer lock; the writer rechecks the checkpoint sequence and prefix, rolls back
-only its uncommitted tail, and appends. If another writer committed during
-preflight, resume stops without changing the log; retry to restore the latest
-checkpoint. Changed/missing committed rows are rejected. Inspection modes
-are read-only, including file contents and timestamps.
-
-Interrupted evaluation restarts from the committed post-training checkpoint and
-its saved key after rolling back uncommitted evaluation rows. A completed
-checkpoint finalizes a missing summary without repeating training or evaluation.
+After training, the whole seed-stacked final state (networks, optimizer, replay,
+environment state, counters and key) is saved with Orbax and pushed as one
+artifact, `GROUP--algorithm--dqn`. The checkpoint records the settings it was
+trained with, excluding tracking fields; loading it into different settings fails.
+Resume is stage-level only: a stage loads a finished stage's checkpoint, and an
+interrupted stage reruns.
 
 ## Validation and devices
 
-Run `./check.sh`: ty, Ruff lint, Ruff formatting, and offline pytest. DQN checks
-separate configuration, replay, numerical reference parity, collection/scheduling,
-NNX backend compilation, CLI/artifacts, and captured shell-command recipes.
+Run `./check.sh`: ty, Ruff lint, Ruff formatting, and offline pytest.
 
 `tests/fixtures/fastsverl_dqn.npz` captures source probabilities/log probabilities,
-TD targets, losses, gradients, three Adam steps, soft target updates, and epsilon
-examples. The collector executes verified, unchanged upstream DQN classes with
-controlled numerical dependencies, batches, and weights; it does not initialize
-telemetry. Regenerate only in a separate PyTorch environment:
+losses, gradients, three Adam steps, soft target updates, and epsilon examples.
+The collector executes verified, unchanged upstream DQN classes with controlled
+numerical dependencies, batches, and weights; it does not initialize telemetry.
+Regenerate only in a separate PyTorch environment:
 
 ```bash
 uv run --script scripts/fixtures/collect_fastsverl_dqn.py \
@@ -304,8 +140,7 @@ uv run --script scripts/fixtures/collect_fastsverl_dqn.py \
 
 Numerical tolerances are `rtol=3e-5, atol=3e-6` for learning values, gradients, and
 updated parameters. Matching seeds do not make Torch/JAX random streams identical;
-fixtures control inputs instead. Chunk equivalence checks also compare replay,
-parameters, optimizer/environment state, counters and final keys exactly.
+fixtures control inputs instead.
 
 `fastsverl_logging.json` captures the unchanged pinned trainer's selected scalar
 events using controlled agent/environment inputs in the separate reference
@@ -316,33 +151,7 @@ uv run --script scripts/fixtures/collect_fastsverl_logging.py \
     --source /path/to/pinned/fastsverl/fastsverl/training.py
 ```
 
-Compile gates cover fresh/resumed full-state paths, optional evaluation
-and callback branches with inert sinks. Integration tests cover training/evaluation
-interruptions, exact same-backend numerical continuation, CSV rollback, inspection
-immutability, completion recovery, corrupt arrays and asynchronous completion errors.
-
-Apple Silicon uses CPU JAX for iteration and the short smoke recipe. CUDA needs
+Apple Silicon uses CPU JAX for iteration and the smoke script. CUDA needs
 `uv sync --all-groups --extra cuda`; set `JAX_PLATFORMS=cuda` before invocation to
 require that backend. GPU compile tests skip explicitly without an available GPU.
-CPU validation establishes no GPU compilation or speed claim. No paper-length
-training runs or experiment-scale performance benchmarks are part of this branch's acceptance.
-
-## Small CPU timing check
-
-On this M4 Pro CPU, a Mastermind-222 run with 32 transitions, 15 updates, two
-requested evaluation episodes, width 4, replay capacity 7, batch 3 and block size 4
-was timed with selective CSV logging and full Orbax writes enabled. One warmup per
-path preceded five alternating repetitions; both paths made 12 checkpoint saves
-and waited for all writes. Setup/summary JSON writes were excluded equally.
-
-| Path | Numerical entry-point calls | Median execution including writes | Compilation |
-| --- | --- | --- | --- |
-| Whole run | 1 | 1.567 s | 0.802 s |
-| Host chunk orchestration | 13 (initialize + 11 chunks + evaluation) | 1.573 s | 0.594 s |
-
-Checkpoint I/O dominates this tiny example; the difference is negligible.
-Compilation was measured separately in one process and is not a cold-process
-comparison. The host baseline also performs scalar checkpoint-payload operations;
-they are not counted as numerical entry points. This establishes the dispatch
-change, not an experiment-scale speedup or GPU performance claim. Raw timings
-are in [dqn-whole-run-cpu-timing.json](data/dqn-whole-run-cpu-timing.json).
+CPU validation establishes no GPU compilation or speed claim.

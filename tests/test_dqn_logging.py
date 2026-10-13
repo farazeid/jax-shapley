@@ -12,7 +12,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
 
-from new_jax_shapley.algorithms import dqn
+from jax_shapley.algorithms import dqn
 
 
 def test_selected_logging_matches_pinned_trainer() -> None:
