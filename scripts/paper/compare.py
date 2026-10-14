@@ -97,8 +97,11 @@ def main(args: Args) -> None:
         writer.writerow(("claim", "check", "values", "result"))
         writer.writerows(claims)
     args.figures.mkdir(parents=True, exist_ok=True)
-    for figure in sorted({figure for figure, _ in figures.jax}):
+    # Every published figure: JAX against published where rerun, published alone (labelled) where not.
+    for figure in sorted({figure for figure, _ in figures.published} | {figure for figure, _ in figures.jax}):
         overlay(figure, figures, args.figures)
+    for figure in ("hypercube_policy", "hypercube_value"):
+        bar_overlay(figure, args.data, args.figures)
     passed = sum(comparison.passed for comparison in comparisons)
     held = sum(row[3] == "pass" for row in claims)
     print(f"{passed}/{len(comparisons)} quantities pass; {held}/{len(claims)} claims hold")
@@ -221,27 +224,87 @@ def jax_curves(data: Path) -> dict[tuple[str, str], Curve]:
 
 
 def overlay(figure: str, figures: Figures, folder: Path) -> None:
-    """Published means and bands (dashed) and JAX mean +/- standard error (solid), one colour per series."""
+    """Published means and bands (dashed) and JAX mean +/- standard error (solid), one colour per series.
+
+    Series without a JAX rerun show the published result alone, labelled "not rerun".
+    """
     handle, axis = plt.subplots(figsize=(6, 4))
-    series = sorted(name for name_figure, name in figures.jax if name_figure == figure)
+    names = {name for name_figure, name in figures.jax if name_figure == figure}
+    names |= {name for name_figure, name in figures.published if name_figure == figure}
     values = []
-    for index, name in enumerate(series):
+    for index, name in enumerate(sorted(names)):
         colour = f"C{index % 10}"
-        curve = figures.jax[figure, name]
-        values.append(curve.mean)
-        axis.plot(curve.x, curve.mean, color=colour, label=f"JAX {name}")
-        lower, upper = curve.mean - curve.standard_error, curve.mean + curve.standard_error
-        axis.fill_between(curve.x, lower, upper, color=colour, alpha=0.2)
+        curve = figures.jax.get((figure, name))
+        if curve is not None:
+            values.append(curve.mean)
+            axis.plot(curve.x, curve.mean, color=colour, label=f"JAX {name}")
+            lower, upper = curve.mean - curve.standard_error, curve.mean + curve.standard_error
+            axis.fill_between(curve.x, lower, upper, color=colour, alpha=0.2)
         band = figures.published.get((figure, name))
         if band is not None:
-            axis.plot(band.x, band.mean, color=colour, linestyle="--", label=f"Published {name}")
+            values.append(band.mean)
+            label = f"Published {name}" + ("" if curve is not None else " (not rerun)")
+            axis.plot(band.x, band.mean, color=colour, linestyle="--", label=label)
             axis.fill_between(band.x, band.mean - band.half_width, band.mean + band.half_width, color=colour, alpha=0.1)
     means = np.concatenate(values)
     if np.all(means > 0) and means.max() / means.min() > 100:
         axis.set_yscale("log")
-    axis.set_title(figure)
+    rerun = any(name_figure == figure for name_figure, _ in figures.jax)
+    axis.set_title(figure if rerun else f"{figure} (not rerun: published only)")
     axis.set_xlabel("Training updates")
     axis.legend(fontsize=6)
+    handle.tight_layout()
+    handle.savefig(folder / f"{figure}.svg")
+    plt.close(handle)
+
+
+def bar_overlay(figure: str, data: Path, folder: Path) -> None:
+    """Hypercube updates to the target loss against the number of states, one panel per dimension:
+    published (open markers) and JAX (filled) mean +/- standard error, per model; cubes not rerun
+    show the published value alone."""
+    published = [row for row in _records(data / "paper--published-bars.csv") if row["figure"] == figure]
+    jax_path = data / "paper--jax-bars.csv"
+    rerun = [row for row in _records(jax_path) if row["figure"] == figure] if jax_path.exists() else []
+    dimensions = (2, 3, 4, 5)
+    handle, axes = plt.subplots(1, len(dimensions), figsize=(12, 3.5), sharey=True)
+    for axis, dimension in zip(axes, dimensions, strict=True):
+        # Published panel titles name their dimension first ("Dimension = 3 | ...").
+        panel = [row for row in published if row["title"].startswith(f"Dimension = {dimension}")]
+        for index, model in enumerate(("Characteristic", "Shapley")):
+            colour = f"C{index}"
+            points = sorted(
+                (int(row["states"]), float(row["mean"]), float(row["standard_error"]))
+                for row in panel
+                if row["model"] == model
+            )
+            if points:
+                states, mean, error = (np.asarray(column) for column in zip(*points, strict=True))
+                axis.errorbar(
+                    states,
+                    mean,
+                    yerr=error,
+                    color=colour,
+                    marker="o",
+                    markerfacecolor="none",
+                    linestyle="--",
+                    label=f"Published {model}",
+                )
+            ours = sorted(
+                (int(row["states"]), float(row["mean"]), float(row["standard_error"]))
+                for row in rerun
+                if int(row["dimension"]) == dimension and row["model"] == model
+            )
+            if ours:
+                states, mean, error = (np.asarray(column) for column in zip(*ours, strict=True))
+                axis.errorbar(states, mean, yerr=error, color=colour, marker="o", linestyle="-", label=f"JAX {model}")
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.set_xlabel("States")
+        rerun_dimension = any(int(row["dimension"]) == dimension for row in rerun)
+        axis.set_title(f"Dimension {dimension}" + ("" if rerun_dimension else " (not rerun)"))
+    axes[0].set_ylabel("Updates to target loss")
+    axes[-1].legend(fontsize=6)
+    handle.suptitle(figure)
     handle.tight_layout()
     handle.savefig(folder / f"{figure}.svg")
     plt.close(handle)
