@@ -22,6 +22,7 @@ from typing import Literal, NamedTuple, Protocol
 
 import trackio
 import wandb
+from wandb.sdk.lib.service.service_connection import WandbApiFailedError
 from wandb.sdk.wandb_run import Run as WandbRun
 
 type Track = Literal["wandb", "trackio"]
@@ -41,9 +42,12 @@ class TrackedRun(NamedTuple):
     rows: list[Scalars]
 
 
-# Checkpoint upload attempts, and the wait before the first retry (doubling after each one).
+# Attempts at a tracking-service call (checkpoint uploads, reading runs back), and the wait
+# before the first retry (doubling after each one).
 UPLOAD_ATTEMPTS = 5
 UPLOAD_BACKOFF_SECONDS = 30.0
+# What a busy or unreachable wandb service raises from its public API.
+TRANSIENT = (wandb.errors.Error, WandbApiFailedError, OSError)
 
 # wandb's local data, all redirected into the experiment's scratch folder.
 WANDB_DIRECTORIES = ("WANDB_DIR", "WANDB_CACHE_DIR", "WANDB_DATA_DIR", "WANDB_ARTIFACT_DIR")
@@ -61,7 +65,7 @@ def upload(run: WandbRun | trackio.Run, directory: Path, name: str, kind: str) -
         try:
             run.log_artifact(str(directory), name=name, type=kind).wait()
             return
-        except (wandb.errors.Error, OSError) as error:
+        except TRANSIENT as error:
             if attempt == UPLOAD_ATTEMPTS - 1:
                 raise
             delay = UPLOAD_BACKOFF_SECONDS * 2**attempt
@@ -109,13 +113,22 @@ def runs(track: Track, *, project: str, entity: str | None, group: str) -> dict[
     found: dict[str, TrackedRun] = {}
     if track == "wandb":
         path = f"{entity}/{project}" if entity else project
-        for run in wandb.Api().runs(path, filters={"group": group}):
-            rows = [
-                {key: float(value) for key, value in row.items() if isinstance(value, int | float)}
-                for row in run.scan_history()
-            ]
-            found[run.name] = TrackedRun(dict(run.config), rows)
-        return found
+        for attempt in range(UPLOAD_ATTEMPTS):
+            try:
+                for run in wandb.Api().runs(path, filters={"group": group}):
+                    rows = [
+                        {key: float(value) for key, value in row.items() if isinstance(value, int | float)}
+                        for row in run.scan_history()
+                    ]
+                    found[run.name] = TrackedRun(dict(run.config), rows)
+                return found
+            except TRANSIENT as error:
+                if attempt == UPLOAD_ATTEMPTS - 1:
+                    raise
+                delay = UPLOAD_BACKOFF_SECONDS * 2**attempt
+                print(f"Reading group {group} failed ({error}); retrying in {delay:.0f} s.", flush=True)
+                found.clear()
+                time.sleep(delay)
     from trackio.sqlite_storage import SQLiteStorage
 
     # trackio run names need not be unique within a project; run ids are.
@@ -142,7 +155,19 @@ def groups(track: Track, *, project: str, entity: str | None, prefix: str) -> li
     """Experiment groups whose name starts with `prefix`, oldest first (names end in a timestamp)."""
     if track == "wandb":
         path = f"{entity}/{project}" if entity else project
-        names = {run.group for run in wandb.Api().runs(path) if run.group}
+        names: set[str] = set()
+        for attempt in range(UPLOAD_ATTEMPTS):
+            try:
+                # Filtered by the service: listing every run of a large project overloads it.
+                filters = {"group": {"$regex": f"^{prefix}"}}
+                names = {run.group for run in wandb.Api().runs(path, filters=filters) if run.group}
+                break
+            except TRANSIENT as error:
+                if attempt == UPLOAD_ATTEMPTS - 1:
+                    raise
+                delay = UPLOAD_BACKOFF_SECONDS * 2**attempt
+                print(f"Listing groups {prefix}* failed ({error}); retrying in {delay:.0f} s.", flush=True)
+                time.sleep(delay)
     else:
         from trackio.sqlite_storage import SQLiteStorage
 
