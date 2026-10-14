@@ -94,7 +94,8 @@ class Sources:
     entity: str | None
     ported: frozenset[str]
     _groups: dict[str, list[str]] = field(default_factory=dict, repr=False)
-    _runs: dict[str, dict[str, backends.TrackedRun]] = field(default_factory=dict, repr=False)
+    _configs: dict[str, dict[str, backends.TrackedRun]] = field(default_factory=dict, repr=False)
+    _runs: dict[tuple[str, str, str], dict[str, backends.TrackedRun]] = field(default_factory=dict, repr=False)
 
     def runs(self, experiment: str, stage: str, tag: str, where: Where | None = None) -> list[Run]:
         """Every seed's run of `stage` (`algorithm--dqn`, `characteristic--behaviour`,
@@ -107,16 +108,27 @@ class Sources:
                 self.track, project=self.project, entity=self.entity, prefix=f"{experiment}-"
             )
         for group in reversed(self._groups[experiment]):
-            if group not in self._runs:
-                self._runs[group] = backends.runs(self.track, project=self.project, entity=self.entity, group=group)
-            tracked = self._runs[group]
-            if where is not None and not any(
-                name.startswith(f"{experiment}--{where[0]}") and _matches(run.config, where[1])
-                for name, run in tracked.items()
-            ):
-                continue
+            if where is not None:
+                # Configs only, to find the group holding the requested settings.
+                if group not in self._configs:
+                    self._configs[group] = backends.runs(
+                        self.track, project=self.project, entity=self.entity, group=group, keys=()
+                    )
+                if not any(
+                    name.startswith(f"{experiment}--{where[0]}") and _matches(run.config, where[1])
+                    for name, run in self._configs[group].items()
+                ):
+                    continue
             prefix = f"{experiment}--{stage}"
+            if (group, prefix, tag) not in self._runs:
+                # Only this stage's runs, and only the logged values this figure plots.
+                self._runs[group, prefix, tag] = backends.runs(
+                    self.track, project=self.project, entity=self.entity, group=group, name_prefix=prefix, keys=(tag,)
+                )
+            tracked = self._runs[group, prefix, tag]
             names = sorted((name for name in tracked if name == prefix or name.startswith(f"{prefix}--")), key=_seed)
+            if not names:
+                continue  # Sweeps log each point as its own group: this one ran other stages.
             runs = []
             for name in names:
                 logged = [(row["_step"], row[tag]) for row in tracked[name].rows if tag in row and "_step" in row]
@@ -144,7 +156,9 @@ def main(args: Args) -> None:
             curves = figure_curves(spec, sources)
         except MissingRunsError as error:
             missing.append(f"{spec.name}: {error}")
+            print(f"{spec.name}: missing ({error})", flush=True)
             continue
+        print(f"{spec.name}: {len(curves)} series", flush=True)
         for label, curve in curves.items():
             rows.extend(
                 (spec.name, label, float(x), float(mean), float(se), curve.runs)

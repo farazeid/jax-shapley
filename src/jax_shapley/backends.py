@@ -12,16 +12,20 @@ ends, so nothing persists locally. For trackio, its local store (`TRACKIO_DIR`).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol
 
 import trackio
 import wandb
+from wandb.apis.public import Run as WandbPublicRun
 from wandb.sdk.lib.service.service_connection import WandbApiFailedError
 from wandb.sdk.wandb_run import Run as WandbRun
 
@@ -41,6 +45,11 @@ class TrackedRun(NamedTuple):
     config: dict[str, object]
     rows: list[Scalars]
 
+
+# Runs whose histories are read at once when reading a group back.
+READERS = 8
+# Rows a selected-values history read returns at most; reaching it would mean down-sampling.
+HISTORY_SAMPLES = 1_000_000
 
 # Attempts at a tracking-service call (checkpoint uploads, reading runs back), and the wait
 # before the first retry (doubling after each one).
@@ -130,18 +139,34 @@ def session(track: Track, entity: str | None) -> Iterator[Path]:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def runs(track: Track, *, project: str, entity: str | None, group: str) -> dict[str, TrackedRun]:
-    """Every run of an experiment group by run name: its config and its logged numbers, each row with `_step`."""
+def runs(
+    track: Track,
+    *,
+    project: str,
+    entity: str | None,
+    group: str,
+    name_prefix: str = "",
+    keys: Sequence[str] | None = None,
+) -> dict[str, TrackedRun]:
+    """An experiment group's runs whose names start with `name_prefix`, by run name: each run's config
+    and its logged numbers, each row with `_step`.
+
+    `keys` selects the logged values to read (rows holding none of them are dropped); an empty
+    `keys` reads configs only. Selecting what is read keeps reading back a large project fast.
+    """
     found: dict[str, TrackedRun] = {}
     if track == "wandb":
         path = f"{entity}/{project}" if entity else project
+        filters: dict[str, object] = {"group": group}
+        if name_prefix:
+            filters["display_name"] = {"$regex": f"^{re.escape(name_prefix)}"}
         for attempt in range(UPLOAD_ATTEMPTS):
             try:
-                for run in wandb.Api().runs(path, filters={"group": group}):
-                    rows = [
-                        {key: float(value) for key, value in row.items() if isinstance(value, int | float)}
-                        for row in run.scan_history()
-                    ]
+                tracked = list(wandb.Api().runs(path, filters=filters))
+                # Each run's history is its own paged request: read several runs at once.
+                with ThreadPoolExecutor(max_workers=READERS) as pool:
+                    histories = list(pool.map(partial(read_history, keys), tracked))
+                for run, rows in zip(tracked, histories, strict=True):
                     found[run.name] = TrackedRun(dict(run.config), rows)
                 return found
             except TRANSIENT as error:
@@ -156,21 +181,38 @@ def runs(track: Track, *, project: str, entity: str | None, group: str) -> dict[
     # trackio run names need not be unique within a project; run ids are.
     for record in SQLiteStorage.get_run_records(project):
         run_id, name = record["id"], record["name"]
-        if run_id is None or name is None:
+        if run_id is None or name is None or not name.startswith(name_prefix):
             continue
         config = SQLiteStorage.get_run_config(project, run_id=run_id) or {}
         if config.get("_Group") != group:
             continue
+        logs = [] if keys is not None and not keys else SQLiteStorage.get_logs(project, run_id=run_id)
         rows = [
             {
                 "_step" if key == "step" else key: float(value)
                 for key, value in log.items()
-                if isinstance(value, int | float)
+                if isinstance(value, int | float) and (keys is None or key in keys or key == "step")
             }
-            for log in SQLiteStorage.get_logs(project, run_id=run_id)
+            for log in logs
         ]
-        found[name] = TrackedRun(config, rows)
+        found[name] = TrackedRun(config, [row for row in rows if keys is None or len(row) > 1])
     return found
+
+
+def read_history(keys: Sequence[str] | None, run: WandbPublicRun) -> list[Scalars]:
+    """A wandb run's logged numbers (only `keys`, if given; nothing for empty `keys`), each row with `_step`."""
+    if keys is not None and not keys:
+        return []
+    if keys is None:
+        history = list(run.scan_history())
+    else:
+        # One request for the selected values, several times faster than paging through every row.
+        history = run.history(keys=list(keys), samples=HISTORY_SAMPLES, pandas=False)
+        if len(history) >= HISTORY_SAMPLES:
+            raise RuntimeError(f"run {run.name} logged {HISTORY_SAMPLES} or more rows: some would be sampled away")
+    rows = [{key: float(value) for key, value in row.items() if isinstance(value, int | float)} for row in history]
+    # Rows logged without any requested value come back holding `_step` alone.
+    return [row for row in rows if keys is None or len(row) > 1]
 
 
 def groups(track: Track, *, project: str, entity: str | None, prefix: str) -> list[str]:
