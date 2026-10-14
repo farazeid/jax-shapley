@@ -293,7 +293,7 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
         """`EPOCH_BLOCK` epochs of every seed, then one live log of them all."""
         state, contexts, frozen, metrics, index = carry
         (state, contexts, frozen), block_metrics = nnx.scan(
-            partial(every_seed, partial(seed_epoch, loss, update, config, features)),
+            partial(every_seed, partial(seed_epoch, loss, update, config, features), config.epochs),
             in_axes=(nnx.Carry, 0),
             out_axes=(nnx.Carry, 0),
         )((state, contexts, frozen), jnp.arange(EPOCH_BLOCK))
@@ -324,15 +324,31 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
 
 def every_seed[Model: nnx.Module, Context, Frozen](
     seed_epoch: Callable[[TrainState[Model], Context, Frozen], tuple[TrainState[Model], EpochMetrics]],
+    epochs: int,
     inner: tuple[TrainState[Model], Context, Frozen],
     step: Array,
 ) -> tuple[tuple[TrainState[Model], Context, Frozen], EpochMetrics]:
-    """One epoch of every seed (a scan body of `train`'s epoch blocks); the frozen models are shared or per seed."""
+    """One epoch of every seed (a scan body of `train`'s epoch blocks); the frozen models are shared or per seed.
+
+    A block's padding epochs, once no seed trains, are skipped outright: under the seed vmap a
+    per-seed skip computes both branches, so only this shared condition makes them free.
+    """
     del step
     state, contexts, frozen = inner
     seeds = nnx.vmap(seed_epoch, in_axes=(0, 0, None if frozen is None else 0), out_axes=(0, 0))
-    state, epoch_metrics = seeds(state, contexts, frozen)
+    training = jnp.any((state.epoch < epochs) & ~state.stopped)
+    state, epoch_metrics = nnx.cond(training, seeds, skip_seeds, state, contexts, frozen)
     return (state, contexts, frozen), epoch_metrics
+
+
+def skip_seeds[Model: nnx.Module, Context, Frozen](
+    state: TrainState[Model], contexts: Context, frozen: Frozen
+) -> tuple[TrainState[Model], EpochMetrics]:
+    """No seed trains this epoch: states unchanged, every seed's metrics inactive."""
+    del contexts, frozen
+    zero = jnp.zeros_like(state.epoch)
+    nothing = jnp.zeros(state.epoch.shape, jnp.float32)
+    return state, EpochMetrics(zero, zero, nothing, nothing, nothing, zero, jnp.zeros(state.epoch.shape, jnp.bool_))
 
 
 def gradient_step[Model: nnx.Module, Context, Frozen, Config](

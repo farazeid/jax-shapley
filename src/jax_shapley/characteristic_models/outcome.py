@@ -567,7 +567,11 @@ def fit_on_policy(
         del index
         state, frozen = carry
         every_seed = nnx.vmap(partial(seed_step, config, explained, env), in_axes=(0, 0, 0), out_axes=(0, 0))
-        state, metrics = every_seed(state, contexts, frozen)
+        # Padding steps past the run, once no seed acts, are skipped outright: under the seed vmap a
+        # per-seed skip computes both branches.
+        acting = jnp.any((state.step < config.train.vector_steps) & ~state.stopped)
+        skip = nnx.vmap(skip_on_policy_step, in_axes=(0, 0, 0), out_axes=(0, 0))
+        state, metrics = nnx.cond(acting, every_seed, skip, state, contexts, frozen)
         return (state, frozen), metrics
 
     def block(
