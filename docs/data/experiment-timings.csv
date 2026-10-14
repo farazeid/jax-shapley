@@ -1,0 +1,17 @@
+experiment,device,seconds,source
+gridworld_behaviour,pytorch_cpu_m4_pro,385,sum of upstream per-stage process times (explanations-port--upstream-timing.csv)
+mastermind222_prediction,pytorch_cpu_m4_pro,423,sum of upstream per-stage process times (explanations-port--upstream-timing.csv)
+mastermind222_outcome-off_policy,pytorch_cpu_m4_pro,2372,sum of upstream per-stage process times (explanations-port--upstream-timing.csv)
+mastermind222_outcome-on_policy,pytorch_cpu_m4_pro,908,sum of upstream per-stage process times; Shapley stages from the off-policy outcome
+gridworld_behaviour,jax_cpu_m4_pro,52,experiments/gridworld_behaviour.sh with trackio
+mastermind222_prediction,jax_cpu_m4_pro,62,experiments/mastermind222_prediction.sh with trackio
+mastermind222_outcome-off_policy,jax_cpu_m4_pro,308,experiments/mastermind222_outcome__sweep.sh (off_policy; with exact) with trackio
+mastermind222_outcome-on_policy,jax_cpu_m4_pro,493,experiments/mastermind222_outcome__sweep.sh (on_policy; with exact) with trackio
+gridworld_behaviour,jax_colab_t4,187,Colab T4 runtime; JAX_PLATFORMS=cuda,cpu
+mastermind222_prediction,jax_colab_t4,235,Colab T4 runtime; JAX_PLATFORMS=cuda,cpu
+mastermind222_outcome-off_policy,jax_colab_t4,382,Colab T4 runtime; JAX_PLATFORMS=cuda,cpu
+mastermind222_outcome-on_policy,jax_colab_t4,1199,Colab T4 runtime; JAX_PLATFORMS=cuda,cpu
+gridworld_behaviour,jax_colab_tpu_v5e1,133,Colab TPU v5e-1 runtime; JAX_PLATFORMS=tpu,cpu; default matmul precision
+mastermind222_prediction,jax_colab_tpu_v5e1,247,Colab TPU v5e-1 runtime; JAX_PLATFORMS=tpu,cpu; default matmul precision
+mastermind222_outcome-off_policy,jax_colab_tpu_v5e1,306,Colab TPU v5e-1 runtime; JAX_PLATFORMS=tpu,cpu; default matmul precision
+mastermind222_outcome-on_policy,jax_colab_tpu_v5e1,916,Colab TPU v5e-1 runtime; JAX_PLATFORMS=tpu,cpu; default matmul precision
