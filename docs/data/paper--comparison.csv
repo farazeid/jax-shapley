@@ -1,16 +1,16 @@
 target,series,quantity,published,published_se,jax,jax_se,log10_ratio,z,passed
-app_gwb_offpolicy_clipping_policy,On-policy,mean at 25% of x,0.000918043,0.0018162,0.000891532,0.00160521,0.01273,0.01094,True
-app_gwb_offpolicy_clipping_policy,On-policy,mean at 100% of x,5.79141e-05,0.00191318,5.96528e-05,0.00165114,0.01285,0.000688,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.99),mean at 25% of x,0.0115074,0.000755225,0.0153204,0.000852236,0.1243,3.349,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.99),mean at 100% of x,0.0113235,0.0006504,0.013518,0.000772542,0.07693,2.173,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.995),mean at 25% of x,0.0110641,0.000458888,0.0132416,0.000430902,0.07803,3.459,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.995),mean at 100% of x,0.0103404,0.00042738,0.0113328,0.000395583,0.0398,1.704,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.998),mean at 25% of x,0.0108244,0.0002383,0.0113746,0.000195527,0.02153,1.785,True
-app_gwb_offpolicy_clipping_policy,With IS (clip = 0.998),mean at 100% of x,0.0092708,0.000233515,0.00927393,0.000238489,0.0001466,0.009378,True
-app_gwb_offpolicy_clipping_policy,With IS (no clipping),mean at 25% of x,0.0111352,0.000608013,0.0104052,0.000683769,0.02945,0.7979,True
-app_gwb_offpolicy_clipping_policy,With IS (no clipping),mean at 100% of x,0.00812661,0.00026598,0.00748291,0.000463609,0.03584,1.204,True
-app_gwb_offpolicy_clipping_policy,Without IS,mean at 25% of x,0.0117737,0.0009943,0.0155056,0.00111897,0.1196,2.493,True
-app_gwb_offpolicy_clipping_policy,Without IS,mean at 100% of x,0.0117653,0.00091245,0.014513,0.00108103,0.09115,1.942,True
+app_gwb_offpolicy_clipping_policy,On-policy,mean at 25% of x,0.000918043,0.0018162,0.000891532,0.00160511,0.01273,0.01094,True
+app_gwb_offpolicy_clipping_policy,On-policy,mean at 100% of x,5.79141e-05,0.00191318,5.96528e-05,0.00165094,0.01285,0.000688,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.99),mean at 25% of x,0.0115074,0.000755225,0.0153204,0.000852218,0.1243,3.349,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.99),mean at 100% of x,0.0113235,0.0006504,0.013518,0.000772432,0.07693,2.173,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.995),mean at 25% of x,0.0110641,0.000458888,0.0132416,0.000431113,0.07803,3.458,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.995),mean at 100% of x,0.0103404,0.00042738,0.0113328,0.000396472,0.0398,1.702,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.998),mean at 25% of x,0.0108244,0.0002383,0.0113625,0.000192895,0.02107,1.755,True
+app_gwb_offpolicy_clipping_policy,With IS (clip = 0.998),mean at 100% of x,0.0092708,0.000233515,0.00924789,0.000226103,0.001075,0.07048,True
+app_gwb_offpolicy_clipping_policy,With IS (no clipping),mean at 25% of x,0.0111352,0.000608013,0.0104052,0.000684057,0.02945,0.7977,True
+app_gwb_offpolicy_clipping_policy,With IS (no clipping),mean at 100% of x,0.00812661,0.00026598,0.00748291,0.0004654,0.03584,1.201,True
+app_gwb_offpolicy_clipping_policy,Without IS,mean at 25% of x,0.0117737,0.0009943,0.0155056,0.00111879,0.1196,2.493,True
+app_gwb_offpolicy_clipping_policy,Without IS,mean at 100% of x,0.0117653,0.00091245,0.014513,0.00107979,0.09115,1.944,True
 app_gwb_offpolicy_clipping_value,On-policy,mean at 25% of x,0.96954,0.727326,0.0907594,0.104348,1.029,1.196,True
 app_gwb_offpolicy_clipping_value,On-policy,mean at 100% of x,0.0101002,0.0859952,0.00378515,0.0763595,0.4262,0.05491,True
 app_gwb_offpolicy_clipping_value,With IS (clip = 0.99),mean at 25% of x,1.08696,0.150169,1.0132,0.0481904,0.03052,0.4677,True
@@ -57,8 +57,8 @@ app_gwb_parallel_policy_approx,2:1,mean at 25% of x,0.000455886,5.17587e-05,0.00
 app_gwb_parallel_policy_approx,2:1,mean at 100% of x,0.000750702,6.1068e-05,0.000782405,8.02749e-05,0.01796,0.3143,True
 app_gwb_parallel_policy_approx,50:1,mean at 25% of x,0.00032014,2.71776e-05,0.000311789,1.80272e-05,0.01148,0.2561,True
 app_gwb_parallel_policy_approx,50:1,mean at 100% of x,0.000720681,4.2879e-05,0.000781257,3.68206e-05,0.03505,1.072,True
-app_gwb_parallel_return,#1f77b4,mean at 25% of x,3.54195,0.618992,2.93822,0.722205,0.08116,0.6347,True
-app_gwb_parallel_return,#1f77b4,mean at 100% of x,6.49854,0,6.26375,0.1224,0.01598,1.918,True
+app_gwb_parallel_return,#1f77b4,mean at 25% of x,3.54195,0.618992,3.49599,0.493847,0.005672,0.05803,True
+app_gwb_parallel_return,#1f77b4,mean at 100% of x,6.49854,0,6.39784,0.0525367,0.006782,1.917,True
 app_gwb_parallel_value_approx,10:1,mean at 25% of x,0.0102265,0.00147827,0.0104479,0.00159414,0.009299,0.1018,True
 app_gwb_parallel_value_approx,10:1,mean at 100% of x,0.0116927,0.00102065,0.0119681,0.00102982,0.01011,0.1899,True
 app_gwb_parallel_value_approx,1:1,mean at 25% of x,0.0235394,0.0023295,0.0223705,0.00216269,0.02212,0.3677,True
@@ -67,44 +67,32 @@ app_gwb_parallel_value_approx,2:1,mean at 25% of x,0.0169114,0.00196849,0.015828
 app_gwb_parallel_value_approx,2:1,mean at 100% of x,0.0125644,0.00104405,0.0139426,0.00169081,0.0452,0.6936,True
 app_gwb_parallel_value_approx,50:1,mean at 25% of x,0.0129104,0.00167795,0.00928474,0.00122455,0.1432,1.745,True
 app_gwb_parallel_value_approx,50:1,mean at 100% of x,0.0132399,0.0009235,0.010305,0.000558861,0.1088,2.719,True
-app_gwb_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0294655,0.00570087,0.0504423,0.00922346,0.2335,1.935,True
-app_gwb_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00929904,0.00168736,0.0438549,0.0115216,0.6736,2.968,True
-app_gwb_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.0278064,0.00603761,0.0653178,0.00914625,0.3709,3.423,False
-app_gwb_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.00781433,0.00180692,0.00648006,0.00128949,0.08131,0.6011,True
-app_gwb_perf_char,"On-policy, approx behaviour",mean at 25% of x,7.86103,0.165669,8.07357,0.127811,0.01159,1.016,True
-app_gwb_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.148597,0.024801,0.141387,0.0160639,0.0216,0.244,True
-app_gwb_perf_char,"On-policy, exact behaviour",mean at 25% of x,7.75642,0.16477,7.93751,0.122818,0.01002,0.8812,True
-app_gwb_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.162549,0.025907,0.169481,0.0232216,0.01814,0.1992,True
-app_gwb_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.285414,0.0108069,0.165107,0.0147864,0.2377,6.569,True
-app_gwb_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.199236,7e-06,0.134613,0.0170637,0.1703,3.787,True
-app_gwb_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.249391,0.00914162,0.211522,0.0301907,0.07152,1.2,True
-app_gwb_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.194587,6.5e-06,0.158092,0.024082,0.0902,1.515,True
-app_gwb_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.154406,0.0143344,0.253184,0.0215405,0.2148,3.818,True
-app_gwb_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,1.26228e-05,7.46927e-06,2.62698e-07,1.56012e-07,1.682,1.654,True
+app_gwb_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0294655,0.00570087,0.0238502,0.00342633,0.09182,0.8442,True
+app_gwb_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00929904,0.00168736,0.0767929,0.0119904,0.9169,5.574,False
+app_gwb_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.0278064,0.00603761,0.115448,0.0112039,0.6182,6.886,False
+app_gwb_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.00781433,0.00180692,0.0140089,0.00357205,0.2535,1.547,True
+app_gwb_perf_char,"On-policy, approx behaviour",mean at 25% of x,7.86103,0.165669,7.94382,0.13118,0.00455,0.3918,True
+app_gwb_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.148597,0.024801,0.10994,0.0100887,0.1309,1.444,True
+app_gwb_perf_char,"On-policy, exact behaviour",mean at 25% of x,7.75642,0.16477,7.77672,0.12124,0.001135,0.09922,True
+app_gwb_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.162549,0.025907,0.23393,0.020065,0.1581,2.178,True
+app_gwb_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.285414,0.0108069,0.115796,0.00751197,0.3918,12.89,False
+app_gwb_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.199236,7e-06,0.0745469,1.8276e-05,0.4269,6371,False
+app_gwb_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.249391,0.00914162,0.289461,0.00912865,0.06471,3.102,True
+app_gwb_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.194587,6.5e-06,0.186173,1.35333e-05,0.0192,560.4,True
+app_gwb_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.154406,0.0143344,0.289156,0.0139736,0.2725,6.731,True
+app_gwb_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,1.26228e-05,7.46927e-06,1.17874e-07,5.90601e-08,2.03,1.674,True
 app_gwb_policy_char,#1f77b4,mean at 25% of x,0.00455526,0.000370723,0.00420645,0.000551732,0.0346,0.5248,True
 app_gwb_policy_char,#1f77b4,mean at 100% of x,0.000103346,4.3904e-06,0.000126035,1.32741e-05,0.0862,1.623,True
 app_gwb_policy_shapley,Approx characteristic,mean at 25% of x,0.0012555,0.000167988,0.00113226,0.000210856,0.04487,0.4571,True
 app_gwb_policy_shapley,Approx characteristic,mean at 100% of x,0.000394083,3.12e-07,0.000120411,5.09193e-08,0.5149,865.7,False
 app_gwb_policy_shapley,Exact characteristic,mean at 25% of x,0.000487123,0.000114611,0.000826548,0.000188602,0.2296,1.538,True
 app_gwb_policy_shapley,Exact characteristic,mean at 100% of x,4.42537e-07,4.44784e-07,6.50371e-09,5.26155e-09,1.833,0.9803,True
-app_gwb_value_char,#1f77b4,mean at 25% of x,0.811178,0.0617901,0.702569,0.0600406,0.06243,1.261,True
-app_gwb_value_char,#1f77b4,mean at 100% of x,0.120891,0.011889,0.108567,0.00958069,0.0467,0.8071,True
-app_gwb_value_shapley,Approx characteristic,mean at 25% of x,0.099895,0.00190717,0.0627606,0.00217536,0.2019,12.84,True
-app_gwb_value_shapley,Approx characteristic,mean at 100% of x,0.084332,1.595e-05,0.0450917,1.76783e-06,0.2719,2445,True
+app_gwb_value_char,#1f77b4,mean at 25% of x,0.811178,0.0617901,0.70257,0.0600404,0.06243,1.261,True
+app_gwb_value_char,#1f77b4,mean at 100% of x,0.120891,0.011889,0.108569,0.00958077,0.04669,0.807,True
+app_gwb_value_shapley,Approx characteristic,mean at 25% of x,0.099895,0.00190717,0.0627544,0.0021752,0.2019,12.84,True
+app_gwb_value_shapley,Approx characteristic,mean at 100% of x,0.084332,1.595e-05,0.0450868,1.76796e-06,0.2719,2446,True
 app_gwb_value_shapley,Exact characteristic,mean at 25% of x,0.0102188,0.0013608,0.00520486,0.000924635,0.293,3.048,True
 app_gwb_value_shapley,Exact characteristic,mean at 100% of x,1.61086e-06,1.71605e-07,1.26527e-08,6.44246e-09,2.105,9.307,False
-app_large_policy_char,Mastermind-443,mean at 25% of x,0.00423303,5.71587e-05,0.00406711,2.08876e-05,0.01737,2.726,True
-app_large_policy_char,Mastermind-443,mean at 100% of x,0.00385958,2.648e-05,0.003838,3.22306e-05,0.002435,0.5173,True
-app_large_policy_char,Mastermind-453,mean at 25% of x,0.00388348,2.59788e-05,0.00383114,3.1818e-05,0.005893,1.274,True
-app_large_policy_char,Mastermind-453,mean at 100% of x,0.00358725,2.911e-05,0.00366959,3.01619e-05,0.009856,1.964,True
-app_large_policy_char,Mastermind-463,mean at 25% of x,0.00378178,2.40448e-05,0.00380793,3.84172e-05,0.002993,0.577,True
-app_large_policy_char,Mastermind-463,mean at 100% of x,0.00370475,1.272e-05,0.00358333,1.97439e-05,0.01447,5.17,True
-app_large_policy_shapley,Mastermind-443,mean at 25% of x,0.00124132,4.15702e-05,0.000978002,3.66558e-05,0.1035,4.751,True
-app_large_policy_shapley,Mastermind-443,mean at 100% of x,0.00126381,4.0455e-05,0.000981599,3.35999e-05,0.1097,5.366,True
-app_large_policy_shapley,Mastermind-453,mean at 25% of x,0.000978224,4.19083e-05,0.00100588,2.60421e-05,0.01211,0.5605,True
-app_large_policy_shapley,Mastermind-453,mean at 100% of x,0.000964045,2.79745e-05,0.00098433,4.38891e-05,0.009043,0.3897,True
-app_large_policy_shapley,Mastermind-463,mean at 25% of x,0.00181029,3.14375e-05,0.00212843,7.42303e-05,0.07031,3.947,True
-app_large_policy_shapley,Mastermind-463,mean at 100% of x,0.00190337,4.136e-05,0.00206646,0.000116708,0.0357,1.317,True
 app_mastermind_222_offpolicy_policy,Off-policy (with IS),mean at 25% of x,0.00929486,0.000980965,0.00778711,0.00103533,0.07687,1.057,True
 app_mastermind_222_offpolicy_policy,Off-policy (with IS),mean at 100% of x,0.0072796,0.000960175,0.00668526,0.000743836,0.03699,0.4893,True
 app_mastermind_222_offpolicy_policy,Off-policy (without IS),mean at 25% of x,0.0105511,0.000977042,0.00722979,0.000574986,0.1642,2.93,True
@@ -135,8 +123,8 @@ app_mastermind_222_parallel_policy_approx,2:1,mean at 25% of x,0.0139131,0.00070
 app_mastermind_222_parallel_policy_approx,2:1,mean at 100% of x,0.016117,0.00093585,0.0157329,0.00109501,0.01047,0.2666,True
 app_mastermind_222_parallel_policy_approx,50:1,mean at 25% of x,0.00360695,0.000466932,0.00501988,0.000694825,0.1436,1.688,True
 app_mastermind_222_parallel_policy_approx,50:1,mean at 100% of x,0.00886238,0.00113094,0.00923564,0.00150868,0.01792,0.198,True
-app_mastermind_222_parallel_return,#1f77b4,mean at 25% of x,-0.198286,0.245715,-0.197739,0.257112,inf,0.001536,True
-app_mastermind_222_parallel_return,#1f77b4,mean at 100% of x,-0.15006,0,-0.1,0.239517,inf,0.209,True
+app_mastermind_222_parallel_return,#1f77b4,mean at 25% of x,-0.198286,0.245715,-0.501706,0.0701791,inf,1.187,True
+app_mastermind_222_parallel_return,#1f77b4,mean at 100% of x,-0.15006,0,-0.259794,0.0696898,inf,1.575,True
 app_mastermind_222_parallel_value_approx,10:1,mean at 25% of x,0.00214129,0.000169698,0.00240622,0.000211174,0.05066,0.978,True
 app_mastermind_222_parallel_value_approx,10:1,mean at 100% of x,0.00176511,0.00018799,0.00179552,0.00022821,0.007418,0.1029,True
 app_mastermind_222_parallel_value_approx,1:1,mean at 25% of x,0.018104,0.000864086,0.0189408,0.000883867,0.01962,0.677,True
@@ -145,20 +133,20 @@ app_mastermind_222_parallel_value_approx,2:1,mean at 25% of x,0.0104896,0.000571
 app_mastermind_222_parallel_value_approx,2:1,mean at 100% of x,0.0032929,0.00032445,0.0027121,0.000254031,0.08427,1.409,True
 app_mastermind_222_parallel_value_approx,50:1,mean at 25% of x,0.00139513,0.000170384,0.00130177,0.000129965,0.03008,0.4357,True
 app_mastermind_222_parallel_value_approx,50:1,mean at 100% of x,0.00150494,0.00020378,0.00149591,0.000191949,0.002614,0.03226,True
-app_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0114321,0.0003963,0.0104109,0.00119445,0.04064,0.8114,True
-app_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00958304,0.000155115,0.00939346,0.00115811,0.008678,0.1622,True
-app_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.00130856,0.000226799,0.0019394,0.000399119,0.1709,1.374,True
-app_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.000233016,4.18605e-05,0.000505892,9.05043e-05,0.3367,2.737,True
-app_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 25% of x,0.0819527,0.00257699,0.0862348,0.00354702,0.02212,0.9767,True
-app_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.0134471,0.0015582,0.0129378,0.0016235,0.01677,0.2263,True
-app_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 25% of x,0.0983644,0.00318188,0.0939235,0.003724,0.02006,0.9066,True
-app_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.00988138,0.00054272,0.0120403,0.0013081,0.08582,1.524,True
-app_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.00433914,0.000279832,0.00429756,0.000395143,0.004181,0.08586,True
-app_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.00429515,0.00028279,0.0036459,0.000447194,0.07117,1.227,True
-app_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.00236202,0.00017412,0.00233827,0.000269084,0.004387,0.07407,True
-app_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.00129846,0.000187145,0.00127054,0.000128984,0.00944,0.1228,True
-app_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.00199418,0.000170797,0.0021307,0.000254673,0.02876,0.4452,True
-app_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,0.00113341,0.000193479,0.0010139,0.000107666,0.04839,0.5397,True
+app_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0114321,0.0003963,0.00976301,0.000677997,0.06854,2.125,True
+app_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00958304,0.000155115,0.00679296,0.000255569,0.1494,9.333,True
+app_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.00130856,0.000226799,0.00290245,0.000618685,0.346,2.419,True
+app_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.000233016,4.18605e-05,0.000820329,0.000248846,0.5466,2.327,True
+app_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 25% of x,0.0819527,0.00257699,0.078809,0.00221665,0.01699,0.9248,True
+app_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.0134471,0.0015582,0.0104731,0.000867906,0.1086,1.667,True
+app_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 25% of x,0.0983644,0.00318188,0.0830196,0.00224196,0.07366,3.942,True
+app_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.00988138,0.00054272,0.0113507,0.000633274,0.06021,1.762,True
+app_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.00433914,0.000279832,0.00441692,0.000253204,0.007716,0.2061,True
+app_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.00429515,0.00028279,0.00399304,0.000262806,0.03167,0.7826,True
+app_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.00236202,0.00017412,0.00183097,0.000176983,0.1106,2.139,True
+app_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.00129846,0.000187145,0.00126194,0.000127069,0.01239,0.1614,True
+app_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.00199418,0.000170797,0.00177186,0.000191328,0.05133,0.8668,True
+app_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,0.00113341,0.000193479,0.00121941,0.000130185,0.03176,0.3688,True
 app_mastermind_222_policy_char,#1f77b4,mean at 25% of x,0.0197854,0.00105356,0.0197177,0.000745083,0.001489,0.05246,True
 app_mastermind_222_policy_char,#1f77b4,mean at 100% of x,0.00193681,2.2785e-05,0.00191212,1.44894e-05,0.005572,0.9144,True
 app_mastermind_222_policy_sampling,Exact,mean at 25% of x,0.00201517,0.000108605,0.00197319,0.000112467,0.009143,0.2685,True
@@ -171,16 +159,16 @@ app_mastermind_222_policy_shapley,Approx characteristic,mean at 25% of x,0.00399
 app_mastermind_222_policy_shapley,Approx characteristic,mean at 100% of x,0.0027525,9.15e-05,0.00276539,0.000109802,0.002029,0.09018,True
 app_mastermind_222_policy_shapley,Exact characteristic,mean at 25% of x,0.00185765,0.00011542,0.00193409,0.000109638,0.01751,0.4802,True
 app_mastermind_222_policy_shapley,Exact characteristic,mean at 100% of x,0.000410333,4.081e-05,0.000461298,3.87945e-05,0.05085,0.9051,True
-app_mastermind_222_value_char,#1f77b4,mean at 25% of x,0.0118476,0.000994985,0.0100223,0.000830162,0.07266,1.409,True
-app_mastermind_222_value_char,#1f77b4,mean at 100% of x,0.000728475,7.4502e-05,0.000718111,5.45852e-05,0.006223,0.1122,True
+app_mastermind_222_value_char,#1f77b4,mean at 25% of x,0.0118476,0.000994985,0.0100223,0.000830161,0.07266,1.409,True
+app_mastermind_222_value_char,#1f77b4,mean at 100% of x,0.000728475,7.4502e-05,0.000718104,5.45856e-05,0.006227,0.1123,True
 app_mastermind_222_value_sampling,Exact,mean at 25% of x,0.00132472,0.000144423,0.00126109,0.00010378,0.02138,0.3578,True
 app_mastermind_222_value_sampling,Exact,mean at 100% of x,0.000576464,5.713e-05,0.000604621,6.3978e-05,0.02071,0.3283,True
 app_mastermind_222_value_sampling,Model,mean at 25% of x,0.00157173,0.000168145,0.00154976,0.000117836,0.006112,0.107,True
 app_mastermind_222_value_sampling,Model,mean at 100% of x,0.000854429,9.39335e-05,0.00087291,9.15704e-05,0.009293,0.1409,True
 app_mastermind_222_value_sampling,Sample,mean at 25% of x,0.00108475,0.00010037,0.000896665,0.000103749,0.0827,1.303,True
 app_mastermind_222_value_sampling,Sample,mean at 100% of x,0.000487479,5.49805e-05,0.000481626,3.99184e-05,0.005246,0.08614,True
-app_mastermind_222_value_shapley,Approx characteristic,mean at 25% of x,0.00149025,0.000182673,0.00117546,9.40599e-05,0.103,1.532,True
-app_mastermind_222_value_shapley,Approx characteristic,mean at 100% of x,0.000560986,5.46695e-05,0.000670785,6.02335e-05,0.07763,1.35,True
+app_mastermind_222_value_shapley,Approx characteristic,mean at 25% of x,0.00149025,0.000182673,0.00117546,9.40597e-05,0.1031,1.532,True
+app_mastermind_222_value_shapley,Approx characteristic,mean at 100% of x,0.000560986,5.46695e-05,0.000670782,6.02335e-05,0.07763,1.35,True
 app_mastermind_222_value_shapley,Exact characteristic,mean at 25% of x,0.00141457,0.000194968,0.00109944,9.60089e-05,0.1095,1.45,True
 app_mastermind_222_value_shapley,Exact characteristic,mean at 100% of x,0.000475031,5.2283e-05,0.000548566,5.15012e-05,0.06251,1.002,True
 app_mastermind_333_policy_char,#1f77b4,mean at 25% of x,0.00371326,9.72175e-05,0.0034772,0.000166274,0.02853,1.226,True
@@ -209,20 +197,20 @@ main_mastermind_222_parallel_value_approx,2:1,mean at 25% of x,0.0104899,0.00057
 main_mastermind_222_parallel_value_approx,2:1,mean at 100% of x,0.00329333,0.00032444,0.00271212,0.000254075,0.08433,1.41,True
 main_mastermind_222_parallel_value_approx,50:1,mean at 25% of x,0.00139561,0.000170385,0.00130178,0.000129959,0.03023,0.4379,True
 main_mastermind_222_parallel_value_approx,50:1,mean at 100% of x,0.00150541,0.000203775,0.00149599,0.000192002,0.002725,0.03364,True
-main_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0114324,0.00039626,0.01041,0.00119456,0.04068,0.8123,True
-main_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00958332,0.000155115,0.00939346,0.00115811,0.00869,0.1625,True
-main_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.00130902,0.000226793,0.00193873,0.000399009,0.1706,1.372,True
-main_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.0002335,4.18595e-05,0.000505892,9.05043e-05,0.3358,2.732,True
-main_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 25% of x,0.0819512,0.00257695,0.0862373,0.00354865,0.02214,0.9773,True
-main_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.0134473,0.00155815,0.0129378,0.0016235,0.01677,0.2264,True
-main_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 25% of x,0.0983625,0.0031821,0.0939405,0.00372845,0.01998,0.9021,True
-main_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.00988165,0.00054273,0.0120403,0.0013081,0.08581,1.524,True
-main_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.00434021,0.000279835,0.00429742,0.000395122,0.004303,0.08837,True
-main_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.00429622,0.000282795,0.0036459,0.000447194,0.07128,1.229,True
-main_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.00236305,0.00017412,0.00233819,0.000269071,0.004592,0.07756,True
-main_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.00129951,0.000187145,0.00127054,0.000128984,0.009791,0.1275,True
-main_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.00199521,0.000170791,0.00213063,0.000254661,0.02852,0.4416,True
-main_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,0.00113446,0.00019348,0.0010139,0.000107666,0.04879,0.5445,True
+main_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 25% of x,0.0114324,0.00039626,0.00976262,0.000677847,0.06857,2.127,True
+main_mastermind_222_perf_char,"Off-policy, approx behaviour",mean at 100% of x,0.00958332,0.000155115,0.00679296,0.000255569,0.1495,9.334,True
+main_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 25% of x,0.00130902,0.000226793,0.00290212,0.000618561,0.3458,2.418,True
+main_mastermind_222_perf_char,"Off-policy, exact behaviour",mean at 100% of x,0.0002335,4.18595e-05,0.000820329,0.000248846,0.5457,2.326,True
+main_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 25% of x,0.0819512,0.00257695,0.0788171,0.002219,0.01693,0.9216,True
+main_mastermind_222_perf_char,"On-policy, approx behaviour",mean at 100% of x,0.0134473,0.00155815,0.0104731,0.000867906,0.1086,1.668,True
+main_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 25% of x,0.0983625,0.0031821,0.0830307,0.00224515,0.07359,3.937,True
+main_mastermind_222_perf_char,"On-policy, exact behaviour",mean at 100% of x,0.00988165,0.00054273,0.0113507,0.000633274,0.06019,1.761,True
+main_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 25% of x,0.00434021,0.000279835,0.00441683,0.000253179,0.007601,0.2031,True
+main_mastermind_222_perf_shapley,"Approx outcome, approx behaviour",mean at 100% of x,0.00429622,0.000282795,0.00399304,0.000262806,0.03178,0.7853,True
+main_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 25% of x,0.00236305,0.00017412,0.0018309,0.000176973,0.1108,2.143,True
+main_mastermind_222_perf_shapley,"Approx outcome, exact behaviour",mean at 100% of x,0.00129951,0.000187145,0.00126194,0.000127069,0.01274,0.1661,True
+main_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 25% of x,0.00199521,0.000170791,0.00177179,0.00019132,0.05158,0.8712,True
+main_mastermind_222_perf_shapley,"Exact outcome, exact behaviour",mean at 100% of x,0.00113446,0.00019348,0.00121941,0.000130185,0.03136,0.3643,True
 main_mastermind_222_policy_char,#1f77b4,mean at 25% of x,0.0197834,0.00105363,0.0197177,0.000745083,0.001444,0.05087,True
 main_mastermind_222_policy_char,#1f77b4,mean at 100% of x,0.00193334,2.2785e-05,0.00191212,1.44894e-05,0.004793,0.7859,True
 main_mastermind_222_policy_sampling,Exact,mean at 25% of x,0.00201532,0.000108601,0.00197318,0.000112467,0.009177,0.2695,True
@@ -293,15 +281,3 @@ hypercube_value,Characteristic 5x4,updates to target loss,28109.5,10114.1,62540.
 hypercube_value,Shapley 5x4,updates to target loss,14395.1,2479.27,38072.2,17269.4,0.4224,1.357,True
 hypercube_value,Characteristic 6x4,updates to target loss,40194,2486.87,37958.2,1751.44,0.02486,0.7351,True
 hypercube_value,Shapley 6x4,updates to target loss,46181.1,2152.05,41651.8,1978.63,0.04483,1.549,True
-table_1_behaviour,Mastermind-443 Characteristic,updates,1.097e+06,112000,1.01797e+06,122783,0.03247,0.4756,True
-table_1_behaviour,Mastermind-443 Characteristic,loss,0.003825,2.2e-05,0.00378286,2.50585e-05,0.004812,1.264,True
-table_1_behaviour,Mastermind-443 Shapley,updates,730500,68100,924829,105698,0.1024,1.546,True
-table_1_behaviour,Mastermind-443 Shapley,loss,0.001292,3.6e-05,0.000933054,3.3808e-05,0.1414,7.268,True
-table_1_behaviour,Mastermind-453 Characteristic,updates,1.287e+06,105000,936739,74813.7,0.138,2.717,True
-table_1_behaviour,Mastermind-453 Characteristic,loss,0.003603,2.2e-05,0.00362775,2.58507e-05,0.002973,0.7291,True
-table_1_behaviour,Mastermind-453 Shapley,updates,784400,49900,883401,76501.4,0.05162,1.084,True
-table_1_behaviour,Mastermind-453 Shapley,loss,0.0009578,3.22e-05,0.00100739,3.89127e-05,0.02192,0.9818,True
-table_1_behaviour,Mastermind-463 Characteristic,updates,1.18e+06,118000,977052,53688.2,0.08196,1.565,True
-table_1_behaviour,Mastermind-463 Characteristic,loss,0.0037,1.2e-05,0.00359471,1.33251e-05,0.01254,5.871,True
-table_1_behaviour,Mastermind-463 Shapley,updates,712300,51600,706701,63240.8,0.003427,0.0686,True
-table_1_behaviour,Mastermind-463 Shapley,loss,0.001878,3.8e-05,0.00195011,0.000112106,0.01636,0.6091,True
