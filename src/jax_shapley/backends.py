@@ -73,6 +73,27 @@ def upload(run: WandbRun | trackio.Run, directory: Path, name: str, kind: str) -
             time.sleep(delay)
 
 
+def require_online(track: Track) -> None:
+    """Fail before any work unless wandb is online and logged in; offline wandb is not supported.
+
+    Local tracking is trackio's job (`--track trackio`); wandb's own offline modes are rejected.
+    """
+    if track != "wandb":
+        return
+    mode = os.environ.get("WANDB_MODE", "online")
+    if mode in ("offline", "dryrun", "disabled"):
+        raise RuntimeError(f"WANDB_MODE={mode} is not supported: use --track trackio to track locally")
+    try:
+        # Reading the logged-in user verifies both the login and the connection.
+        user = wandb.Api(timeout=30).viewer
+    except TRANSIENT as error:
+        raise RuntimeError(
+            f"wandb is not online ({error}); log in with `uv run wandb login`, or use --track trackio to track locally"
+        ) from error
+    if not user:
+        raise RuntimeError("wandb has no logged-in user: log in with `uv run wandb login`, or use --track trackio")
+
+
 @contextmanager
 def session(track: Track, entity: str | None) -> Iterator[Path]:
     """The local working folder for checkpoints and downloads, deleted at exit (also on error).
@@ -85,6 +106,7 @@ def session(track: Track, entity: str | None) -> Iterator[Path]:
     if SESSION in os.environ:
         yield Path(os.environ[SESSION])
         return
+    require_online(track)
     root = Path(tempfile.mkdtemp(prefix="jax-shapley-"))
     names = (SESSION, *WANDB_DIRECTORIES, "WANDB_ENTITY", "WANDB_REINIT")
     saved = {name: os.environ.get(name) for name in names}

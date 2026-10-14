@@ -121,6 +121,7 @@ class MissingRunsError(Exception):
 
 
 def main(args: Args) -> None:
+    backends.require_online(args.track)
     args.output.mkdir(parents=True, exist_ok=True)
     configs = {name: config for name, (_, config) in load_configs(ExperimentConfig).items()}
     for table, kind, models in (

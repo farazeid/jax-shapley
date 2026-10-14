@@ -130,6 +130,7 @@ class MissingRunsError(Exception):
 
 
 def main(args: Args) -> None:
+    backends.require_online(args.track)
     sources = Sources(
         args.track,
         args.project,

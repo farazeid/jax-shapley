@@ -225,6 +225,24 @@ def test_checkpoint_uploads_retry_transient_failures(tmp_path: Path, monkeypatch
     run.finish()
 
 
+def test_wandb_must_be_online(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline wandb is not supported: tracking locally is trackio's job, and an unreachable wandb fails first."""
+    backends.require_online("trackio")
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    with pytest.raises(RuntimeError, match="--track trackio"):
+        backends.require_online("wandb")
+    monkeypatch.delenv("WANDB_MODE")
+
+    def unreachable(timeout: int) -> wandb.Api:
+        raise wandb.errors.CommError(f"no connection within {timeout} s")
+
+    monkeypatch.setattr(backends.wandb, "Api", unreachable)
+    with pytest.raises(RuntimeError, match="not online"):
+        backends.require_online("wandb")
+    with pytest.raises(RuntimeError, match="not online"), backends.session("wandb", None):
+        pass
+
+
 @pytest.mark.skipif(os.environ.get("JAX_SHAPLEY_WANDB_TEST") != "1", reason="writes to the wandb cloud")
 def test_wandb_keeps_nothing_locally() -> None:
     before = set(Path(tempfile.gettempdir()).glob("jax-shapley-*"))
