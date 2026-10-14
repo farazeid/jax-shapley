@@ -9,6 +9,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -31,21 +32,10 @@ def test_selected_logging_matches_pinned_trainer() -> None:
         jnp.stack((indices % 7 == 0, indices % 11 == 0), axis=1),
     )
     run = Recorder()
-    for row in range(54):
-        step_metrics = dqn.StepMetrics(*[
-            np.asarray(leaf)[row]
-            for leaf in (
-                metrics.global_step,
-                metrics.epsilon,
-                metrics.loss,
-                metrics.updated,
-                metrics.target_updated,
-                metrics.episode_return,
-                metrics.episode_length,
-                metrics.completed,
-            )
-        ])
-        dqn.log_step([run], fixture["num_envs"], jnp.asarray(0), step_metrics)
+    # Live logs arrive in blocks of vector steps with a seed axis, (steps, seeds): here two blocks of one seed.
+    for rows in (slice(0, 30), slice(30, 54)):
+        block = dqn.StepMetrics(*[np.expand_dims(np.asarray(leaf)[rows], 1) for leaf in jax.tree.leaves(metrics)])
+        dqn.log_step([run], fixture["num_envs"], block)
     evaluation = dqn.EvaluationMetrics(jnp.asarray([4.0, 5.0, 6.0]), jnp.asarray([True, True, True]), jnp.asarray(0))
     dqn.log_evaluation([run], jnp.asarray(0), evaluation)
     expected: dict[tuple[str, int], list[float]] = defaultdict(list)

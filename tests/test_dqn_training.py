@@ -9,6 +9,7 @@ import numpy as np
 from flax import nnx
 
 from jax_shapley.algorithms import dqn
+from jax_shapley.common.supervised_learning import seed_slice
 from jax_shapley.envs import Gridworld, Mastermind
 from jax_shapley.envs.wrappers import EpisodeStatisticsWrapper
 
@@ -27,7 +28,8 @@ TINY = dqn.DQNConfig(
 
 def test_upstream_vector_timing_and_target_order() -> None:
     initial = dqn.initialize(TINY, jax.random.key(0)).model.mlp.layers[0].kernel[...].copy()
-    state, metrics = nnx.jit(partial(dqn.train, TINY, None, None))(jax.random.key(0), jnp.asarray(0))
+    stacked, every_seed = nnx.jit(partial(dqn.train, TINY, None, None))(jnp.stack([jax.random.key(0)]))
+    state, metrics = seed_slice(stacked, 0), seed_slice(every_seed, 0)
     steps = np.arange(TINY.vector_steps) * TINY.num_envs
     np.testing.assert_array_equal(metrics.global_step, steps)
     np.testing.assert_array_equal(metrics.updated, (steps > 2) & (steps % 3 < 2))
@@ -42,8 +44,8 @@ def test_upstream_vector_timing_and_target_order() -> None:
 
 def test_repeated_seed_is_deterministic() -> None:
     program = nnx.jit(partial(dqn.train, TINY, None, None))
-    first, _ = program(jax.random.key(12), jnp.asarray(0))
-    second, _ = program(jax.random.key(12), jnp.asarray(0))
+    first, _ = program(jnp.stack([jax.random.key(12)]))
+    second, _ = program(jnp.stack([jax.random.key(12)]))
     for left, right in zip(
         jax.tree.leaves((nnx.state(first.model), nnx.state(first.target), first.replay, first.observations)),
         jax.tree.leaves((nnx.state(second.model), nnx.state(second.target), second.replay, second.observations)),
@@ -51,6 +53,20 @@ def test_repeated_seed_is_deterministic() -> None:
     ):
         np.testing.assert_array_equal(left, right)
     np.testing.assert_array_equal(jax.random.key_data(first.key), jax.random.key_data(second.key))
+
+
+def test_seeds_train_independently_in_one_program() -> None:
+    """Vectorised seeds equal their single-seed runs: same episodes and updates, losses to float rounding;
+    vector steps span whole blocks and a remainder."""
+    config = replace(TINY, total_timesteps=2 * (2 * dqn.STEP_BLOCK + 50))
+    program = nnx.jit(partial(dqn.train, config, None, None))
+    _, both = program(jnp.stack([jax.random.key(1), jax.random.key(2)]))
+    assert np.asarray(both.global_step).shape == (2, config.vector_steps)
+    for index, seed in enumerate((1, 2)):
+        _, alone = program(jnp.stack([jax.random.key(seed)]))
+        for name in ("global_step", "updated", "target_updated", "completed", "episode_length"):
+            np.testing.assert_array_equal(np.asarray(getattr(both, name))[index], np.asarray(getattr(alone, name))[0])
+        np.testing.assert_allclose(np.asarray(both.loss)[index], np.asarray(alone.loss)[0], rtol=1e-5, atol=1e-6)
 
 
 def test_partial_wraparound_and_oversized_insertion() -> None:
@@ -61,7 +77,7 @@ def test_partial_wraparound_and_oversized_insertion() -> None:
         state = dqn.initialize(config, jax.random.key(1))
         for expected_pointer in pointers:
             pointer, observations = int(state.replay.pointer), np.asarray(state.observations)
-            state, _ = dqn.step(config, env, None, jnp.asarray(0), state, jnp.asarray(0))
+            state, _ = dqn.step(config, env, state, jnp.asarray(0))
             count = min(num_envs, capacity)
             rows = (pointer + np.arange(count)) % capacity
             np.testing.assert_array_equal(state.replay.data.observations[rows], observations[-count:])
@@ -79,7 +95,7 @@ def test_replay_stores_raw_next_observations_while_acting_from_resets() -> None:
     reset = np.asarray(state.observations[0])
     ended = np.zeros(config.num_envs, bool)
     for index in range(2):
-        state, metrics = dqn.step(config, env, None, jnp.asarray(0), state, jnp.asarray(index))
+        state, metrics = dqn.step(config, env, state, jnp.asarray(index))
         completed = np.asarray(metrics.completed)
         rows = index * config.num_envs + np.flatnonzero(completed)
         np.testing.assert_array_equal(np.asarray(state.observations)[completed], np.broadcast_to(reset, (len(rows), 8)))
@@ -120,9 +136,9 @@ def test_target_update_independent_of_learning_frequency() -> None:
     state = dqn.initialize(config, jax.random.key(0))
     state.model.mlp.layers[0].bias[...] += 2
     initial = state.target.mlp.layers[0].bias[...].copy()
-    state, metrics = dqn.step(config, env, None, jnp.asarray(0), state, jnp.asarray(0))
+    state, metrics = dqn.step(config, env, state, jnp.asarray(0))
     assert not bool(metrics.updated) and not bool(metrics.target_updated)  # Strict warmup, even at zero.
-    state, metrics = dqn.step(config, env, None, jnp.asarray(0), state, jnp.asarray(1))
+    state, metrics = dqn.step(config, env, state, jnp.asarray(1))
     assert not bool(metrics.updated)
     assert bool(metrics.target_updated)
     np.testing.assert_allclose(state.target.mlp.layers[0].bias[...], initial + 1, atol=1e-7)

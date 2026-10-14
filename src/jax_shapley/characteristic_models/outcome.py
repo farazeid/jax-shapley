@@ -38,6 +38,7 @@ from jaxtyping import Bool, Float, Int
 from jax_shapley import backends
 from jax_shapley.algorithms.dqn import (
     LOG_STEPS,
+    STEP_BLOCK,
     TRACKING_FIELDS,
     Agent,
     Env,
@@ -560,7 +561,6 @@ def fit_on_policy(
         explained: CharacteristicConfig,
         env: EpisodeStatisticsWrapper[EnvState, EnvParams],
         contexts: OnPolicyContext,
-        log: Callable[[EpochMetrics], None] | None,
         carry: Carry,
         index: Array,
     ) -> tuple[Carry, EpochMetrics]:
@@ -568,18 +568,35 @@ def fit_on_policy(
         state, frozen = carry
         every_seed = nnx.vmap(partial(seed_step, config, explained, env), in_axes=(0, 0, 0), out_axes=(0, 0))
         state, metrics = every_seed(state, contexts, frozen)
-        if log is not None:
-            jax.lax.cond(
-                jnp.any(metrics.active),
-                partial(jax.debug.callback, log, ordered=True),
-                lambda metrics: None,
-                metrics,
-            )
         return (state, frozen), metrics
 
-    (trained, _), metrics = nnx.scan(
-        partial(step, config, explained, env, contexts, log), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
-    )((state, frozen), jnp.arange(config.train.vector_steps, dtype=jnp.int32))
+    def block(
+        config: OutcomeConfig,
+        explained: CharacteristicConfig,
+        env: EpisodeStatisticsWrapper[EnvState, EnvParams],
+        contexts: OnPolicyContext,
+        log: Callable[[EpochMetrics], None] | None,
+        carry: Carry,
+        indices: Array,
+    ) -> tuple[Carry, EpochMetrics]:
+        """`STEP_BLOCK` vector steps of every seed (steps past the run, or after a seed stopped, do
+        nothing), then one live log of them all."""
+        carry, metrics = nnx.scan(
+            partial(step, config, explained, env, contexts), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
+        )(carry, indices)
+        if log is not None:
+            jax.debug.callback(log, metrics, ordered=True)
+        return carry, metrics
+
+    blocks = -(-config.train.vector_steps // STEP_BLOCK)
+    indices = jnp.arange(blocks * STEP_BLOCK, dtype=jnp.int32).reshape(blocks, STEP_BLOCK)
+    (trained, _), blocked = nnx.scan(
+        partial(block, config, explained, env, contexts, log), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
+    )((state, frozen), indices)
+    metrics = EpochMetrics(*[
+        leaf.reshape(blocks * STEP_BLOCK, *leaf.shape[2:])[: config.train.vector_steps]
+        for leaf in jax.tree.leaves(blocked)
+    ])
     return trained, metrics
 
 

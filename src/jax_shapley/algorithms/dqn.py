@@ -55,7 +55,8 @@ type Observations = Int[Array, "batch features"]  # ruff: ignore[forward-annotat
 type Actions = Int[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
 type Scalars = Float[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
 type Terminations = Bool[Array, "batch"]  # ruff: ignore[undefined-name] -- jaxtyping symbolic axis.
-type StepLog = Callable[[Array, StepMetrics], None]
+type StepLog = Callable[[StepMetrics], None]
+"""A live log of a block of vector steps of every seed: metrics with leading (steps, seeds) axes."""
 type EvaluationLog = Callable[[Array, EvaluationMetrics], None]
 type Env = Gridworld | Mastermind | Hypercube
 type EnvState = GridworldState | MastermindState | HypercubeState
@@ -66,6 +67,8 @@ TRACKING_FIELDS = ("checkpoint", "name", "track", "project", "entity", "group")
 
 # The source logs the DQN loss when the global step crosses a multiple of this.
 LOG_STEPS = 100
+# Vector steps per block: one live log each (host round trips on accelerators).
+STEP_BLOCK = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,12 +232,10 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
 
     Everything returned has a leading seed axis; metrics then a vector-step axis.
     """
-    keys = [jax.random.key(seed) for seed in config.seeds]
+    keys = jnp.stack([jax.random.key(seed) for seed in config.seeds])
     if config.track is None:
-        program = nnx.jit(partial(train, config, None, None))
-        results = [program(key, jnp.asarray(index, jnp.int32)) for index, key in enumerate(keys)]
-        state = stack_seeds([state for state, _ in results])
-        return state, stack_seeds([metrics for _, metrics in results]), trained_agent(config, state)
+        state, metrics = nnx.jit(partial(train, config, None, None))(keys)
+        return state, metrics, trained_agent(config, state)
     group = config.group or f"{config.name}-{time_ns()}"
     artifact = f"{group}--algorithm--dqn"
     settings = {
@@ -263,9 +264,7 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
             program = nnx.jit(
                 partial(train, config, partial(log_step, runs, config.num_envs), partial(log_evaluation, runs))
             )
-            results = [program(key, jnp.asarray(index, jnp.int32)) for index, key in enumerate(keys)]
-            state = stack_seeds([state for state, _ in results])
-            metrics = stack_seeds([metrics for _, metrics in results])
+            state, metrics = program(keys)
             directory = root / "checkpoints" / artifact
             checkpoints.save(directory, state, settings)
             backends.upload(runs[0], directory, artifact, "agent")
@@ -276,21 +275,24 @@ def main(config: DQNConfig) -> tuple[RunState, StepMetrics | None, Agent]:
                 run.finish()
 
 
-def log_step(runs: Sequence[backends.Logger], num_envs: int, seed: Array, metrics: StepMetrics) -> None:
-    """The source's DQN scalars into seed `seed`'s run (a host callback): episode statistics when episodes
-    finished (averaged when several finish on the same step: a step holds one value per tag), and the
-    loss when the global step crosses a multiple of 100."""
-    step = int(metrics.global_step)
-    completed = np.asarray(metrics.completed)
-    row: dict[str, float] = {}
-    if completed.any():
-        row["agent/episodic_return"] = float(np.asarray(metrics.episode_return)[completed].mean())
-        row["agent/episodic_length"] = float(np.asarray(metrics.episode_length)[completed].mean())
-        row["agent/epsilon"] = float(metrics.epsilon)
-    if bool(metrics.updated) and step % LOG_STEPS < num_envs:
-        row["agent/DQN_loss"] = float(metrics.loss)
-    if row:
-        runs[int(seed)].log(row, step=step)
+def log_step(runs: Sequence[backends.Logger], num_envs: int, metrics: StepMetrics) -> None:
+    """The source's DQN scalars for a block of vector steps, (steps, seeds), into each seed's run (a host
+    callback): episode statistics where episodes finished (averaged when several finish on the same
+    step: a step holds one value per tag), and the loss where the global step crosses a multiple of 100."""
+    global_steps, completed = np.asarray(metrics.global_step), np.asarray(metrics.completed)
+    returns, lengths = np.asarray(metrics.episode_return), np.asarray(metrics.episode_length)
+    epsilons, updated, losses = np.asarray(metrics.epsilon), np.asarray(metrics.updated), np.asarray(metrics.loss)
+    for index in np.ndindex(global_steps.shape):
+        step = int(global_steps[index])
+        row: dict[str, float] = {}
+        if completed[index].any():
+            row["agent/episodic_return"] = float(returns[index][completed[index]].mean())
+            row["agent/episodic_length"] = float(lengths[index][completed[index]].mean())
+            row["agent/epsilon"] = float(epsilons[index])
+        if bool(updated[index]) and step % LOG_STEPS < num_envs:
+            row["agent/DQN_loss"] = float(losses[index])
+        if row:
+            runs[index[1]].log(row, step=step)
 
 
 def log_evaluation(runs: Sequence[backends.Logger], seed: Array, metrics: EvaluationMetrics) -> None:
@@ -301,30 +303,55 @@ def log_evaluation(runs: Sequence[backends.Logger], seed: Array, metrics: Evalua
 
 
 def train(
-    config: DQNConfig, log: StepLog | None, log_evaluation: EvaluationLog | None, key: Array, seed: Array
+    config: DQNConfig, log: StepLog | None, log_evaluation: EvaluationLog | None, keys: Array
 ) -> tuple[RunState, StepMetrics]:
-    """One seed's compiled run: training, then `eval_episodes` greedy evaluation episodes.
+    """Every seed's compiled run, vectorised over seeds: training, then `eval_episodes` greedy
+    evaluation episodes. Returns seed-stacked states and (seeds, vector steps) metrics.
 
-    `log` receives the seed index and a step's metrics during the run (a host callback), on
-    steps where an episode finished or the source would log the DQN loss; `log_evaluation`
-    receives every evaluation step that completed an episode. Evaluation advances the
-    run's key, as the source's does.
+    Vector steps run in blocks of `STEP_BLOCK`; `log` receives each block's metrics,
+    (steps, seeds), during the run (a host callback). `log_evaluation` receives every
+    evaluation step that completed an episode. Evaluation advances each run's key, as the
+    source's does.
     """
     env = EpisodeStatisticsWrapper(config.env)
-    state = initialize(config, key)
-    state, metrics = nnx.scan(partial(step, config, env, log, seed), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
-        state, jnp.arange(config.vector_steps, dtype=jnp.int32)
-    )
-    if not config.eval_episodes:
-        return state, metrics
-    return evaluate(config, log_evaluation, state, seed), metrics
+    state = nnx.vmap(partial(initialize, config), in_axes=0, out_axes=0)(keys)
+    every_seed = nnx.vmap(partial(step, config, env), in_axes=(0, None), out_axes=(0, 0))
+    full, rest = divmod(config.vector_steps, STEP_BLOCK)
+    pieces = []
+    if full:
+        indices = jnp.arange(full * STEP_BLOCK, dtype=jnp.int32).reshape(full, STEP_BLOCK)
+        state, blocks = nnx.scan(partial(step_block, every_seed, log), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+            state, indices
+        )
+        pieces.append(jax.tree.map(lambda leaf: leaf.reshape(full * STEP_BLOCK, *leaf.shape[2:]), blocks))
+    if rest:
+        state, tail = step_block(every_seed, log, state, jnp.arange(rest, dtype=jnp.int32))
+        pieces.append(tail)
+    # (steps, seeds) to (seeds, steps).
+    columns = zip(*[jax.tree.leaves(piece) for piece in pieces], strict=True)
+    metrics = StepMetrics(*[jnp.moveaxis(jnp.concatenate(column), 0, 1) for column in columns])
+    if config.eval_episodes:
+        seeds = jnp.arange(keys.shape[0], dtype=jnp.int32)
+        state = nnx.vmap(partial(evaluate, config, log_evaluation), in_axes=(0, 0), out_axes=0)(state, seeds)
+    return state, metrics
+
+
+def step_block(
+    every_seed: Callable[[RunState, Array], tuple[RunState, StepMetrics]],
+    log: StepLog | None,
+    state: RunState,
+    indices: Array,
+) -> tuple[RunState, StepMetrics]:
+    """Consecutive vector steps of every seed, then one live log of them all."""
+    state, metrics = nnx.scan(every_seed, in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(state, indices)
+    if log is not None:
+        jax.debug.callback(log, metrics, ordered=True)
+    return state, metrics
 
 
 def step(
     config: DQNConfig,
     env: EpisodeStatisticsWrapper[EnvState, EnvParams],
-    log: StepLog | None,
-    seed: Array,
     state: RunState,
     index: Array,
 ) -> tuple[RunState, StepMetrics]:
@@ -425,15 +452,6 @@ def step(
         transition.episode_length,
         transition.completed,
     )
-    if log is not None:
-        loss_due = should_learn & (global_step % LOG_STEPS < config.num_envs)
-        jax.lax.cond(
-            jnp.any(transition.completed) | loss_due,
-            partial(jax.debug.callback, log, ordered=True),
-            lambda seed, metrics: None,
-            seed,
-            metrics,
-        )
     return next_state, metrics
 
 
