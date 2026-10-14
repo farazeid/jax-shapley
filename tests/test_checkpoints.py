@@ -77,7 +77,7 @@ def test_restored_arrays_follow_the_destination_device(tmp_path: Path) -> None:
 def _steps(config: dqn.DQNConfig, count: int, state: dqn.RunState) -> dqn.RunState:
     env = EpisodeStatisticsWrapper(config.env)
     for index in range(count):
-        state, _ = dqn.step(config, env, None, jnp.asarray(0), state, jnp.asarray(index))
+        state, _ = dqn.step(config, env, state, jnp.asarray(index))
     return state
 
 

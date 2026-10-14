@@ -26,7 +26,6 @@ from time import time_ns
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
 import tyro
 from flax import nnx
 
@@ -174,8 +173,8 @@ def compile_stages(config: ExperimentConfig) -> None:
     """
     key = jax.ShapeDtypeStruct((), jax.random.key(0).dtype)
     algorithm, stage, outcome = config.algorithm, config.characteristic, config.outcome
-    program = nnx.jit(partial(dqn.train, algorithm, lambda seed, metrics: None, lambda seed, metrics: None))
-    program.trace(key, jax.ShapeDtypeStruct((), jnp.int32)).lower().compile()
+    program = nnx.jit(partial(dqn.train, algorithm, lambda metrics: None, lambda seed, metrics: None))
+    program.trace(jax.ShapeDtypeStruct((len(algorithm.seeds),), key.dtype)).lower().compile()
 
     head = characteristic.head if stage.kind == "behaviour" else characteristic_prediction.head
     targets = characteristic.targets if stage.kind == "behaviour" else characteristic_prediction.targets

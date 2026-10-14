@@ -190,7 +190,6 @@ def fit(
     def step(
         config: ContinualConfig,
         tabular: TabularModel,
-        log: Callable[[ContinualMetrics], None] | None,
         env: EpisodeStatisticsWrapper[dqn.EnvState, dqn.EnvParams],
         carry: tuple[ContinualState, Array],
         index: Array,
@@ -241,20 +240,42 @@ def fit(
             jnp.broadcast_to(logged, (seeds,)),
             jnp.broadcast_to(exact_step, (seeds,)),
         )
-        if log is not None:
-            jax.lax.cond(
-                logged | exact_step | jnp.any(agent.completed),
-                partial(jax.debug.callback, log, ordered=True),
-                lambda metrics: None,
-                metrics,
-            )
         return (state, vector_step + 1), metrics
 
-    (state, _), metrics = nnx.scan(
-        partial(step, config, tabular, log, env), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
-    )((state, jnp.asarray(0, jnp.int32)), jnp.arange(training.vector_steps, dtype=jnp.int32))
+    def block(
+        config: ContinualConfig,
+        tabular: TabularModel,
+        log: Callable[[ContinualMetrics], None] | None,
+        env: EpisodeStatisticsWrapper[dqn.EnvState, dqn.EnvParams],
+        carry: tuple[ContinualState, Array],
+        indices: Array,
+    ) -> tuple[tuple[ContinualState, Array], ContinualMetrics]:
+        """Consecutive vector steps, then one live log of them all."""
+        carry, metrics = nnx.scan(partial(step, config, tabular, env), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))(
+            carry, indices
+        )
+        if log is not None:
+            jax.debug.callback(log, metrics, ordered=True)
+        return carry, metrics
+
+    carry = (state, jnp.asarray(0, jnp.int32))
+    full, rest = divmod(training.vector_steps, dqn.STEP_BLOCK)
+    pieces: list[ContinualMetrics] = []
+    if full:
+        indices = jnp.arange(full * dqn.STEP_BLOCK, dtype=jnp.int32).reshape(full, dqn.STEP_BLOCK)
+        carry, blocked = nnx.scan(
+            partial(block, config, tabular, log, env), in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0)
+        )(carry, indices)
+        pieces.append(jax.tree.map(lambda leaf: leaf.reshape(full * dqn.STEP_BLOCK, *leaf.shape[2:]), blocked))
+    if rest:
+        carry, tail = block(config, tabular, log, env, carry, jnp.arange(rest, dtype=jnp.int32))
+        pieces.append(tail)
+    state, _ = carry
+    columns = zip(*[jax.tree.leaves(piece) for piece in pieces], strict=True)
+    leaves = [jnp.concatenate(column) for column in columns]
     del explain
-    return state, metrics
+    # Unflattening with the pieces' own structure rebuilds the struct.
+    return state, cast(ContinualMetrics, jax.tree.unflatten(jax.tree.structure(pieces[0]), leaves))
 
 
 def initialize(config: ContinualConfig, keys: Array) -> ContinualState:
@@ -319,7 +340,8 @@ def agent_step(
     seed: Array,
 ) -> tuple[ContinualState, dqn.StepMetrics]:
     """The unchanged DQN step."""
-    run, metrics = dqn.step(config.algorithm, env, None, seed, state.run, jnp.asarray(0, jnp.int32))
+    del seed
+    run, metrics = dqn.step(config.algorithm, env, state.run, jnp.asarray(0, jnp.int32))
     return ContinualState(run, state.explainers, state.exact, state.key), metrics
 
 
@@ -588,31 +610,39 @@ def sample(replay: dqn.ReplayState, size: int, key: Array) -> dqn.TransitionBatc
 
 
 def log(runs: Sequence[backends.Logger], num_envs: int, metrics: ContinualMetrics) -> None:
-    """Each seed's step into its run: the agent's source scalars, and on logged and exact steps the
-    explanation models' losses (a host callback)."""
+    """A block of vector steps, (steps, seeds), into each seed's run (a host callback): the agent's
+    source scalars, and on logged and exact steps the explanation models' losses."""
     agent = metrics.agent
-    steps = np.asarray(agent.global_step)
-    completed = np.asarray(agent.completed)
-    for index, run in enumerate(runs):
-        step = int(steps[index])
+    steps, completed = np.asarray(agent.global_step), np.asarray(agent.completed)
+    returns, lengths, epsilons = (
+        np.asarray(agent.episode_return),
+        np.asarray(agent.episode_length),
+        np.asarray(agent.epsilon),
+    )
+    logged, exact_steps, losses = np.asarray(metrics.logged), np.asarray(metrics.exact_step), np.asarray(agent.loss)
+    models = {
+        name: np.asarray(getattr(metrics, name)) for name in ("characteristic_loss", "outcome_loss", "shapley_loss")
+    }
+    exact = {
+        name: np.asarray(getattr(metrics, name)) for name in ("characteristic_exact", "outcome_exact", "shapley_exact")
+    }
+    for index in np.ndindex(steps.shape):
         row: dict[str, float] = {}
         if completed[index].any():
-            row["agent/episodic_return"] = float(np.asarray(agent.episode_return)[index][completed[index]].mean())
-            row["agent/episodic_length"] = float(np.asarray(agent.episode_length)[index][completed[index]].mean())
-            row["agent/epsilon"] = float(np.asarray(agent.epsilon)[index])
-        if bool(np.asarray(metrics.logged)[index]):
-            row["agent/DQN_loss"] = float(np.asarray(agent.loss)[index])
-            for name in ("characteristic_loss", "outcome_loss", "shapley_loss"):
-                value = float(np.asarray(getattr(metrics, name))[index])
-                if not isnan(value):
-                    row[f"model/{name}"] = value
-        if bool(np.asarray(metrics.exact_step)[index]):
-            for name in ("characteristic_exact", "outcome_exact", "shapley_exact"):
-                value = float(np.asarray(getattr(metrics, name))[index])
-                if not isnan(value):
-                    row[f"model/{name}_loss"] = value
+            row["agent/episodic_return"] = float(returns[index][completed[index]].mean())
+            row["agent/episodic_length"] = float(lengths[index][completed[index]].mean())
+            row["agent/epsilon"] = float(epsilons[index])
+        if bool(logged[index]):
+            row["agent/DQN_loss"] = float(losses[index])
+            row |= {
+                f"model/{name}": float(values[index]) for name, values in models.items() if not isnan(values[index])
+            }
+        if bool(exact_steps[index]):
+            row |= {
+                f"model/{name}_loss": float(values[index]) for name, values in exact.items() if not isnan(values[index])
+            }
         if row:
-            run.log(row, step=step)
+            runs[index[1]].log(row, step=int(steps[index]))
     del num_envs
 
 

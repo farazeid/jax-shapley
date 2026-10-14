@@ -25,7 +25,7 @@ from jax_shapley.algorithms import dqn
 from jax_shapley.characteristic_models import behaviour as characteristic
 from jax_shapley.characteristic_models.behaviour import CharacteristicConfig
 from jax_shapley.common import checkpoints
-from jax_shapley.common.supervised_learning import EpochMetrics, SupervisedConfig, seed_slice, stack_seeds
+from jax_shapley.common.supervised_learning import EPOCH_BLOCK, EpochMetrics, SupervisedConfig, seed_slice, stack_seeds
 from jax_shapley.envs import Mastermind
 from jax_shapley.experiment import ExperimentConfig
 from jax_shapley.main import ExperimentResult, main, run
@@ -76,23 +76,19 @@ print(json.dumps({group: {name: run.rows for name, run in backends.runs(track, p
 
 
 def test_live_logs_equal_the_returned_metrics() -> None:
-    steps: list[dqn.StepMetrics] = []
+    """Live logs arrive one block at a time; together the blocks are exactly the returned metrics."""
+    blocks: list[dqn.StepMetrics] = []
     config = CONFIG.algorithm
-    program = nnx.jit(partial(dqn.train, config, partial(_record, steps), None))
-    state, metrics = program(jax.random.key(config.seeds[0]), jnp.asarray(0, jnp.int32))
+    program = nnx.jit(partial(dqn.train, config, blocks.append, None))
+    state, metrics = program(jnp.stack([jax.random.key(seed) for seed in config.seeds]))
     jax.effects_barrier()
-    expected = np.asarray(metrics.completed).any(axis=1) | (
-        np.asarray(metrics.updated) & (np.asarray(metrics.global_step) % dqn.LOG_STEPS < config.num_envs)
-    )
-    logged = [int(step.global_step) for step in steps]
-    assert logged == np.asarray(metrics.global_step)[expected].tolist()
-    for step in steps:
-        index = int(step.global_step) // config.num_envs
-        np.testing.assert_array_equal(np.asarray(step.episode_return), np.asarray(metrics.episode_return)[index])
-        np.testing.assert_array_equal(np.asarray(step.loss), np.asarray(metrics.loss)[index])
+    assert len(blocks) == -(-config.vector_steps // dqn.STEP_BLOCK)
+    for name in ("global_step", "loss", "updated", "episode_return", "completed"):
+        logged = np.concatenate([np.asarray(getattr(block, name)) for block in blocks])  # (steps, seeds)
+        np.testing.assert_array_equal(np.moveaxis(logged, 0, 1), np.asarray(getattr(metrics, name)))
     stage = CONFIG.characteristic
     keys = jnp.stack([jax.random.key(seed) for seed in stage.seeds])
-    agents = stack_seeds([dqn.trained_agent(config, state)] * len(stage.seeds))
+    agents = stack_seeds([dqn.trained_agent(config, seed_slice(state, 0))] * len(stage.seeds))
     keys, buffers = nnx.jit(partial(characteristic.collect, stage))(keys, agents, None)
     max_unique = max(int(np.unique(rows, axis=0).shape[0]) for rows in np.asarray(buffers.exact))
     epochs: list[EpochMetrics] = []
@@ -101,11 +97,10 @@ def test_live_logs_equal_the_returned_metrics() -> None:
     )(keys, agents, buffers)
     jax.effects_barrier()
     assert returned is not None
-    active = np.asarray(returned.active).any(axis=1)
-    assert len(epochs) == int(active.sum())
-    for index, epoch in enumerate(epochs):
-        for name in ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "active"):
-            np.testing.assert_array_equal(np.asarray(getattr(epoch, name)), np.asarray(getattr(returned, name))[index])
+    assert len(epochs) == -(-int(np.asarray(returned.epoch).max()) // EPOCH_BLOCK)
+    for name in ("epoch", "step", "train_loss", "validation_loss", "exact_loss", "active"):
+        logged = np.concatenate([np.asarray(getattr(block, name)) for block in epochs])[: stage.train.epochs]
+        np.testing.assert_array_equal(logged, np.asarray(getattr(returned, name)))
 
 
 def test_stage_checkpoints_restore_the_whole_state(tmp_path: Path, result: ExperimentResult) -> None:

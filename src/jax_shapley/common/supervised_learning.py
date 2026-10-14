@@ -27,6 +27,9 @@ from jax import Array
 from jax_shapley import backends
 from jax_shapley.common.networks import AdamConfig
 
+# Epochs per block: one stopping check and one live log each (host round trips on accelerators).
+EPOCH_BLOCK = 100
+
 type Partition = Literal["train", "validation", "exact"]
 type Loss[Model, Context, Frozen, Config] = Callable[[Model, Frozen, Context, Config, int, Array, Partition], Array]
 type Update[Model, Context, Frozen, Config] = Callable[
@@ -182,10 +185,14 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
     An epoch draws `batches` training batches with replacement, then a validation loss,
     an optional exact loss, and early stopping on validation. Finished seeds no-op while
     others continue. Returns every epoch's metrics, (epochs, seeds) along the leading axes.
-    `log` receives each epoch's metrics for every seed during the run (a host callback);
-    seeds that have stopped are marked inactive.
+
+    Epochs run in blocks of `EPOCH_BLOCK`: the stopping check and the live log happen once
+    per block, so a long run makes few host round trips. `log` receives each block's
+    metrics, (EPOCH_BLOCK, seeds), during the run (a host callback); epochs a seed did not
+    train (stopped, or past `epochs`) are marked inactive.
     """
-    shape = (config.epochs, state.epoch.shape[0])
+    blocks = -(-config.epochs // EPOCH_BLOCK)
+    shape = (blocks * EPOCH_BLOCK, state.epoch.shape[0])
     integers, floats = jnp.zeros(shape, jnp.int32), jnp.zeros(shape, jnp.float32)
     empty = EpochMetrics(integers, integers, floats, floats, floats, integers, jnp.zeros(shape, jnp.bool_))
 
@@ -275,7 +282,7 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
     # nodes at their own trace level.
     type Carry = tuple[TrainState[Model], Context, Frozen, EpochMetrics, Array]
 
-    def body(
+    def block(
         loss: Loss[Model, Context, Frozen, Config],
         update: Update[Model, Context, Frozen, Config] | None,
         config: Config,
@@ -283,17 +290,19 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
         log: Callable[[EpochMetrics], None] | None,
         carry: Carry,
     ) -> Carry:
+        """`EPOCH_BLOCK` epochs of every seed, then one live log of them all."""
         state, contexts, frozen, metrics, index = carry
-        every_seed = nnx.vmap(
-            partial(seed_epoch, loss, update, config, features),
-            in_axes=(0, 0, None if frozen is None else 0),
-            out_axes=(0, 0),
-        )
-        state, epoch_metrics = every_seed(state, contexts, frozen)
+        (state, contexts, frozen), block_metrics = nnx.scan(
+            partial(every_seed, partial(seed_epoch, loss, update, config, features)),
+            in_axes=(nnx.Carry, 0),
+            out_axes=(nnx.Carry, 0),
+        )((state, contexts, frozen), jnp.arange(EPOCH_BLOCK))
         if log is not None:
-            jax.debug.callback(log, epoch_metrics, ordered=True)
-        rows = zip(jax.tree.leaves(metrics), jax.tree.leaves(epoch_metrics), strict=True)
-        recorded = EpochMetrics(*[history.at[index].set(row) for history, row in rows])
+            jax.debug.callback(log, block_metrics, ordered=True)
+        rows = zip(jax.tree.leaves(metrics), jax.tree.leaves(block_metrics), strict=True)
+        recorded = EpochMetrics(*[
+            jax.lax.dynamic_update_slice_in_dim(history, row, index * EPOCH_BLOCK, axis=0) for history, row in rows
+        ])
         return state, contexts, frozen, recorded, index + 1
 
     def running(config: Config, carry: Carry) -> Array:
@@ -301,7 +310,7 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
 
     initial: Carry = (state, contexts, frozen, empty, jnp.asarray(0, jnp.int32))
     looped = cast(
-        Carry, nnx.while_loop(partial(running, config), partial(body, loss, update, config, features, log), initial)
+        Carry, nnx.while_loop(partial(running, config), partial(block, loss, update, config, features, log), initial)
     )
     trained, _, _, metrics, _ = looped
 
@@ -309,7 +318,21 @@ def train[Model: nnx.Module, Context, Frozen, Config: Schedule](
         nnx.update(state.model, nnx.state(state.best, nnx.Param))
         return state
 
-    return nnx.vmap(restore_best, in_axes=0, out_axes=0)(trained), metrics
+    trimmed = EpochMetrics(*[history[: config.epochs] for history in jax.tree.leaves(metrics)])
+    return nnx.vmap(restore_best, in_axes=0, out_axes=0)(trained), trimmed
+
+
+def every_seed[Model: nnx.Module, Context, Frozen](
+    seed_epoch: Callable[[TrainState[Model], Context, Frozen], tuple[TrainState[Model], EpochMetrics]],
+    inner: tuple[TrainState[Model], Context, Frozen],
+    step: Array,
+) -> tuple[tuple[TrainState[Model], Context, Frozen], EpochMetrics]:
+    """One epoch of every seed (a scan body of `train`'s epoch blocks); the frozen models are shared or per seed."""
+    del step
+    state, contexts, frozen = inner
+    seeds = nnx.vmap(seed_epoch, in_axes=(0, 0, None if frozen is None else 0), out_axes=(0, 0))
+    state, epoch_metrics = seeds(state, contexts, frozen)
+    return (state, contexts, frozen), epoch_metrics
 
 
 def gradient_step[Model: nnx.Module, Context, Frozen, Config](
@@ -334,20 +357,18 @@ def gradient_step[Model: nnx.Module, Context, Frozen, Config](
 
 def log_epochs(runs: Sequence[backends.Logger], model: str, exact_loss: bool, metrics: EpochMetrics) -> None:
     """The source's train_models scalars, `model/{model}_{epoch,val,exact}_loss`, into each seed's run
-    (a host callback for `train`'s `log`; stopped seeds log nothing)."""
+    (a host callback for a block of epochs, (epochs, seeds); epochs a seed did not train log nothing)."""
     active, steps = np.asarray(metrics.active), np.asarray(metrics.step)
     train_loss, validation = np.asarray(metrics.train_loss), np.asarray(metrics.validation_loss)
     exact = np.asarray(metrics.exact_loss)
-    for index, run in enumerate(runs):
-        if not active[index]:
-            continue
+    for row_index, seed_index in zip(*np.nonzero(active), strict=True):
         row = {
-            f"model/{model}_epoch_loss": float(train_loss[index]),
-            f"model/{model}_val_loss": float(validation[index]),
+            f"model/{model}_epoch_loss": float(train_loss[row_index, seed_index]),
+            f"model/{model}_val_loss": float(validation[row_index, seed_index]),
         }
         if exact_loss:
-            row[f"model/{model}_exact_loss"] = float(exact[index])
-        run.log(row, step=int(steps[index]))
+            row[f"model/{model}_exact_loss"] = float(exact[row_index, seed_index])
+        runs[seed_index].log(row, step=int(steps[row_index, seed_index]))
 
 
 def stack_seeds[Tree](items: list[Tree]) -> Tree:
