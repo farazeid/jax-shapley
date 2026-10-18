@@ -100,7 +100,7 @@ Quantities that miss:
 | Figs 3c, 11 | sampled against learnt characteristics | Mastermind-222 behaviour and prediction rerun; its outcome panel, Gridworld and Mastermind-333 not rerun | 18 of 18 match |
 | Tables 1–4, Fig 6 and appendix figures | large Mastermind (443, 453, 463) | not rerun | — |
 
-JAX reruns are solid lines with standard-error bands, over the published curves, dashed. Rows scroll sideways.
+Every figure uses one visual language: JAX solid with filled markers, FastSVERL (published) dashed with open markers; one colour per concept across figures (for example blue for the exact characteristic or exact behaviour, orange for the approximate one, black for on-policy); circles for on-policy and triangles for off-policy data; shaded bands are 95% t intervals of the mean. Published bands are upstream's ±1 standard error, widened by t₁₉ for its 20 runs. The outcome figures keep upstream's labels: *approx behaviour* runs are scored against the outcome under the exact behaviour characteristic, so their error includes the behaviour model's; *exact behaviour* runs are scored under the learnt behaviour, isolating the outcome model's error. Rows scroll sideways.
 
 ### Figures 1 and 4: Gridworld, Mastermind-222 and Mastermind-333 explanations
 
