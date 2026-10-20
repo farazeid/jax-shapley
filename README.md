@@ -98,17 +98,15 @@ The experiments marked run were run with this package and compared against targe
 
 16 of the paper's 26 claims hold. Of the other 10, 7 need experiments run and 3 fail as described below. Figures of experiments not run show the published results only.
 
-Quantities that miss:
+Claims that miss:
 
-- **Gridworld outcome (4):** the off-policy outcome characteristic ends 1.8–8x above the published loss, and the outcome Shapley values with the approximate behaviour characteristic 2.5–2.7x below. The claim that conditioning on the exact behaviour characteristic helps outcome estimates (Figure 1) fails narrowly.
-- **Gridworld Shapley, final value (2):** with the approximate characteristic 3.3x below the published value, whose standard error excludes agent variance (every published run explains one characteristic of one agent); prediction with the exact characteristic at 1.3e-8 against 1.6e-6, both converged.
-- **Mastermind-333 prediction characteristic at 25% of training (1):** a factor of 2.4; its final value matches.
-- **Hypercube 2x4 behaviour Shapley (1):** 376 updates against 232, a factor of 1.6.
-- **Claims:** unnormalised importance sampling is not worse than no reweighting in JAX (Figure 8, behaviour and prediction), every value within tolerance.
+- **Figure 1, Mastermind-222.** The paper claims that an outcome characteristic, trained on-policy, ends with lower error (exact loss, lower is better) when the behaviour characteristic it builds on is exact rather than a learnt approximation (the figure's "exact behaviour" and "approx behaviour" lines). In JAX the two end almost level and in the opposite order: 0.0114 with the exact behaviour characteristic against 0.0105 with the approximate one.
+- **Figure 8, Gridworld behaviour.** The paper claims that learning a behaviour characteristic from off-policy data with unnormalised importance weights ends with higher error than not reweighting the data at all. In JAX unnormalised weights end slightly lower: 0.0127 against 0.0145.
+- **Figure 8, Gridworld prediction.** The same claim for a prediction characteristic. In JAX unnormalised weights again end slightly lower: 0.968 against 0.989.
 
 | Paper | Experiment | Status | Comparison |
 | --- | --- | --- | --- |
-| Figures 1, 4 | Learn characteristic and Shapley models of the behaviour, prediction and outcome on Gridworld and Mastermind-222, with exact and approximate characteristics | Run | 62 of 68 quantities match; misses below |
+| Figures 1, 4 | Learn characteristic and Shapley models of the behaviour, prediction and outcome on Gridworld and Mastermind-222, with exact and approximate characteristics | Run | 62 of 68 quantities match |
 | Figure 4 | The same behaviour and prediction explanations on the larger Mastermind-333 | Run | 11 of 12 match |
 | Figures 2, 5 | How many updates characteristic and Shapley models need to reach a target loss, as Hypercube size and dimension grow the number of states | 31 of 40 cube x kind combinations Run | 61 of 62 bars match |
 | Figures 3a, 7–9 | Learn characteristics from off-policy replay data, with and without importance weighting, normalised or not, and with clipping | Run | 58 of 58 match |
