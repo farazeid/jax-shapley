@@ -106,15 +106,15 @@ Quantities that miss:
 - **Hypercube 2x4 behaviour Shapley (1):** 376 updates against 232, a factor of 1.6.
 - **Claims:** unnormalised importance sampling is not worse than no reweighting in JAX (Figure 8, behaviour and prediction), every value within tolerance.
 
-| Paper | What | Status | Comparison |
+| Paper | Experiment | Status | Comparison |
 | --- | --- | --- | --- |
-| Figures 1, 4 | Gridworld and Mastermind-222 behaviour, prediction and outcome explanations | Run | 62 of 68 quantities match; misses below |
-| Figure 4 | Mastermind-333 behaviour and prediction explanations | Run | 11 of 12 match |
-| Figures 2, 5 | Hypercube: updates to reach the target loss, by number of states | 31 of 40 cube x kind combinations Run | 61 of 62 bars match |
-| Figures 3a, 7–9 | off-policy characteristics: importance weighting and clipping | Run | 58 of 58 match |
-| Figures 3b, 10 | continual learning at update ratios 1, 2, 10 and 50 | Run | 64 of 64 match |
-| Figures 3c, 11 | sampled against learnt characteristics | Mastermind-222 behaviour and prediction run; its outcome panel, Gridworld and Mastermind-333 not run | 18 of 18 match |
-| Tables 1–4, Figure 6 and appendix figures | large Mastermind (443, 453, 463) | Not run | — |
+| Figures 1, 4 | Learn characteristic and Shapley models of the behaviour, prediction and outcome on Gridworld and Mastermind-222, with exact and approximate characteristics | Run | 62 of 68 quantities match; misses below |
+| Figure 4 | The same behaviour and prediction explanations on the larger Mastermind-333 | Run | 11 of 12 match |
+| Figures 2, 5 | How many updates characteristic and Shapley models need to reach a target loss, as Hypercube size and dimension grow the number of states | 31 of 40 cube x kind combinations Run | 61 of 62 bars match |
+| Figures 3a, 7–9 | Learn characteristics from off-policy replay data, with and without importance weighting, normalised or not, and with clipping | Run | 58 of 58 match |
+| Figures 3b, 10 | Train explanation models alongside the learning agent, at 1, 2, 10 and 50 explanation updates per agent update | Run | 64 of 64 match |
+| Figures 3c, 11 | Replace the learnt characteristic with one estimated by sampling, for Shapley models and for outcome characteristics | Mastermind-222 behaviour and prediction run; its outcome panel, Gridworld and Mastermind-333 not run | 18 of 18 match |
+| Tables 1–4, Figure 6 and appendix figures | Scale behaviour, prediction and outcome explanations to large Mastermind boards (443, 453, 463) | Not run | — |
 
 Every figure below uses one visual language: JAX solid with filled markers, FastSVERL (published) dashed with open markers; one colour per concept across figures (for example blue for the exact characteristic or exact behaviour, orange for the approximate one, black for on-policy); circles for on-policy and triangles for off-policy data; shaded bands are 95% t intervals of the mean. Published bands are FastSVERL's +/-1 standard error, widened by t for its 20 runs. The outcome figures keep upstream's labels: *approx behaviour* runs are scored against the outcome under the exact behaviour characteristic, so their error includes the behaviour model's; *exact behaviour* runs are scored under the learnt behaviour, isolating the outcome model's error.
 
