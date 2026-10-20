@@ -75,20 +75,20 @@ The raw parity results (`envs-port--parity--{cpu,gpu}.csv`), the statistical com
 
 | Area | Upstream | Port | Effect |
 | --- | --- | --- | --- |
-| Random streams | torch and NumPy global generators | explicit JAX keys, split per run and per seed | Runs are not seed-for-seed identical; fixture tests replay recorded draws, and the end-to-end comparison is statistical |
-| Precision | float64 value iteration; float32 networks | float32 throughout | Exact values agree within 1e-5 relative / 1e-4 absolute |
+| Random streams | torch and NumPy global generators | explicit JAX keys, split per run and per seed | Effect, runs are not seed-for-seed identical; fixture tests replay recorded draws, and the end-to-end comparison is statistical |
+| Precision | float64 value iteration; float32 networks | float32 throughout | Effect, negligible: exact values agree within 1e-5 relative / 1e-4 absolute |
 | Exact policy evaluation | value iteration to a 1e-10 change | direct linear solve of `(I − γ C_π) V = R_π` | No effect, same fixed point |
-| Non-terminating conditioned policy (γ = 1) | value iteration never terminates (the run hangs) | the run stops with an error naming the number of non-finite exact values, before any training | Only reachable with a policy that can loop forever, such as a weak greedy Gridworld agent; neither gives a result. The paper does not discuss it |
+| Non-terminating conditioned policy (γ = 1) | value iteration never terminates (the run hangs) | the run stops with an error naming the number of non-finite exact values, before any training | No effect on results, neither gives one: the run fails fast instead of hanging. Only reachable with a policy that can loop forever, such as a weak greedy Gridworld agent; the paper does not discuss it |
 | Exact outcome states | `torch.unique` of the exact buffer | transition-model states, marked valid when present in the exact buffer | No effect, same set of valid states |
-| Null value `v(s, ∅)` | network on an all-masked batch | network on one all-masked row, broadcast | Identical values; avoids an XLA CPU miscompilation of broadcast-constant batches |
-| Off-policy target after early stopping | best model restored; the target keeps its last weights | the target saved with the best model is restored too | The target is not used after training |
-| Outcome optimiser | Adam over the model only | one Adam over model and target | The target's gradients are exactly zero, so Adam leaves it unchanged |
-| On-policy terminal transitions | stores the reset observation as `n_obs` | stores the pre-reset observation | Masked by `(1 − terminated)`; equivalent |
-| Truncated transitions | `final_observation` | Gymnax pre-reset observation | Same observation |
-| Processes | one process per seed | every stage trains all its seeds in one compiled program | Each seed uses the keys of a single run with that seed |
-| Checkpoints | model saves every tenth of the run | each stage's final state as one checkpoint artifact; stage-level resume | No numerical effect |
-| Continual exact-buffer refresh | filled after acting, before the agent's update | filled before the step's DQN update | Same pre-update policy and epsilon |
-| Sampled characteristic with no matching pool row | every score ties; `torch.topk`'s tie order picks a row of the freshly permuted pool | the pool row with the top uniform score | Both are one uniform pool row; matched rows select identically |
+| Null value `v(s, ∅)` | network on an all-masked batch | network on one all-masked row, broadcast | No effect, identical values; avoids an XLA CPU miscompilation of broadcast-constant batches |
+| Off-policy target after early stopping | best model restored; the target keeps its last weights | the target saved with the best model is restored too | No effect, the target is not used after training |
+| Outcome optimiser | Adam over the model only | one Adam over model and target | No effect, the target's gradients are exactly zero, so Adam leaves it unchanged |
+| On-policy terminal transitions | stores the reset observation as `n_obs` | stores the pre-reset observation | No effect, masked by `(1 − terminated)` |
+| Truncated transitions | `final_observation` | Gymnax pre-reset observation | No effect, same observation |
+| Processes | one process per seed | every stage trains all its seeds in one compiled program | No effect, each seed uses the keys of a single run with that seed |
+| Checkpoints | model saves every tenth of the run | each stage's final state as one checkpoint artifact; stage-level resume | No effect on results |
+| Continual exact-buffer refresh | filled after acting, before the agent's update | filled before the step's DQN update | No effect, same pre-update policy and epsilon |
+| Sampled characteristic with no matching pool row | every score ties; `torch.topk`'s tie order picks a row of the freshly permuted pool | the pool row with the top uniform score | No effect in distribution, both pick one uniform pool row; matched rows select identically |
 
 </details>
 
