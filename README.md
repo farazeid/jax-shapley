@@ -6,6 +6,11 @@ The environments, DQN agents, and behaviour, prediction and outcome explanations
 
 Reference was FastSVERL commit `25b2cbe66b0d4a0decc3b63dbc798a79bf2c7d5b`.
 
+## Sections
+
+1. [Comparison](#comparison)
+2. [Run the Code](#run-the-code)
+
 <br>
 <br>
 <br>
@@ -243,7 +248,7 @@ Every figure below uses one visual language: JAX solid with filled markers, Fast
 <br>
 <br>
 
-# Running Codebase
+# Run the Code
 
 ## Install
 
