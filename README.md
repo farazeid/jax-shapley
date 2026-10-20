@@ -69,7 +69,7 @@ Why it is faster: environment steps, rollouts, training epochs and evaluation ar
 
 ## Parity
 
-All 143,136 state transitions (next observations, state, rewards, termination and truncation) match identically between the original Gymnasium and  ported JAX environment.
+All 143,136 state transitions (next observations, state, rewards, termination and truncation) match identically between the original Gymnasium and ported JAX environment.
 
 The raw parity results (`envs-port--parity--{cpu,gpu}.csv`), the statistical comparison's runs and pre-registered margins (`explanations-port--{jax,upstream}-runs.csv`, `explanations-port--margins.csv`, `explanations-port--summary.csv`) and the paper comparison (`paper--comparison.csv`, `paper--claims-results.csv`, criteria in `paper--criteria.md`) are in `docs/data/`.
 
@@ -113,7 +113,7 @@ Claims that miss:
 | --- | --- | --- | --- |
 | Figures 1, 4 | Learn characteristic and Shapley models of the behaviour, prediction and outcome on Gridworld and Mastermind-222, with exact and approximate characteristics | Run | 62 of 68 quantities match |
 | Figure 4 | The same behaviour and prediction explanations on the larger Mastermind-333 | Run | 11 of 12 match |
-| Figures 2, 5 | How many updates characteristic and Shapley models need to reach a target loss, as Hypercube size and dimension grow the number of states | 31 of 40 cube x kind combinations Run | 61 of 62 bars match |
+| Figures 2, 5 | How many updates characteristic and Shapley models need to reach a target loss, as Hypercube size and dimension grow the number of states | 31 of 40 cube x kind combinations run | 61 of 62 bars match |
 | Figures 3a, 7–9 | Learn characteristics from off-policy replay data, with and without importance weighting, normalised or not, and with clipping | Run | 58 of 58 match |
 | Figures 3b, 10 | Train explanation models alongside the learning agent, at 1, 2, 10 and 50 explanation updates per agent update | Run | 64 of 64 match |
 | Figures 3c, 11 | Replace the learnt characteristic with one estimated by sampling, for Shapley models and for outcome characteristics | Mastermind-222 behaviour and prediction run; its outcome panel, Gridworld and Mastermind-333 not run | 18 of 18 match |
