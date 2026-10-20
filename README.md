@@ -54,7 +54,7 @@ Each stage of the FastSVERL's Gridworld, Mastermind-222, and Hypercube experimen
 
 ### End-to-end Experiments
 
-Every stage of one experiment, 20 seeds each, wall-clock including compilation; speedups against PyTorch on the same Apple M4 Pro CPU. JAX runs also log every metric with trackio and save each stage's checkpoint, which the PyTorch runs did not. The TPU uses JAX's default float32 matrix-multiply precision. Single runs: the same code varies by up to about 15% between repeats on the M4 Pro.
+Every stage of one experiment, 20 seeds each, wall-clock including compilation; speedups against PyTorch on the same Apple M4 Pro CPU. JAX runs also save each stage's checkpoint, which the PyTorch runs did not; both log every metric locally (trackio and TensorBoard). The TPU uses JAX's default float32 matrix-multiply precision. Single runs: the same code varies by up to about 15% between repeats on the M4 Pro.
 
 These networks are small, so the T4 and TPU v5e-1 add kernel-launch and host-callback overhead on Colab's weaker host CPUs, and the M4 Pro CPU is fastest; the accelerators pay off in environment throughput (above).
 
